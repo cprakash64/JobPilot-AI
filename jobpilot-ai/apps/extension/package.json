@@ -1,0 +1,19 @@
+{
+  "name": "@jobpilot/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "JobPilot AI assisted auto-apply Chrome extension (MV3). User-controlled copilot — never submits.",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "esbuild": "^0.23.1",
+    "jsdom": "24.1.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

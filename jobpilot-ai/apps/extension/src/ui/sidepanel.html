@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JobPilot Assisted Apply</title>
+    <style>
+      :root { --pine: #1f5e45; --line: #d8ddd2; --ink: #17211b; --panel: #f6f7f2; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 13px/1.5 -apple-system, system-ui, sans-serif; color: var(--ink); }
+      header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+      h1 { font-size: 15px; margin: 0; }
+      .muted { color: #5d675f; }
+      main { padding: 14px 16px; display: grid; gap: 14px; }
+      .row { display: flex; justify-content: space-between; gap: 8px; }
+      .badge { display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; }
+      .stat { text-align: center; border: 1px solid var(--line); border-radius: 10px; padding: 8px; }
+      .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .stat b { display: block; font-size: 18px; }
+      button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: #fff; padding: 8px 10px; }
+      button.primary { background: var(--pine); color: #fff; border-color: var(--pine); }
+      .actions { display: grid; gap: 8px; }
+      .warn { background: #fff9e8; border: 1px solid #ead191; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+      .note { background: var(--panel); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+      ul { margin: 6px 0 0; padding-left: 18px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>JobPilot — Assisted Apply</h1>
+      <p class="muted" id="job">Detecting application…</p>
+    </header>
+    <main>
+      <div class="row">
+        <span class="muted">ATS</span>
+        <span class="badge" id="ats">—</span>
+      </div>
+      <div id="limited" class="warn" hidden>Limited support for this ATS. Standard fields only — complete the rest manually.</div>
+
+      <div class="stats">
+        <div class="stat"><b id="filled">0</b><span class="muted">Filled</span></div>
+        <div class="stat"><b id="skipped">0</b><span class="muted">Skipped</span></div>
+        <div class="stat"><b id="review">0</b><span class="muted">Review</span></div>
+      </div>
+
+      <div class="row"><span class="muted">Resume</span><span id="resume">—</span></div>
+      <div class="row"><span class="muted">Cover letter</span><span id="cover">—</span></div>
+
+      <div id="errors" hidden class="warn"></div>
+      <div id="final" hidden class="warn">You’ve reached the employer’s submit step. Review everything, then submit yourself — JobPilot never submits for you.</div>
+
+      <div class="actions">
+        <button class="primary" id="fill">Fill application</button>
+        <button id="rescan">Continue filling</button>
+        <button id="next">Jump to next issue</button>
+        <button id="clear">Clear JobPilot-filled fields</button>
+        <button id="complete">Mark application complete</button>
+      </div>
+
+      <p class="note">Your application is ready for review. Verify the information, then submit directly on the employer’s website.</p>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,2150 @@
+{
+  "_comment": "Verified public ATS boards. Each entry was confirmed with a live HTTP request returning real jobs and official application URLs. Regenerate/verify with `python -m app.jobs.verify_sources`.",
+  "greenhouse": [
+    {
+      "company": "Abnormal Security",
+      "board_token": "abnormalsecurity",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Affirm",
+      "board_token": "affirm",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Airbnb",
+      "board_token": "airbnb",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Airtable",
+      "board_token": "airtable",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Amplitude",
+      "board_token": "amplitude",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Anthropic",
+      "board_token": "anthropic",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Asana",
+      "board_token": "asana",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "AssemblyAI",
+      "board_token": "assemblyai",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Betterment",
+      "board_token": "betterment",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Blend",
+      "board_token": "blend",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Braze",
+      "board_token": "braze",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Brex",
+      "board_token": "brex",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Builder",
+      "board_token": "builder",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Calendly",
+      "board_token": "calendly",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Carta",
+      "board_token": "carta",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Chainguard",
+      "board_token": "chainguard",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Checkr",
+      "board_token": "checkr",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Chime",
+      "board_token": "chime",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "CircleCI",
+      "board_token": "circleci",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "ClickHouse",
+      "board_token": "clickhouse",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Cloudflare",
+      "board_token": "cloudflare",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "CockroachDB",
+      "board_token": "cockroachlabs",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Coinbase",
+      "board_token": "coinbase",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Contentful",
+      "board_token": "contentful",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Coursera",
+      "board_token": "coursera",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Customer.io",
+      "board_token": "customerio",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Cybereason",
+      "board_token": "cybereason",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Databricks",
+      "board_token": "databricks",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Datadog",
+      "board_token": "datadog",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Descript",
+      "board_token": "descript",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Discord",
+      "board_token": "discord",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Dremio",
+      "board_token": "dremio",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Dropbox",
+      "board_token": "dropbox",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Duolingo",
+      "board_token": "duolingo",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Elastic",
+      "board_token": "elastic",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Faire",
+      "board_token": "faire",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Fastly",
+      "board_token": "fastly",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Figma",
+      "board_token": "figma",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Fivetran",
+      "board_token": "fivetran",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Flexport",
+      "board_token": "flexport",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "GitLab",
+      "board_token": "gitlab",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Greenhouse",
+      "board_token": "greenhouse",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Gusto",
+      "board_token": "gusto",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Highnote",
+      "board_token": "highnote",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Hightouch",
+      "board_token": "hightouch",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Huntress",
+      "board_token": "huntress",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Imply",
+      "board_token": "imply",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Instacart",
+      "board_token": "instacart",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Iterable",
+      "board_token": "iterable",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Khan Academy",
+      "board_token": "khanacademy",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "LaunchDarkly",
+      "board_token": "launchdarkly",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Lithic",
+      "board_token": "lithic",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Lyft",
+      "board_token": "lyft",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Make",
+      "board_token": "make",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Marqeta",
+      "board_token": "marqeta",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Mercari",
+      "board_token": "mercari",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Mercury",
+      "board_token": "mercury",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Mixpanel",
+      "board_token": "mixpanel",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Mongodb",
+      "board_token": "mongodb",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Monzo",
+      "board_token": "monzo",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Netlify",
+      "board_token": "netlify",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Nuro",
+      "board_token": "nuro",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "OfferUp",
+      "board_token": "offerup",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Okta",
+      "board_token": "okta",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Orca",
+      "board_token": "orca",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Otter",
+      "board_token": "otter",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "PandaDoc",
+      "board_token": "pandadoc",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Pinterest",
+      "board_token": "pinterest",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "PlanetScale",
+      "board_token": "planetscale",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Postman",
+      "board_token": "postman",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Reddit",
+      "board_token": "reddit",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Remote",
+      "board_token": "remote",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Robinhood",
+      "board_token": "robinhood",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Samsara",
+      "board_token": "samsara",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "SoFi",
+      "board_token": "sofi",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Squarespace",
+      "board_token": "squarespace",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Starburst",
+      "board_token": "starburst",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "StockX",
+      "board_token": "stockx",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Storyblok",
+      "board_token": "storyblok",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Stripe",
+      "board_token": "stripe",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Tailscale",
+      "board_token": "tailscale",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "TaskRabbit",
+      "board_token": "taskrabbit",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Together AI",
+      "board_token": "togetherai",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Twilio",
+      "board_token": "twilio",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Twitch",
+      "board_token": "twitch",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Typeface",
+      "board_token": "typeface",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Udemy",
+      "board_token": "udemy",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Upstart",
+      "board_token": "upstart",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Vercel",
+      "board_token": "vercel",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Verkada",
+      "board_token": "verkada",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Waymo",
+      "board_token": "waymo",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Webflow",
+      "board_token": "webflow",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Workato",
+      "board_token": "workato",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    }
+  ],
+  "lever": [
+    {
+      "company": "AngelList",
+      "site": "angellist",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Anyscale",
+      "site": "anyscale",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "JumpCloud",
+      "site": "jumpcloud",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Mistral",
+      "site": "mistral",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Neon",
+      "site": "neon",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Outreach",
+      "site": "outreach",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Secureframe",
+      "site": "secureframe",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Sysdig",
+      "site": "sysdig",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Wealthfront",
+      "site": "wealthfront",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Zoox",
+      "site": "zoox",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    }
+  ],
+  "ashby": [
+    {
+      "company": "Airbyte",
+      "board": "airbyte",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "AirOps",
+      "board": "airops",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Angi",
+      "board": "angi",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Benchling",
+      "board": "benchling",
+      "tags": [
+        "healthtech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Cerebras",
+      "board": "cerebras",
+      "tags": [
+        "ai",
+        "healthtech",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "ClickUp",
+      "board": "clickup",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Cohere",
+      "board": "cohere",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Column",
+      "board": "column",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Confluent",
+      "board": "confluent",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Deepgram",
+      "board": "deepgram",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Drata",
+      "board": "drata",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "ElevenLabs",
+      "board": "elevenlabs",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Handshake",
+      "board": "handshake",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Kong",
+      "board": "kong",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Lambda",
+      "board": "lambda",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Langchain",
+      "board": "langchain",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Linear",
+      "board": "linear",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "LlamaIndex",
+      "board": "llamaindex",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Miro",
+      "board": "miro",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Modal",
+      "board": "modal",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Modern Treasury",
+      "board": "moderntreasury",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "n8n",
+      "board": "n8n",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "NerdWallet",
+      "board": "nerdwallet",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Notion",
+      "board": "notion",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Oyster",
+      "board": "oyster",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Pinecone",
+      "board": "pinecone",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Plaid",
+      "board": "plaid",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Poshmark",
+      "board": "poshmark",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Railway",
+      "board": "railway",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Ramp",
+      "board": "ramp",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Render",
+      "board": "render",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Runway",
+      "board": "runway",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Sanity",
+      "board": "sanity",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Semgrep",
+      "board": "semgrep",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Sentry",
+      "board": "sentry",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Supabase",
+      "board": "supabase",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Synthesia",
+      "board": "synthesia",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Temporal",
+      "board": "temporal",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Thumbtack",
+      "board": "thumbtack",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Unit",
+      "board": "unit",
+      "tags": [
+        "fintech",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Vanta",
+      "board": "vanta",
+      "tags": [
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Weaviate",
+      "board": "weaviate",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Writer",
+      "board": "writer",
+      "tags": [
+        "ai",
+        "ml",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 10,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    },
+    {
+      "company": "Zapier",
+      "board": "zapier",
+      "tags": [
+        "devtools",
+        "new_grad_possible",
+        "remote",
+        "software",
+        "startup",
+        "us"
+      ],
+      "priority": 8,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    }
+  ],
+  "smartrecruiters": [
+    {
+      "company": "Visa",
+      "company_id": "Visa",
+      "tags": [
+        "software",
+        "fintech",
+        "us"
+      ],
+      "priority": 6,
+      "verified_at": "2026-07-09",
+      "enabled": true
+    }
+  ],
+  "recruitee": [],
+  "workable": [],
+  "teamtailor": [],
+  "breezy": []
+}

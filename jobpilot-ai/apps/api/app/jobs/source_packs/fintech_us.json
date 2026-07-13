@@ -1,0 +1,114 @@
+{
+  "name": "fintech_us",
+  "tags": [
+    "fintech"
+  ],
+  "count": 21,
+  "sources": [
+    {
+      "provider": "greenhouse",
+      "slug": "affirm",
+      "company": "Affirm"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "betterment",
+      "company": "Betterment"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "brex",
+      "company": "Brex"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "carta",
+      "company": "Carta"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "chime",
+      "company": "Chime"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "coinbase",
+      "company": "Coinbase"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "highnote",
+      "company": "Highnote"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "lithic",
+      "company": "Lithic"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "marqeta",
+      "company": "Marqeta"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "mercury",
+      "company": "Mercury"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "robinhood",
+      "company": "Robinhood"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "sofi",
+      "company": "SoFi"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "upstart",
+      "company": "Upstart"
+    },
+    {
+      "provider": "lever",
+      "slug": "wealthfront",
+      "company": "Wealthfront"
+    },
+    {
+      "provider": "ashby",
+      "slug": "column",
+      "company": "Column"
+    },
+    {
+      "provider": "ashby",
+      "slug": "moderntreasury",
+      "company": "Modern Treasury"
+    },
+    {
+      "provider": "ashby",
+      "slug": "nerdwallet",
+      "company": "NerdWallet"
+    },
+    {
+      "provider": "ashby",
+      "slug": "plaid",
+      "company": "Plaid"
+    },
+    {
+      "provider": "ashby",
+      "slug": "ramp",
+      "company": "Ramp"
+    },
+    {
+      "provider": "ashby",
+      "slug": "unit",
+      "company": "Unit"
+    },
+    {
+      "provider": "smartrecruiters",
+      "slug": "Visa",
+      "company": "Visa"
+    }
+  ]
+}

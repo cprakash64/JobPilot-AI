@@ -1,0 +1,9 @@
+# Software/AI companies (US) — one ATS slug per line
+stripe
+databricks
+figma
+notion
+anthropic
+openai
+scale
+rippling

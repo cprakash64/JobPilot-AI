@@ -1,0 +1,4 @@
+stripe
+databricks
+robinhood
+coinbase

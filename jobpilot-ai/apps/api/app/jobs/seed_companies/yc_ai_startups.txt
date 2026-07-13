@@ -1,0 +1,4 @@
+langchain
+llamaindex
+weaviate
+pinecone

@@ -1,0 +1,6 @@
+linear
+vercel
+supabase
+railway
+modal
+vanta

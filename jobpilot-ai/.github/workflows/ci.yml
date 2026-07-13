@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend
+        working-directory: apps/api
+        run: pip install -r requirements.txt
+      - name: Lint backend
+        working-directory: apps/api
+        run: ruff check app
+      - name: Test backend
+        working-directory: apps/api
+        run: pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install frontend
+        working-directory: apps/web
+        run: npm install
+      - name: Typecheck frontend
+        working-directory: apps/web
+        run: npm run typecheck
+      - name: Lint frontend
+        working-directory: apps/web
+        run: npm run lint
+      - name: Test frontend
+        working-directory: apps/web
+        run: npm test
+      - name: Build frontend
+        working-directory: apps/web
+        run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: docker compose build
+      - name: Check committed secrets
+        run: |
+          ! grep -R "sk-" . --exclude-dir=.git --exclude-dir=node_modules

@@ -1,0 +1,46 @@
+CHANDRA PRAKASH PANDEY
+Machine Learning Engineer | Production Inference | NLP/Search | Computer Vision & Video AI
+Phoenix, AZ
+cprakash.work@gmail.com | 602-816-1309 | https://www.linkedin.com/in/chandra-prakash-pandey | https://cpandey.com
+
+PROFESSIONAL SUMMARY
+Machine Learning Engineer with experience shipping production inference systems across NLP, search, and computer vision. I build reliable, low-latency ML services and lead small teams from prototype to deployment.
+
+CORE SKILLS
+Machine Learning: PyTorch, TensorFlow, scikit-learn, XGBoost
+NLP & Search: Transformers, RAG, Elasticsearch, LangChain
+Computer Vision: OpenCV, YOLO, Video AI, Diffusion Models
+MLOps & Infra: Docker, Kubernetes, AWS, Triton Inference Server
+Languages: Python, C++, SQL, TypeScript
+
+PROFESSIONAL EXPERIENCE
+Founder & Technical Lead / Machine Learning Engineer | VeoTrex - Phoenix, AZ | Apr 2026 - Present
+- Built a production video-analysis pipeline serving real-time inference at scale.
+- Led a small engineering team from prototype to deployed product.
+- Reduced inference latency by 43% using Triton and TensorRT optimizations.
+Machine Learning Engineer, Contract | Cardinal Health - AZ | Oct 2025 - Mar 2026
+- Deployed NLP models for clinical document classification into production.
+- Built a RAG search system over millions of internal documents.
+AI/ML Engineer Intern | Platinum Venture Labs – New York - Remote | May 2025 - Sep 2025
+- Prototyped computer-vision models for retail analytics.
+- Shipped an internal annotation tool used by the data team.
+
+SELECTED AI PROJECTS
+LunaiCAD / SourceCAD AI Part Studio
+AI copilot for parametric CAD modeling
+- Built a text-to-CAD generation system using diffusion and program synthesis.
+- Designed the inference API and part-preview renderer.
+Luna AI - Video Analysis Platform
+- Created a multimodal video understanding platform with scene detection.
+- Implemented a semantic video search over embeddings.
+
+EDUCATION
+Arizona State University - B.S. in Computer Science, Minor in Data Science | Aug 2022 - Dec 2025
+GPA: 3.6/4.0
+Honors: Magna Cum Laude, Dean's List, Namu Scholarship
+Coursework: Machine Learning, Distributed Systems, Computer Vision
+
+AWARDS, PUBLICATIONS & RECOGNITION
+- Magna Cum Laude, Arizona State University (2025)
+- Namu Scholarship recipient (2024)
+- Published: "Efficient Video Inference at the Edge", ML Systems Workshop 2025

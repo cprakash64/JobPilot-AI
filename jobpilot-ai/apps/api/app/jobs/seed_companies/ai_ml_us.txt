@@ -1,0 +1,8 @@
+anthropic
+openai
+cohere
+mistral
+togetherai
+cerebras
+runway
+elevenlabs

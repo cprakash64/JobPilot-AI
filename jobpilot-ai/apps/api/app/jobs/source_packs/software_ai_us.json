@@ -1,0 +1,750 @@
+{
+  "name": "software_ai_us",
+  "tags": [
+    "ai",
+    "software"
+  ],
+  "count": 148,
+  "sources": [
+    {
+      "provider": "greenhouse",
+      "slug": "abnormalsecurity",
+      "company": "Abnormal Security"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "affirm",
+      "company": "Affirm"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "airbnb",
+      "company": "Airbnb"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "airtable",
+      "company": "Airtable"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "amplitude",
+      "company": "Amplitude"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "anthropic",
+      "company": "Anthropic"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "asana",
+      "company": "Asana"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "assemblyai",
+      "company": "AssemblyAI"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "betterment",
+      "company": "Betterment"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "blend",
+      "company": "Blend"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "braze",
+      "company": "Braze"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "brex",
+      "company": "Brex"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "builder",
+      "company": "Builder"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "calendly",
+      "company": "Calendly"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "carta",
+      "company": "Carta"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "chainguard",
+      "company": "Chainguard"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "checkr",
+      "company": "Checkr"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "chime",
+      "company": "Chime"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "circleci",
+      "company": "CircleCI"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "clickhouse",
+      "company": "ClickHouse"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "cloudflare",
+      "company": "Cloudflare"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "cockroachlabs",
+      "company": "CockroachDB"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "coinbase",
+      "company": "Coinbase"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "contentful",
+      "company": "Contentful"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "coursera",
+      "company": "Coursera"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "customerio",
+      "company": "Customer.io"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "cybereason",
+      "company": "Cybereason"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "databricks",
+      "company": "Databricks"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "datadog",
+      "company": "Datadog"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "descript",
+      "company": "Descript"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "discord",
+      "company": "Discord"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "dremio",
+      "company": "Dremio"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "dropbox",
+      "company": "Dropbox"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "duolingo",
+      "company": "Duolingo"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "elastic",
+      "company": "Elastic"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "faire",
+      "company": "Faire"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "fastly",
+      "company": "Fastly"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "figma",
+      "company": "Figma"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "fivetran",
+      "company": "Fivetran"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "flexport",
+      "company": "Flexport"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "gitlab",
+      "company": "GitLab"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "greenhouse",
+      "company": "Greenhouse"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "gusto",
+      "company": "Gusto"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "highnote",
+      "company": "Highnote"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "hightouch",
+      "company": "Hightouch"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "huntress",
+      "company": "Huntress"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "imply",
+      "company": "Imply"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "instacart",
+      "company": "Instacart"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "iterable",
+      "company": "Iterable"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "khanacademy",
+      "company": "Khan Academy"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "launchdarkly",
+      "company": "LaunchDarkly"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "lithic",
+      "company": "Lithic"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "lyft",
+      "company": "Lyft"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "make",
+      "company": "Make"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "marqeta",
+      "company": "Marqeta"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "mercari",
+      "company": "Mercari"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "mercury",
+      "company": "Mercury"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "mixpanel",
+      "company": "Mixpanel"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "mongodb",
+      "company": "Mongodb"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "monzo",
+      "company": "Monzo"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "netlify",
+      "company": "Netlify"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "nuro",
+      "company": "Nuro"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "offerup",
+      "company": "OfferUp"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "okta",
+      "company": "Okta"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "orca",
+      "company": "Orca"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "otter",
+      "company": "Otter"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "pandadoc",
+      "company": "PandaDoc"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "pinterest",
+      "company": "Pinterest"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "planetscale",
+      "company": "PlanetScale"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "postman",
+      "company": "Postman"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "reddit",
+      "company": "Reddit"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "remote",
+      "company": "Remote"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "robinhood",
+      "company": "Robinhood"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "samsara",
+      "company": "Samsara"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "sofi",
+      "company": "SoFi"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "squarespace",
+      "company": "Squarespace"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "starburst",
+      "company": "Starburst"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "stockx",
+      "company": "StockX"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "storyblok",
+      "company": "Storyblok"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "stripe",
+      "company": "Stripe"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "tailscale",
+      "company": "Tailscale"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "taskrabbit",
+      "company": "TaskRabbit"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "togetherai",
+      "company": "Together AI"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "twilio",
+      "company": "Twilio"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "twitch",
+      "company": "Twitch"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "typeface",
+      "company": "Typeface"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "udemy",
+      "company": "Udemy"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "upstart",
+      "company": "Upstart"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "vercel",
+      "company": "Vercel"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "verkada",
+      "company": "Verkada"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "waymo",
+      "company": "Waymo"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "webflow",
+      "company": "Webflow"
+    },
+    {
+      "provider": "greenhouse",
+      "slug": "workato",
+      "company": "Workato"
+    },
+    {
+      "provider": "lever",
+      "slug": "angellist",
+      "company": "AngelList"
+    },
+    {
+      "provider": "lever",
+      "slug": "anyscale",
+      "company": "Anyscale"
+    },
+    {
+      "provider": "lever",
+      "slug": "jumpcloud",
+      "company": "JumpCloud"
+    },
+    {
+      "provider": "lever",
+      "slug": "mistral",
+      "company": "Mistral"
+    },
+    {
+      "provider": "lever",
+      "slug": "neon",
+      "company": "Neon"
+    },
+    {
+      "provider": "lever",
+      "slug": "outreach",
+      "company": "Outreach"
+    },
+    {
+      "provider": "lever",
+      "slug": "secureframe",
+      "company": "Secureframe"
+    },
+    {
+      "provider": "lever",
+      "slug": "sysdig",
+      "company": "Sysdig"
+    },
+    {
+      "provider": "lever",
+      "slug": "wealthfront",
+      "company": "Wealthfront"
+    },
+    {
+      "provider": "lever",
+      "slug": "zoox",
+      "company": "Zoox"
+    },
+    {
+      "provider": "ashby",
+      "slug": "airbyte",
+      "company": "Airbyte"
+    },
+    {
+      "provider": "ashby",
+      "slug": "airops",
+      "company": "AirOps"
+    },
+    {
+      "provider": "ashby",
+      "slug": "angi",
+      "company": "Angi"
+    },
+    {
+      "provider": "ashby",
+      "slug": "benchling",
+      "company": "Benchling"
+    },
+    {
+      "provider": "ashby",
+      "slug": "cerebras",
+      "company": "Cerebras"
+    },
+    {
+      "provider": "ashby",
+      "slug": "clickup",
+      "company": "ClickUp"
+    },
+    {
+      "provider": "ashby",
+      "slug": "cohere",
+      "company": "Cohere"
+    },
+    {
+      "provider": "ashby",
+      "slug": "column",
+      "company": "Column"
+    },
+    {
+      "provider": "ashby",
+      "slug": "confluent",
+      "company": "Confluent"
+    },
+    {
+      "provider": "ashby",
+      "slug": "deepgram",
+      "company": "Deepgram"
+    },
+    {
+      "provider": "ashby",
+      "slug": "drata",
+      "company": "Drata"
+    },
+    {
+      "provider": "ashby",
+      "slug": "elevenlabs",
+      "company": "ElevenLabs"
+    },
+    {
+      "provider": "ashby",
+      "slug": "handshake",
+      "company": "Handshake"
+    },
+    {
+      "provider": "ashby",
+      "slug": "kong",
+      "company": "Kong"
+    },
+    {
+      "provider": "ashby",
+      "slug": "lambda",
+      "company": "Lambda"
+    },
+    {
+      "provider": "ashby",
+      "slug": "langchain",
+      "company": "Langchain"
+    },
+    {
+      "provider": "ashby",
+      "slug": "linear",
+      "company": "Linear"
+    },
+    {
+      "provider": "ashby",
+      "slug": "llamaindex",
+      "company": "LlamaIndex"
+    },
+    {
+      "provider": "ashby",
+      "slug": "miro",
+      "company": "Miro"
+    },
+    {
+      "provider": "ashby",
+      "slug": "modal",
+      "company": "Modal"
+    },
+    {
+      "provider": "ashby",
+      "slug": "moderntreasury",
+      "company": "Modern Treasury"
+    },
+    {
+      "provider": "ashby",
+      "slug": "n8n",
+      "company": "n8n"
+    },
+    {
+      "provider": "ashby",
+      "slug": "nerdwallet",
+      "company": "NerdWallet"
+    },
+    {
+      "provider": "ashby",
+      "slug": "notion",
+      "company": "Notion"
+    },
+    {
+      "provider": "ashby",
+      "slug": "oyster",
+      "company": "Oyster"
+    },
+    {
+      "provider": "ashby",
+      "slug": "pinecone",
+      "company": "Pinecone"
+    },
+    {
+      "provider": "ashby",
+      "slug": "plaid",
+      "company": "Plaid"
+    },
+    {
+      "provider": "ashby",
+      "slug": "poshmark",
+      "company": "Poshmark"
+    },
+    {
+      "provider": "ashby",
+      "slug": "railway",
+      "company": "Railway"
+    },
+    {
+      "provider": "ashby",
+      "slug": "ramp",
+      "company": "Ramp"
+    },
+    {
+      "provider": "ashby",
+      "slug": "render",
+      "company": "Render"
+    },
+    {
+      "provider": "ashby",
+      "slug": "runway",
+      "company": "Runway"
+    },
+    {
+      "provider": "ashby",
+      "slug": "sanity",
+      "company": "Sanity"
+    },
+    {
+      "provider": "ashby",
+      "slug": "semgrep",
+      "company": "Semgrep"
+    },
+    {
+      "provider": "ashby",
+      "slug": "sentry",
+      "company": "Sentry"
+    },
+    {
+      "provider": "ashby",
+      "slug": "supabase",
+      "company": "Supabase"
+    },
+    {
+      "provider": "ashby",
+      "slug": "synthesia",
+      "company": "Synthesia"
+    },
+    {
+      "provider": "ashby",
+      "slug": "temporal",
+      "company": "Temporal"
+    },
+    {
+      "provider": "ashby",
+      "slug": "thumbtack",
+      "company": "Thumbtack"
+    },
+    {
+      "provider": "ashby",
+      "slug": "unit",
+      "company": "Unit"
+    },
+    {
+      "provider": "ashby",
+      "slug": "vanta",
+      "company": "Vanta"
+    },
+    {
+      "provider": "ashby",
+      "slug": "weaviate",
+      "company": "Weaviate"
+    },
+    {
+      "provider": "ashby",
+      "slug": "writer",
+      "company": "Writer"
+    },
+    {
+      "provider": "ashby",
+      "slug": "zapier",
+      "company": "Zapier"
+    },
+    {
+      "provider": "smartrecruiters",
+      "slug": "Visa",
+      "company": "Visa"
+    }
+  ]
+}

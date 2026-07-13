@@ -1,0 +1,14 @@
+.env
+node_modules/
+.next/
+coverage/
+coverage.xml
+htmlcov/
+test-results/
+playwright-report/
+.pytest_cache/
+.venv/
+__pycache__/
+generated/
+uploads/
+*.tsbuildinfo

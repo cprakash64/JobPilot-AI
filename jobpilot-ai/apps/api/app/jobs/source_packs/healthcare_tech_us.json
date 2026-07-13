@@ -1,0 +1,19 @@
+{
+  "name": "healthcare_tech_us",
+  "tags": [
+    "healthtech"
+  ],
+  "count": 2,
+  "sources": [
+    {
+      "provider": "ashby",
+      "slug": "benchling",
+      "company": "Benchling"
+    },
+    {
+      "provider": "ashby",
+      "slug": "cerebras",
+      "company": "Cerebras"
+    }
+  ]
+}

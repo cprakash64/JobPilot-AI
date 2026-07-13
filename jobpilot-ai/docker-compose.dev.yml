@@ -1,0 +1,15 @@
+services:
+  api:
+    environment:
+      API_RELOAD: "true"
+    volumes:
+      - ./apps/api:/app
+      - generated_files:/app/generated
+      - uploaded_files:/app/uploads
+    command: sh /app/scripts/start-api.sh
+
+  web:
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    command: npm run dev -- --hostname 0.0.0.0

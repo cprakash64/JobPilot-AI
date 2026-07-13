@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "JobPilot AI — Assisted Apply",
+  "version": "0.1.0",
+  "description": "User-controlled application copilot. Fills employer forms with your verified JobPilot data — you always review and submit yourself.",
+  "permissions": ["sidePanel", "storage", "scripting", "activeTab"],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://localhost:8000/*",
+    "https://*.greenhouse.io/*",
+    "https://*.lever.co/*",
+    "https://*.ashbyhq.com/*",
+    "https://*.myworkdayjobs.com/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Open JobPilot Assisted Apply" },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:3000/*",
+        "https://*.greenhouse.io/*",
+        "https://*.lever.co/*",
+        "https://*.ashbyhq.com/*",
+        "https://*.myworkdayjobs.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
