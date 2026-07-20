@@ -40,7 +40,7 @@ def client() -> Generator[TestClient, None, None]:
         engine.dispose()
 
 
-def auth(client: TestClient, email: str = "apply@example.com") -> dict[str, str]:
+def auth(client: TestClient, email: str = "apply@mailbox.test-domain.co") -> dict[str, str]:
     token = client.post("/auth/signup", json={"email": email, "password": "password123"}).json()
     return {"Authorization": f"Bearer {token['access_token']}"}
 
@@ -128,13 +128,63 @@ def test_create_session_prepares_documents_and_answers(client: TestClient) -> No
     assert all(not a["sensitive"] for a in answers)
 
 
+def test_profile_eeo_answers_are_included_in_the_application_package(client: TestClient) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    saved = client.put(
+        "/profile/demographics",
+        headers=headers,
+        json={
+            "gender_identity": "man",
+            "veteran_status": "not_protected_veteran",
+            "disability_status": "no",
+            "hispanic_or_latino": "no",
+            "race_ethnicity": ["asian"],
+            "consent_to_store": True,
+        },
+    )
+    assert saved.status_code == 200
+
+    job_id = seed_job(client)
+    body = create_session(client, headers, job_id)
+    answers = client.get(
+        f"/application-sessions/{body['session_id']}/answers", headers=headers
+    ).json()["answers"]
+    by_key = {answer["canonical_key"]: answer for answer in answers}
+
+    assert by_key["gender"]["value"] == "Man"
+    assert by_key["race"]["value"] == "Asian"
+    assert by_key["veteran_status"]["value"] == "I am not a protected veteran"
+    assert by_key["disability_status"]["sensitive"] is True
+    assert all(by_key[key]["verified"] for key in ("gender", "race", "veteran_status"))
+
+
+def test_saving_profile_eeo_refreshes_an_existing_session(client: TestClient) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    job_id = seed_job(client)
+    body = create_session(client, headers, job_id)
+
+    client.put(
+        "/profile/demographics",
+        headers=headers,
+        json={"gender_identity": "man", "race_ethnicity": ["asian"], "consent_to_store": True},
+    )
+    refreshed = client.get(
+        f"/application-sessions/{body['session_id']}/answers", headers=headers
+    ).json()
+
+    assert refreshed["refreshed"] is True
+    assert {answer["canonical_key"] for answer in refreshed["answers"]} >= {"gender", "race"}
+
+
 def test_session_not_accessible_to_other_user(client: TestClient) -> None:
-    owner = auth(client, "owner@example.com")
+    owner = auth(client, "owner@mailbox.test-domain.co")
     complete_profile(client, owner)
     job_id = seed_job(client)
     session_id = create_session(client, owner, job_id)["session_id"]
 
-    intruder = auth(client, "intruder@example.com")
+    intruder = auth(client, "intruder@mailbox.test-domain.co")
     resp = client.get(f"/application-sessions/{session_id}", headers=intruder)
     assert resp.status_code == 403
 
@@ -387,7 +437,7 @@ def test_unhandled_error_response_includes_cors_header(monkeypatch) -> None:
 
     ec = _error_client()
     try:
-        headers = auth(ec, "cors@example.com")
+        headers = auth(ec, "cors@mailbox.test-domain.co")
         complete_profile(ec, headers)
         job_id = seed_job(ec)
 
@@ -523,6 +573,31 @@ def test_repeated_prepare_is_idempotent(client: TestClient) -> None:
     assert len(sessions) == 1
     assert len(trackers) == 1
     db.close()
+
+
+def test_repeated_prepare_repairs_missing_document_links(client: TestClient) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    job_id = seed_job(client)
+    first = create_session(client, headers, job_id)
+
+    db = next(app.dependency_overrides[get_db]())
+    session = db.get(E.ApplicationSession, first["session_id"])
+    assert session is not None
+    session.tailored_resume_id = None
+    session.tailored_cover_letter_id = None
+    session.warnings = [
+        "Tailored resume could not be prepared automatically (TimeoutError). You can retry it.",
+        "Tailored cover letter could not be prepared automatically (TimeoutError). You can retry it.",
+    ]
+    db.commit()
+    db.close()
+
+    repaired = create_session(client, headers, job_id)
+    assert repaired["session_id"] == first["session_id"]
+    assert repaired["resume"]["document_id"] == first["resume"]["document_id"]
+    assert repaired["cover_letter"]["document_id"] == first["cover_letter"]["document_id"]
+    assert not any("could not be prepared" in warning for warning in repaired["warnings"])
 
 
 def test_prepare_after_cancel_creates_fresh_session(client: TestClient) -> None:
@@ -663,6 +738,16 @@ def test_autofill_results_rejected_for_other_user(client: TestClient) -> None:
 
 def test_autofill_results_requires_auth(client: TestClient) -> None:
     assert client.post("/application-sessions/1/autofill-results", json={"status": "completed"}).status_code == 401
+
+
+def test_extension_origin_receives_cors_headers(client: TestClient) -> None:
+    origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    resp = client.options(
+        "/application-sessions/token",
+        headers={"Origin": origin, "Access-Control-Request-Method": "POST"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == origin
 
 
 def test_nullable_job_fields_do_not_break_preparation(client: TestClient) -> None:

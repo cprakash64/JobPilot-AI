@@ -42,7 +42,7 @@ describe("field classification", () => {
 });
 
 describe("mapping + confidence policy", () => {
-  it("auto-fills verified facts, reviews unverified, never fills sensitive", () => {
+  it("auto-fills verified facts and reviews unverified sensitive fields", () => {
     const discovered = fields();
     const mm = buildMappings(discovered, session()).mappings;
     const pick = (id: string) => mm.find((m) => m.uid === discovered.find((f) => f.id === id)!.uid)!;
@@ -71,5 +71,26 @@ describe("mapping + confidence policy", () => {
     // No linkedin answer in session → mapped but not auto-filled.
     expect(pick("linkedin").canonicalKey).toBe("linkedin_url");
     expect(pick("linkedin").safeToAutoFill).toBe(false);
+  });
+
+  it("fills a sensitive value only when the backend explicitly verified and enabled it", () => {
+    const discovered = fields();
+    const optedIn = session();
+    optedIn.answers.push({
+      canonical_key: "gender",
+      value: "Prefer not to say",
+      display_value: "Prefer not to say",
+      source: "answer_vault",
+      confidence: 1,
+      sensitive: true,
+      requires_review: false,
+      verified: true
+    });
+
+    const genderField = discovered.find((f) => f.id === "gender")!;
+    const gender = buildMappings(discovered, optedIn).mappings.find((m) => m.uid === genderField.uid)!;
+    expect(gender.sensitive).toBe(true);
+    expect(gender.safeToAutoFill).toBe(true);
+    expect(gender.requiresReview).toBe(false);
   });
 });

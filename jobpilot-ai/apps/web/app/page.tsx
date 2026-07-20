@@ -13,7 +13,7 @@ export default function HomePage() {
             <h1 className="max-w-3xl text-5xl font-semibold leading-tight text-ink md:text-6xl">
               JobPilot AI
             </h1>
-            <p className="mt-6 max-w-2xl text-lg leading-8 text-[#536056]">
+            <p className="mt-6 max-w-2xl text-lg leading-8 text-[var(--text-muted)]">
               Create one truthful career profile, discover fresh jobs from allowed sources, generate ATS-friendly materials, and track each application without stealth automation or mass submission.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
@@ -38,7 +38,7 @@ export default function HomePage() {
                     <CheckCircle2 className="mt-1 h-5 w-5 text-pine" />
                     <div>
                       <h2 className="font-medium">{title}</h2>
-                      <p className="mt-1 text-sm text-[#5d675f]">{body}</p>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">{body}</p>
                     </div>
                   </div>
                 </div>
@@ -61,7 +61,7 @@ function Feature({ icon, title, body }: { icon: React.ReactNode; title: string; 
     <article className="rounded-lg border border-line bg-white p-5">
       <div className="mb-4 h-9 w-9 text-pine">{icon}</div>
       <h2 className="font-semibold">{title}</h2>
-      <p className="mt-2 text-sm leading-6 text-[#5d675f]">{body}</p>
+      <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">{body}</p>
     </article>
   );
 }

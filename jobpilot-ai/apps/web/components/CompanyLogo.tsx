@@ -1,57 +1,79 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { API_URL } from "@/lib/api";
 
 /**
- * Company logo with a safe fallback.
- *
- * Renders the resolved company logo image when a URL is available; if the image
- * is missing or fails to load (404, blocked, network error) it falls back to a
- * clean initial-letter avatar. A logo never blocks or breaks the job card.
+ * Company logo with a real fallback chain: try the primary (proxied,
+ * cached, SSRF-safe) source first, then a secondary direct source if the
+ * first fails, and only fall back to a neutral JobPilot placeholder — never
+ * an initial-letter avatar, and never a broken-image icon — once every real
+ * source has failed. The logo area is a fixed square so the layout never
+ * shifts as sources are tried.
  */
 export function CompanyLogo({
   company,
   logoUrl,
+  proxyPath,
   size = 44
 }: {
   company: string;
   logoUrl?: string | null;
+  /** Relative API path for the preferred (proxied) source, e.g.
+   * "/jobs/companies/acme/logo". */
+  proxyPath?: string | null;
   size?: number;
 }) {
-  const [failed, setFailed] = useState(false);
-  const showImage = Boolean(logoUrl) && !failed;
+  const sources = useMemo(() => {
+    const list: string[] = [];
+    if (proxyPath) list.push(`${API_URL}${proxyPath}`);
+    if (logoUrl) list.push(logoUrl);
+    return list;
+  }, [proxyPath, logoUrl]);
+
+  const [attempt, setAttempt] = useState(0);
+  const src = sources[attempt];
 
   return (
     <div
       className="flex shrink-0 items-center justify-center overflow-hidden rounded-xl border border-line bg-white"
       style={{ width: size, height: size }}
     >
-      {showImage ? (
-        // eslint-disable-next-line @next/next/no-img-element -- external logo host; next/image would require per-domain config + CSP allowances
+      {src ? (
+        // eslint-disable-next-line @next/next/no-img-element -- external/proxied logo host; next/image would require per-domain config + CSP allowances
         <img
-          src={logoUrl as string}
+          key={src}
+          src={src}
           alt={`${company} logo`}
           width={size}
           height={size}
           loading="lazy"
           className="h-full w-full object-contain p-1"
-          onError={() => setFailed(true)}
+          onError={() => setAttempt((a) => a + 1)}
         />
       ) : (
-        <span className="text-sm font-semibold text-pine" aria-hidden>
-          {initials(company)}
-        </span>
+        <PlaceholderMark size={size} />
       )}
     </div>
   );
 }
 
-function initials(company: string): string {
-  const value = (company || "?")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((word) => word[0]?.toUpperCase() ?? "")
-    .join("");
-  return value || "?";
+/** Neutral JobPilot placeholder — deliberately not the company's initials, so
+ * a real-but-unresolved logo is never confused with a verified one. */
+function PlaceholderMark({ size }: { size: number }) {
+  return (
+    <svg
+      data-testid="company-logo-placeholder"
+      width={Math.round(size * 0.55)}
+      height={Math.round(size * 0.55)}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+      className="text-[var(--text-muted)]"
+    >
+      <rect x="3" y="7" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M3 12h18" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
 }

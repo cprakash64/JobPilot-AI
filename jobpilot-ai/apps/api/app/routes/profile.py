@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -10,6 +11,8 @@ from app.ai.provider import ai_provider
 from app.core.audit import record_audit
 from app.db.session import get_db
 from app.documents.resume_compaction_service import looks_like_fragment
+from app.profile.names import compose_full_name
+from app.profile.phone import parse_phone
 from app.models.entities import (
     Award,
     Certification,
@@ -30,6 +33,7 @@ from app.schemas.import_profile import (
 from app.schemas.profile import (
     CareerProfileIn,
     ProfileImportIn,
+    ProfileNameIn,
     SensitiveDemographicsIn,
     UserProfileIn,
     WORK_AUTHORIZATION_STATUSES,
@@ -68,9 +72,26 @@ def serialize_profile(profile: UserProfile | None) -> dict[str, Any] | None:
         "id": profile.id,
         "user_id": profile.user_id,
         "full_name": profile.full_name or "",
+        "first_name": profile.first_name,
+        "middle_name": profile.middle_name,
+        "last_name": profile.last_name,
+        "preferred_first_name": profile.preferred_first_name,
+        "preferred_last_name": profile.preferred_last_name,
+        "preferred_name": profile.preferred_name,
+        "name_confirmed": profile.name_confirmed,
+        # Legacy keys, still emitted for clients built against the old shape.
+        "given_name": profile.first_name,
+        "family_name": profile.last_name,
         "phone": profile.phone,
+        "phone_country_code": profile.phone_country_code,
+        "phone_country_iso2": profile.phone_country_iso2,
+        "phone_national_number": profile.phone_national_number,
+        "phone_e164": profile.phone_e164,
+        "application_email": profile.application_email,
+        "application_email_confirmed": profile.application_email_confirmed,
         "location_city": profile.location_city,
         "location_state": profile.location_state,
+        "location_postal_code": profile.location_postal_code,
         "location_country": profile.location_country,
         "linkedin_url": profile.linkedin_url,
         "github_url": profile.github_url,
@@ -116,6 +137,96 @@ def get_profile(user: User = Depends(get_current_user), db: Session = Depends(ge
     return {"profile": serialize_profile(profile)}
 
 
+def _apply_imported_name(profile: UserProfile, basic: Any, *, overwrite: bool) -> None:
+    """Persist the name split the user confirmed in the import review UI.
+
+    This is the ONE import path allowed to set ``name_confirmed``, because the
+    parts arrive from a screen where the user saw and could correct them. If the
+    client sent no parts (an older build, or the user cleared them), nothing is
+    written and the name stays unconfirmed — it is never re-derived by splitting
+    ``full_name`` here.
+    """
+    first = (getattr(basic, "first_name", "") or "").strip()
+    last = (getattr(basic, "last_name", "") or "").strip()
+    if not first or not last:
+        return
+    if profile.name_confirmed and not overwrite:
+        return
+    profile.first_name = first
+    profile.middle_name = (getattr(basic, "middle_name", "") or "").strip() or None
+    profile.last_name = last
+    profile.full_name = compose_full_name(first, profile.middle_name, last)
+    profile.name_confirmed = True
+
+
+def _apply_imported_phone(profile: UserProfile) -> None:
+    """Re-derive the structured phone columns from whatever phone was imported."""
+    for key, value in _phone_columns(profile.phone, profile.location_country).items():
+        setattr(profile, key, value)
+
+
+def _application_email_columns(
+    profile: UserProfile | None, submitted: Any
+) -> dict[str, Any]:
+    """Columns for an explicit application-email save.
+
+    Saving the field IS the confirmation — the user typed an address into a
+    control labelled "Application email" and pressed Save. Changing it to a
+    different address re-confirms at the same moment; clearing it drops the
+    confirmation rather than leaving a stale one behind.
+    """
+    email = (str(submitted or "")).strip()
+    if not email:
+        return {
+            "application_email": None,
+            "application_email_confirmed": False,
+            "application_email_updated_at": None,
+        }
+    unchanged = profile is not None and (profile.application_email or "").strip().lower() == email.lower()
+    return {
+        "application_email": email,
+        "application_email_confirmed": True,
+        # Keep the original timestamp when the value did not actually change.
+        "application_email_updated_at": (
+            profile.application_email_updated_at if unchanged and profile else datetime.now(UTC)
+        ),
+    }
+
+
+def _phone_columns(raw_phone: Any, location_country: Any) -> dict[str, str | None]:
+    """Structured phone columns for a raw phone string.
+
+    An unparseable or invalid number clears the structured columns rather than
+    storing a half-parsed guess — the raw ``phone`` value is still kept, and the
+    profile UI surfaces it as needing attention.
+    """
+    parts = parse_phone(raw_phone, _region_for_country(location_country))
+    if not parts.valid:
+        return {
+            "phone_country_code": None,
+            "phone_country_iso2": None,
+            "phone_national_number": None,
+            "phone_e164": None,
+        }
+    return {
+        "phone_country_code": parts.country_code,
+        "phone_country_iso2": parts.country_iso2,
+        "phone_national_number": parts.national_number,
+        "phone_e164": parts.e164,
+    }
+
+
+_COUNTRY_TO_REGION = {
+    "united states": "US", "usa": "US", "us": "US",
+    "canada": "CA", "united kingdom": "GB", "uk": "GB",
+    "india": "IN", "australia": "AU", "germany": "DE",
+}
+
+
+def _region_for_country(location_country: Any) -> str:
+    return _COUNTRY_TO_REGION.get(str(location_country or "").strip().lower(), "US")
+
+
 @router.put("")
 def upsert_profile(
     payload: UserProfileIn,
@@ -124,6 +235,10 @@ def upsert_profile(
 ) -> dict:
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
     values = payload.model_dump(mode="json")
+    # Re-derive the structured phone columns from whatever the user typed, so
+    # the split parts can never drift from the raw value.
+    values.update(_phone_columns(values.get("phone"), values.get("location_country")))
+    values.update(_application_email_columns(profile, values.get("application_email")))
     if profile is None:
         profile = UserProfile(user_id=user.id, **values)
         db.add(profile)
@@ -132,7 +247,52 @@ def upsert_profile(
             setattr(profile, key, value)
     db.commit()
     db.refresh(profile)
+    _enqueue_profile_rescore(user.id)
     return {"profile": serialize_profile(profile)}
+
+
+@router.put("/name")
+def confirm_profile_name(
+    payload: ProfileNameIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Explicit structured-name confirmation (never inferred). Kept separate
+    from PUT /profile so an unrelated profile edit can never silently reset
+    ``name_confirmed``."""
+    from app.applications.answer_vault_service import confirm_name
+
+    profile = confirm_name(
+        db,
+        user.id,
+        payload.first_name,
+        payload.last_name,
+        middle_name=payload.middle_name,
+        preferred_first_name=payload.preferred_first_name,
+        preferred_last_name=payload.preferred_last_name,
+    )
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Create your profile before confirming your name")
+    db.commit()
+    db.refresh(profile)
+    return {"profile": serialize_profile(profile)}
+
+
+def _enqueue_profile_rescore(user_id: int) -> None:
+    """A profile change is score-relevant, so re-score this user's recent active
+    jobs in the background. Best-effort: if the broker is down the next page load
+    / "Refresh matches" still rescores on demand (the scoring service's change
+    detection makes this idempotent)."""
+    from app.jobs.job_ingestion_service import broker_reachable
+
+    if not broker_reachable():
+        return  # on-demand rescore path covers this; avoid a slow broker publish
+    try:
+        from app.workers.tasks import match_jobs_for_user_task
+
+        match_jobs_for_user_task.apply_async(args=[user_id], retry=False)
+    except Exception:  # noqa: BLE001 - broker optional; on-demand path covers it
+        logging.getLogger("jobpilot.scoring").info("Profile rescore not enqueued (broker down).")
 
 
 @router.get("/career")
@@ -154,6 +314,7 @@ def replace_career(
     db.add_all([Certification(user_id=user.id, **item.model_dump()) for item in payload.certifications])
     db.add_all([Award(user_id=user.id, **item.model_dump()) for item in payload.awards])
     db.commit()
+    _enqueue_profile_rescore(user.id)  # experience/education/projects affect scoring
     return career_payload(user.id, db)
 
 
@@ -223,6 +384,8 @@ def apply_profile_import(
             ],
             payload.overwrite,
         )
+        _apply_imported_name(profile, draft.basic_info, overwrite=payload.overwrite)
+        _apply_imported_phone(profile)
         work_authorization = clean_string(draft.basic_info.work_authorization_status)
         if work_authorization in WORK_AUTHORIZATION_STATUSES and should_apply(profile.work_authorization, work_authorization, payload.overwrite):
             profile.work_authorization = work_authorization
@@ -564,10 +727,32 @@ def award_values(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _serialize_demographics(record: SensitiveDemographics | None) -> dict | None:
+    """Explicit allow-list. Never returns the legacy free-text columns, whose
+    quarantined values (e.g. gender="yes") carry no meaning."""
+    if record is None:
+        return None
+    return {
+        "id": record.id,
+        "user_id": record.user_id,
+        "gender_identity": record.gender_identity,
+        "gender_self_description": record.gender_self_description,
+        "veteran_status": record.veteran_status,
+        "disability_status": record.disability_status,
+        "hispanic_or_latino": record.hispanic_or_latino,
+        "race_ethnicity": record.race_ethnicity or [],
+        "race_self_description": record.race_self_description,
+        "consent_to_store": record.consent_to_store,
+        "needs_review": record.needs_review,
+    }
+
+
 @router.get("/demographics")
 def get_demographics(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    demographics = db.scalar(select(SensitiveDemographics).where(SensitiveDemographics.user_id == user.id))
-    return {"demographics": demographics}
+    demographics = db.scalar(
+        select(SensitiveDemographics).where(SensitiveDemographics.user_id == user.id)
+    )
+    return {"demographics": _serialize_demographics(demographics)}
 
 
 @router.put("/demographics")
@@ -576,22 +761,54 @@ def upsert_demographics(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    """Save voluntary EEO answers.
+
+    Consent is about STORING the data, so:
+      * answers + no consent  -> 422. Pressing Save is not consent.
+      * no answers + no consent -> withdrawal; stored values are deleted.
+    """
+    from app.profile.eeo import has_any_answer
+
+    values = payload.model_dump()
+    answered = has_any_answer(values)
+
     if not payload.consent_to_store:
+        if answered:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Storing optional demographic information requires explicit consent. "
+                    "Tick the consent box, or clear the answers to remove stored data."
+                ),
+            )
+        # Withdrawing consent deletes whatever was stored.
         db.execute(delete(SensitiveDemographics).where(SensitiveDemographics.user_id == user.id))
-        record_audit(db, user.id, "demographics_deleted", {"reason": "consent_not_granted"})
+        record_audit(db, user.id, "demographics_deleted", {"reason": "consent_withdrawn"})
         db.commit()
         return {"demographics": None}
-    demographics = db.scalar(select(SensitiveDemographics).where(SensitiveDemographics.user_id == user.id))
-    values = payload.model_dump()
+
+    demographics = db.scalar(
+        select(SensitiveDemographics).where(SensitiveDemographics.user_id == user.id)
+    )
+    # Free-text self-descriptions are kept only while their trigger option is
+    # selected — deselecting "Self-describe" must not leave the text behind.
+    if values.get("gender_identity") != "self_describe":
+        values["gender_self_description"] = None
+    if "another_race_or_ethnicity" not in (values.get("race_ethnicity") or []):
+        values["race_self_description"] = None
+
     if demographics is None:
         demographics = SensitiveDemographics(user_id=user.id, **values)
         db.add(demographics)
     else:
         for key, value in values.items():
             setattr(demographics, key, value)
+    # Answering clears the "please re-answer" flag set by the 0015 migration.
+    demographics.needs_review = False
+    record_audit(db, user.id, "demographics_saved", {"consented": True})
     db.commit()
     db.refresh(demographics)
-    return {"demographics": demographics}
+    return {"demographics": _serialize_demographics(demographics)}
 
 
 @router.delete("/demographics", status_code=status.HTTP_204_NO_CONTENT)

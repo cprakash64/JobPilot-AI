@@ -3,6 +3,7 @@
 import { useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { AlertTriangle, Check, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Button } from "@/components/Button";
+import { composeFullName, suggestNameParts } from "@/lib/names";
 
 export type ImportSection =
   | "basic_info"
@@ -18,6 +19,12 @@ export type ImportSection =
 export type ImportApplyMode = "all" | "selected";
 
 type BasicInfoDraft = {
+  // Proposed split of the parsed name. Pre-filled from the resume text but
+  // always editable here — the import review is where the user corrects it,
+  // BEFORE anything is saved.
+  first_name: string;
+  middle_name: string;
+  last_name: string;
   full_name: string;
   headline: string;
   email: string;
@@ -200,7 +207,7 @@ export function ImportProfilePreview({
       <div className="sticky top-0 z-10 border-b border-line bg-white/95 px-1 py-4 backdrop-blur">
         <div className="mx-auto max-w-[880px]">
           <h3 className="text-xl font-semibold">Review imported profile</h3>
-          <p className="mt-1 text-sm text-[#5d675f]">
+          <p className="mt-1 text-sm text-[var(--text-muted)]">
             Review and edit the imported resume before saving it to your profile.
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -225,12 +232,12 @@ export function ImportProfilePreview({
       <div className="flex-1 overflow-y-auto bg-panel/60 px-1 py-5">
         <div className="mx-auto grid w-full max-w-[880px] gap-4">
           {warnings.length > 0 && (
-            <section className="rounded-lg border border-[#ead191] bg-[#fff9e8] p-4">
+            <section className="rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4">
               <div className="flex items-start gap-3">
-                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[#9a6a00]" />
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--warning)]" />
                 <div>
                   <h4 className="font-semibold">Warnings</h4>
-                  <ul className="mt-2 list-disc pl-5 text-sm leading-6 text-[#5b4a17]">
+                  <ul className="mt-2 list-disc pl-5 text-sm leading-6 text-[var(--warning)]">
                     {warnings.map((warning) => (
                       <li key={warning}>{warning}</li>
                     ))}
@@ -257,8 +264,8 @@ export function ImportProfilePreview({
                 {conflicts.map((conflict) => (
                   <div key={conflict.field} className="rounded-md border border-line bg-panel p-3 text-sm">
                     <p className="font-medium">{conflict.field}</p>
-                    <p className="mt-1 text-[#5d675f]">Existing: {conflict.existing}</p>
-                    <p className="text-[#5d675f]">Imported: {conflict.imported}</p>
+                    <p className="mt-1 text-[var(--text-muted)]">Existing: {conflict.existing}</p>
+                    <p className="text-[var(--text-muted)]">Imported: {conflict.imported}</p>
                   </div>
                 ))}
               </div>
@@ -284,7 +291,7 @@ export function ImportProfilePreview({
               {showRawText ? "Hide raw extracted text" : "Show raw extracted text"}
             </button>
             {showRawText && (
-              <p className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-panel p-3 text-sm text-[#5d675f]">
+              <p className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-panel p-3 text-sm text-[var(--text-muted)]">
                 {editableDraft.raw_text_preview || "No raw text preview available."}
               </p>
             )}
@@ -303,7 +310,7 @@ export function ImportProfilePreview({
           <Button variant="secondary" type="button" disabled={saving} onClick={onCancel}>
             <X className="h-4 w-4" /> Cancel
           </Button>
-          <span className="text-xs text-[#5d675f]">{selected.length} of {allSections.length} sections selected</span>
+          <span className="text-xs text-[var(--text-muted)]">{selected.length} of {allSections.length} sections selected</span>
         </div>
       </div>
     </div>
@@ -352,7 +359,7 @@ function ResumeSection({
   return (
     <section className={`border-t border-line/70 py-5 first:border-t-0 first:pt-0 ${included ? "" : "opacity-45"}`}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-sm font-semibold uppercase tracking-wide text-[#324034]">{title}</h4>
+        <h4 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-secondary)]">{title}</h4>
         <div className="flex items-center gap-2">
           {onAdd && isEditing && (
             <button
@@ -399,10 +406,10 @@ function HeaderSection({ draft, setDraft, selected, editing, toggle, toggleEdit 
 
   const view = (
     <div className="text-center">
-      <h2 className="text-2xl font-bold tracking-tight text-[#1c261f]">{basic.full_name || "Your name"}</h2>
+      <h2 className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">{basic.full_name || "Your name"}</h2>
       {basic.headline && <p className="mt-1 text-sm font-medium text-pine">{basic.headline}</p>}
       {contactBits.length > 0 && (
-        <p className="mt-2 flex flex-wrap justify-center gap-x-2 gap-y-1 text-xs text-[#5d675f]">
+        <p className="mt-2 flex flex-wrap justify-center gap-x-2 gap-y-1 text-xs text-[var(--text-muted)]">
           {contactBits.map((bit, index) => (
             <span key={`${bit}-${index}`} className="break-all">
               {index > 0 && <span className="mr-2 text-line">·</span>}
@@ -416,7 +423,13 @@ function HeaderSection({ draft, setDraft, selected, editing, toggle, toggleEdit 
 
   const edit = (
     <div className="grid gap-4 md:grid-cols-2">
-      <Field label="Full name" value={basic.full_name} onChange={(value) => updateBasic(setDraft, "full_name", value)} />
+      <Field label="First name" value={basic.first_name} onChange={(value) => updateBasic(setDraft, "first_name", value)} />
+      <Field label="Middle name" value={basic.middle_name} onChange={(value) => updateBasic(setDraft, "middle_name", value)} />
+      <Field label="Last name" value={basic.last_name} onChange={(value) => updateBasic(setDraft, "last_name", value)} />
+      <p className="md:col-span-2 -mt-2 text-xs text-neutral-500">
+        Parsed from &ldquo;{basic.full_name || "your resume"}&rdquo;. Please check the split before
+        saving — applications use the last name on its own.
+      </p>
       <Field label="Headline" value={basic.headline} onChange={(value) => updateBasic(setDraft, "headline", value)} />
       <Field label="Email" value={basic.email} onChange={(value) => updateBasic(setDraft, "email", value)} />
       <Field label="Phone" value={basic.phone} onChange={(value) => updateBasic(setDraft, "phone", value)} />
@@ -446,7 +459,7 @@ function HeaderSection({ draft, setDraft, selected, editing, toggle, toggleEdit 
 }
 
 function SummarySection({ draft, setDraft, selected, editing, toggle, toggleEdit }: SharedProps) {
-  const view = <p className="text-sm leading-6 text-[#33403a]">{draft.summary}</p>;
+  const view = <p className="text-sm leading-6 text-[var(--text-secondary)]">{draft.summary}</p>;
   const edit = <TextArea label="Professional summary" value={draft.summary} onChange={(value) => setDraft((current) => ({ ...current, summary: value }))} />;
   return (
     <ResumeSection
@@ -467,7 +480,7 @@ function SkillsSection({ draft, setDraft, selected, editing, toggle, toggleEdit 
   const groups = draft.skill_groups.filter((group) => group.items.length > 0);
   const view =
     groups.length > 0 ? (
-      <div className="grid gap-1.5 text-sm text-[#33403a]">
+      <div className="grid gap-1.5 text-sm text-[var(--text-secondary)]">
         {groups.map((group, index) => (
           <p key={`${group.category}-${index}`}>
             {group.category && <span className="font-semibold">{group.category}: </span>}
@@ -513,10 +526,10 @@ function ExperienceSection({ draft, setDraft, selected, editing, toggle, toggleE
       {draft.experience.map((item, index) => (
         <div key={index}>
           <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-            <p className="font-semibold text-[#1c261f]">{[item.title, item.company].filter(Boolean).join(" — ")}</p>
-            <p className="text-xs text-[#5d675f]">{formatDateRange(item.start_date, item.end_date, item.currently_working)}</p>
+            <p className="font-semibold text-[var(--text-primary)]">{[item.title, item.company].filter(Boolean).join(" — ")}</p>
+            <p className="text-xs text-[var(--text-muted)]">{formatDateRange(item.start_date, item.end_date, item.currently_working)}</p>
           </div>
-          {item.location && <p className="text-xs text-[#5d675f]">{item.location}</p>}
+          {item.location && <p className="text-xs text-[var(--text-muted)]">{item.location}</p>}
           <BulletList items={item.bullets} />
         </div>
       ))}
@@ -564,9 +577,9 @@ function ProjectsSection({ draft, setDraft, selected, editing, toggle, toggleEdi
     <div className="grid gap-4">
       {draft.projects.map((item, index) => (
         <div key={index}>
-          <p className="font-semibold text-[#1c261f]">{item.name}</p>
-          {item.subtitle && <p className="text-xs italic text-[#5d675f]">{item.subtitle}</p>}
-          {item.description && <p className="mt-1 text-sm text-[#33403a]">{item.description}</p>}
+          <p className="font-semibold text-[var(--text-primary)]">{item.name}</p>
+          {item.subtitle && <p className="text-xs italic text-[var(--text-muted)]">{item.subtitle}</p>}
+          {item.description && <p className="mt-1 text-sm text-[var(--text-secondary)]">{item.description}</p>}
           <BulletList items={item.bullets} />
         </div>
       ))}
@@ -612,12 +625,12 @@ function EducationSection({ draft, setDraft, selected, editing, toggle, toggleEd
       {draft.education.map((item, index) => (
         <div key={index}>
           <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-            <p className="font-semibold text-[#1c261f]">{item.school}</p>
-            <p className="text-xs text-[#5d675f]">{formatDateRange(item.start_date, item.end_date, false)}</p>
+            <p className="font-semibold text-[var(--text-primary)]">{item.school}</p>
+            <p className="text-xs text-[var(--text-muted)]">{formatDateRange(item.start_date, item.end_date, false)}</p>
           </div>
-          <p className="text-sm text-[#33403a]">{[item.degree, item.minor && `Minor in ${item.minor}`].filter(Boolean).join(", ")}</p>
-          {item.gpa && <p className="text-xs text-[#5d675f]">GPA: {item.gpa}</p>}
-          {item.honors.length > 0 && <p className="text-xs text-[#5d675f]">Honors: {item.honors.join(", ")}</p>}
+          <p className="text-sm text-[var(--text-secondary)]">{[item.degree, item.minor && `Minor in ${item.minor}`].filter(Boolean).join(", ")}</p>
+          {item.gpa && <p className="text-xs text-[var(--text-muted)]">GPA: {item.gpa}</p>}
+          {item.honors.length > 0 && <p className="text-xs text-[var(--text-muted)]">Honors: {item.honors.join(", ")}</p>}
         </div>
       ))}
     </div>
@@ -659,11 +672,11 @@ function EducationSection({ draft, setDraft, selected, editing, toggle, toggleEd
 function AwardsSection({ draft, setDraft, selected, editing, toggle, toggleEdit }: SharedProps) {
   const empty: AwardDraft = { name: "", issuer: "", date: "", description: "" };
   const view = (
-    <ul className="grid list-disc gap-1 pl-5 text-sm text-[#33403a]">
+    <ul className="grid list-disc gap-1 pl-5 text-sm text-[var(--text-secondary)]">
       {draft.awards.map((item, index) => (
         <li key={index}>
           {item.name}
-          {item.date && <span className="text-[#5d675f]"> ({item.date})</span>}
+          {item.date && <span className="text-[var(--text-muted)]"> ({item.date})</span>}
         </li>
       ))}
     </ul>
@@ -703,7 +716,7 @@ function AwardsSection({ draft, setDraft, selected, editing, toggle, toggleEdit 
 function CertificationsSection({ draft, setDraft, selected, editing, toggle, toggleEdit }: SharedProps) {
   const empty: CertificationDraft = { name: "", issuer: "", issue_date: "", expiration_date: "", credential_url: "" };
   const view = (
-    <ul className="grid list-disc gap-1 pl-5 text-sm text-[#33403a]">
+    <ul className="grid list-disc gap-1 pl-5 text-sm text-[var(--text-secondary)]">
       {draft.certifications.map((item, index) => (
         <li key={index}>{[item.name, item.issuer].filter(Boolean).join(" — ")}</li>
       ))}
@@ -741,7 +754,7 @@ function CertificationsSection({ draft, setDraft, selected, editing, toggle, tog
 function TargetsSection({ draft, setDraft, selected, editing, toggle, toggleEdit }: SharedProps) {
   const targets = draft.job_targets;
   const view = (
-    <div className="grid gap-1 text-sm text-[#33403a]">
+    <div className="grid gap-1 text-sm text-[var(--text-secondary)]">
       {targets.target_roles.length > 0 && <p><span className="font-semibold">Roles: </span>{targets.target_roles.join(", ")}</p>}
       {targets.target_levels.length > 0 && <p><span className="font-semibold">Levels: </span>{targets.target_levels.join(", ")}</p>}
       {targets.preferred_locations.length > 0 && <p><span className="font-semibold">Locations: </span>{targets.preferred_locations.join(", ")}</p>}
@@ -833,7 +846,7 @@ function RecordEditor<T>({
   render: (record: T, index: number, setRecord: (record: T) => void) => ReactNode;
 }) {
   if (records.length === 0) {
-    return <p className="rounded-md border border-dashed border-line bg-panel p-4 text-center text-sm text-[#5d675f]">No records. Use “Add” to create one.</p>;
+    return <p className="rounded-md border border-dashed border-line bg-panel p-4 text-center text-sm text-[var(--text-muted)]">No records. Use “Add” to create one.</p>;
   }
   return (
     <div className="grid gap-4">
@@ -857,7 +870,7 @@ function BulletList({ items }: { items: string[] }) {
     return null;
   }
   return (
-    <ul className="mt-1 grid list-disc gap-1 pl-5 text-sm leading-6 text-[#33403a]">
+    <ul className="mt-1 grid list-disc gap-1 pl-5 text-sm leading-6 text-[var(--text-secondary)]">
       {items.map((item, index) => (
         <li key={index}>{item}</li>
       ))}
@@ -951,9 +964,16 @@ function normalizeImportDraft(draft: Record<string, unknown>): EditableImportDra
   const basic = recordValue(draft.basic_info);
   const targets = recordValue(draft.job_targets);
   const links = recordValue(draft.links);
+  // The parser returns a single free-text name; propose a split for the user to
+  // confirm. Any parts the API already sent win over the proposal.
+  const parsedFullName = stringValue(basic.full_name);
+  const proposed = suggestNameParts(parsedFullName);
   return {
     basic_info: {
-      full_name: stringValue(basic.full_name),
+      first_name: stringValue(basic.first_name) || proposed.firstName,
+      middle_name: stringValue(basic.middle_name) || proposed.middleName,
+      last_name: stringValue(basic.last_name) || proposed.lastName,
+      full_name: parsedFullName,
       headline: stringValue(basic.headline),
       email: stringValue(basic.email),
       phone: stringValue(basic.phone),
@@ -1092,7 +1112,16 @@ function findConflicts(draft: EditableImportDraft, currentProfileObject: object,
   const currentCareer = currentCareerObject as Record<string, unknown>;
   const conflicts: { field: string; existing: string; imported: string }[] = [];
   const fields: [string, string][] = [
-    ["full_name", draft.basic_info.full_name],
+    ["first_name", draft.basic_info.first_name],
+    ["middle_name", draft.basic_info.middle_name],
+    ["last_name", draft.basic_info.last_name],
+    // Compared against the name the user actually confirmed, not the raw
+    // parsed string, so an unchanged split is not reported as a conflict.
+    ["full_name", composeFullName({
+      firstName: draft.basic_info.first_name,
+      middleName: draft.basic_info.middle_name,
+      lastName: draft.basic_info.last_name
+    }) || draft.basic_info.full_name],
     ["phone", draft.basic_info.phone],
     ["location_city", draft.basic_info.location_city],
     ["location_state", draft.basic_info.location_state],

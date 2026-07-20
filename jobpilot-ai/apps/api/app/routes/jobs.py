@@ -1,22 +1,27 @@
+import logging
+import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.jobs.company_logo_service import resolve_company_logo
+from app.jobs.company_logo_service import normalize_company_key, resolve_company_logo
 from app.jobs.job_eligibility_service import evaluate_eligibility
 from app.jobs.job_ingestion_service import build_profile_view, discover_jobs, rematch_user
 from app.jobs.job_ingestion_service import _job_view  # noqa: PLC2701 - internal shared mapper
 from app.jobs.job_normalization_service import DEMO_COMPANIES, is_placeholder_url
 from app.jobs.job_search_criteria_service import build_search_criteria
+from app.jobs.safe_fetch import FetchFailedError, UnsafeUrlError, safe_fetch_image
 from app.models.entities import (
     ApplicationStatus,
     ApplicationTracker,
+    CompanyBranding,
     DocumentFormat,
     DocumentType,
     Experience,
@@ -28,6 +33,7 @@ from app.models.entities import (
     UserProfile,
 )
 from app.documents.cover_letter_generation_service import generate_cover_letter
+from app.documents.filenames import build_document_filename
 from app.documents.resume_generation_service import generate_resume
 from app.documents.store import export_document as render_document_file
 from app.documents.store import persist_document, serialize_document
@@ -40,6 +46,65 @@ from app.schemas.jobs import (
 from app.services.documents import export_document_file, generate_document
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+logger = logging.getLogger("jobpilot.logos")
+
+_LOGO_CACHE_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")) / "company_logos"
+_EXT_FOR_CONTENT_TYPE = {
+    "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp",
+    "image/gif": "gif", "image/x-icon": "ico", "image/vnd.microsoft.icon": "ico"
+}
+
+
+@router.get("/companies/{normalized_key}/logo")
+def company_logo_proxy(normalized_key: str, db: Session = Depends(get_db)) -> Response:
+    """Serve a company's logo through a JobPilot-controlled endpoint instead of
+    the browser hitting an arbitrary third-party/ATS-provided URL directly:
+    avoids mixed-content/host-restriction issues, survives an upstream URL
+    expiring or going down, and lets a broken source be re-resolved without
+    the frontend caring. SSRF-safe: the only URL ever fetched server-side is
+    the one already resolved and persisted on this company's CompanyBranding
+    row — never an arbitrary client-supplied URL — and even that goes through
+    safe_fetch_image's public-address validation before any bytes are trusted.
+    """
+    branding = db.scalar(select(CompanyBranding).where(CompanyBranding.normalized_key == normalized_key))
+    if branding is None or not branding.logo_url:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No logo resolved for this company")
+
+    _LOGO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached = _find_cached_logo(normalized_key)
+    if cached is not None:
+        path, content_type = cached
+        return Response(content=path.read_bytes(), media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
+
+    try:
+        result = safe_fetch_image(branding.logo_url)
+    except (UnsafeUrlError, FetchFailedError) as exc:
+        logger.info("logo_proxy fetch_failed key=%s reason=%s", normalized_key, type(exc).__name__)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Logo could not be fetched") from exc
+    except Exception as exc:  # noqa: BLE001 - deliberate catch-all, see below
+        # A logo is decoration: no upstream defect (a library API change, a
+        # surprise exception type from a transport) may ever surface as an
+        # unhandled 500 on a page that is otherwise fine. This is exactly how
+        # the httpx `URL.human_repr()` removal took the endpoint down. The
+        # client gets the same controlled 502 as any other fetch failure and
+        # renders its neutral placeholder; the detail is logged, never returned.
+        logger.warning(
+            "logo_proxy unexpected_error key=%s reason=%s", normalized_key, type(exc).__name__, exc_info=True
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Logo could not be fetched") from exc
+
+    ext = _EXT_FOR_CONTENT_TYPE.get(result.content_type, "img")
+    (_LOGO_CACHE_DIR / f"{normalized_key}.{ext}").write_bytes(result.content)
+    return Response(content=result.content, media_type=result.content_type, headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _find_cached_logo(normalized_key: str) -> tuple[Path, str] | None:
+    for content_type, ext in _EXT_FOR_CONTENT_TYPE.items():
+        path = _LOGO_CACHE_DIR / f"{normalized_key}.{ext}"
+        if path.exists():
+            return path, content_type
+    return None
 
 
 @router.post("/discover")
@@ -284,6 +349,10 @@ def _serialize_card(
         "company": job.company,
         "company_domain": company_domain or None,
         "company_logo_url": company_logo_url or None,
+        # Preferred source: served through our own endpoint (cached, SSRF-safe,
+        # survives the upstream URL changing/expiring). The frontend tries this
+        # first and falls back to company_logo_url, then the neutral placeholder.
+        "company_logo_proxy_path": f"/jobs/companies/{normalize_company_key(job.company or '')}/logo" if company_logo_url else None,
         "source": source.type if source else None,
         "location": job.location,
         "workplace_type": job.remote_type,
@@ -577,7 +646,15 @@ def download_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     path = render_document_file(record, fmt)
     db.commit()
-    filename = f"{(record.title or 'document').replace(' ', '_')}.{fmt.value}"
+    profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
+    filename = build_document_filename(
+        kind=record.type.value,
+        fmt=fmt.value,
+        full_name=profile.full_name if profile else None,
+        first_name=profile.first_name if profile else None,
+        last_name=profile.last_name if profile else None,
+        company=(record.job_snapshot or {}).get("company"),
+    )
     return FileResponse(path, filename=filename)
 
 

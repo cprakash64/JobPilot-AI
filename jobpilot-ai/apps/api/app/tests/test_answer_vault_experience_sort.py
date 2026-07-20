@@ -42,7 +42,7 @@ def db() -> Generator[Session, None, None]:
         engine.dispose()
 
 
-def _user(db: Session, email: str = "sortbug@example.com") -> E.User:
+def _user(db: Session, email: str = "sortbug@mailbox.test-domain.co") -> E.User:
     user = E.User(email=email, hashed_password="x")
     db.add(user)
     db.flush()

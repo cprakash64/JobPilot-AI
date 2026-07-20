@@ -17,7 +17,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0009_score_states_and_ingestion_runs"
+revision: str = "0009_scoring_pipeline"
 down_revision: str | None = "0008_application_status_applying"
 branch_labels = None
 depends_on = None

@@ -534,14 +534,15 @@ describe("JobDiscovery", () => {
     expect(logo).toHaveAttribute("src", "https://logo.clearbit.com/openai.com");
   });
 
-  it("falls back to the company initial when no logo URL is available", async () => {
+  it("falls back to the neutral placeholder (never the company initial) when no logo URL is available", async () => {
     mockJobsFetch({ discovered: [makeJob({ company: "Acme", company_logo_url: "" })] });
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
 
     const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
     expect(within(card).queryByRole("img")).not.toBeInTheDocument();
-    expect(within(card).getByText("A")).toBeInTheDocument();
+    expect(within(card).getByTestId("company-logo-placeholder")).toBeInTheDocument();
+    expect(within(card).queryByText("A")).not.toBeInTheDocument();
   });
 
   it("saves a job via the official save action", async () => {

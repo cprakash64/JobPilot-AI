@@ -8,15 +8,25 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.ai.provider import ai_provider
 from app.core.config import settings
+from app.core.config_validation import enforce as enforce_production_config
+from app.core.log_redaction import install as install_log_redaction
 from app.db.session import SessionLocal
 from app.routes import applications, auth, debug, jobs, privacy, profile
-from app.services.readiness import check_database_readiness
+from app.services.readiness import check_readiness
 
 logger = logging.getLogger("jobpilot")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Safety net first, so anything logged during startup is already filtered.
+    install_log_redaction()
+
+    # Refuse to serve production traffic with development defaults. Raising here
+    # aborts startup, so an orchestrator's rollout halts instead of promoting a
+    # replica that signs JWTs with the publicly-known default key.
+    enforce_production_config(settings)
+
     # Log a secret-free summary of the OpenAI configuration at startup so it is
     # obvious from the API logs whether AI generation is enabled.
     status = ai_provider.status()
@@ -30,11 +40,18 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+# The OpenAPI schema enumerates every endpoint, parameter and payload shape, so
+# it is served outside production only (override with DOCS_ENABLED).
+_docs_on = settings.docs_are_enabled()
+
 app = FastAPI(
     title="JobPilot AI API",
     version="0.1.0",
     description="Compliant, user-controlled AI job-search and application copilot.",
     lifespan=lifespan,
+    docs_url="/docs" if _docs_on else None,
+    redoc_url="/redoc" if _docs_on else None,
+    openapi_url="/openapi.json" if _docs_on else None,
 )
 
 # IMPORTANT: middleware order. `add_middleware` makes the LAST-added middleware
@@ -79,7 +96,11 @@ async def catch_unhandled_errors(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    # Unpacked and store-installed MV3 builds have different extension IDs.
+    # CORS is not authorization: every assisted-apply endpoint still requires a
+    # one-time launch token or session-scoped Bearer token.
+    allow_origin_regex=r"chrome-extension://[a-p]{32}",
+    allow_credentials=settings.cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -93,16 +114,33 @@ app.include_router(applications.router)
 app.include_router(applications.answers_router)
 
 
+@app.get("/healthz")
 @app.get("/health")
-def health() -> dict:
+def healthz() -> dict:
+    """Liveness. Proves only that this process is up and serving.
+
+    Deliberately touches NOTHING external — no database, Redis, filesystem or
+    OpenAI. A liveness probe wired to a dependency restarts healthy replicas
+    during a database blip and escalates a partial outage into a full one; use
+    /readyz for dependency state. Exposes no version or configuration detail.
+
+    ``/health`` is kept as an alias for existing callers.
+    """
     return {"status": "ok"}
 
 
 @app.get("/readyz")
 def readyz() -> JSONResponse:
+    """Readiness. 200 only when this replica can actually serve requests.
+
+    Gated on PostgreSQL connectivity AND the schema being migrated to head.
+    Redis is probed and reported but is not gating — ingestion degrades to
+    inline scoring without it. Body carries booleans, revisions and exception
+    type names only (never driver text, which embeds the DSN).
+    """
     db = SessionLocal()
     try:
-        ready, checks = check_database_readiness(db)
+        ready, checks = check_readiness(db)
     finally:
         db.close()
     status_code = 200 if ready else 503

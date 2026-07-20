@@ -22,7 +22,41 @@ JobPilot AI assists the user. It does not pretend to be the user.
 - Jobs: Greenhouse and Lever public API adapters plus demo source.
 - AI: OpenAI provider abstraction with deterministic local fallback.
 - Documents: DOCX and PDF export services.
-- Infrastructure: Docker Compose, Redis, Celery worker scaffold, GitHub Actions CI.
+- Infrastructure: Docker Compose, Redis, Celery `worker` + `scheduler` (beat) services, GitHub Actions CI.
+
+## Automated Ingestion & Fit Scoring
+
+Discovery, ingestion and fit scoring run automatically — no browser session required.
+
+- **Daily ingestion**: the `scheduler` (Celery beat) service triggers a system-wide
+  run on `JOB_INGESTION_SCHEDULE` (default `0 6 * * *`). The run is guarded by a Redis
+  lock (+ Postgres advisory lock) so multiple replicas never ingest concurrently.
+  Per-source failures are isolated; each run is recorded in `ingestion_runs`.
+- **Automatic scoring**: whenever a job is inserted or its score-relevant content
+  changes, scoring is enqueued to the `worker` for every active user. Each
+  `(user, job)` fit score carries an explicit `score_state`
+  (`pending`/`scoring`/`scored`/`failed`/`profile_incomplete`), a `score_version`,
+  and content/profile hashes so work is idempotent and never redundant.
+- **Frontend**: the Jobs page shows "Calculating fit…" while a score settles, prompts
+  to complete the profile when needed, and polls only while pending scores are visible.
+
+Operational commands (run inside the `api` container):
+
+```bash
+# One-off backfill of missing scores (dry-run first)
+python -m app.jobs.backfill_scores --posted-within-days 7 --only-missing --dry-run
+python -m app.jobs.backfill_scores --posted-within-days 7 --only-missing
+
+# Admin ingestion controls
+python -m app.jobs.manage run-all                 # ingest every enabled source now
+python -m app.jobs.manage run-ats greenhouse      # one ATS provider
+python -m app.jobs.manage run-company stripe       # one company slug
+python -m app.jobs.manage validate-registry        # verify sources against live ATS
+python -m app.jobs.manage runs                      # recent ingestion-run history
+```
+
+Recent runs and the scoring backlog are also exposed at `/debug/ingestion-runs` and
+`/debug/scoring-status`.
 
 ## Stable Local Start
 

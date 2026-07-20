@@ -302,20 +302,44 @@ def test_discover_include_unknown_dates_opt_in(client: TestClient, monkeypatch) 
     assert "ML Engineer" in titles  # the unknown-date job now included
 
 
-def test_discover_isolates_matches_per_user(client: TestClient, monkeypatch) -> None:
+def test_discover_auto_scores_other_active_users(client: TestClient, monkeypatch) -> None:
+    """When user A triggers discovery, newly ingested jobs are automatically
+    scored for every other active user too — user B should NOT have to click
+    "Refresh matches" to get scores (this is the core fix)."""
     a = signup(client, "usera@example.com")
     b = signup(client, "userb@example.com")
+    client.put("/profile", headers=a, json=ml_profile_payload())
+    client.put("/profile", headers=b, json=ml_profile_payload())
+    _patch_sources(monkeypatch, default_jobs())
+
+    client.post("/jobs/discover", headers=a, json={})
+
+    # User B never ran discovery, yet their jobs are scored automatically.
+    b_jobs = client.get("/jobs", headers=b).json()["jobs"]
+    assert b_jobs, "shared postings should be visible"
+    assert any(
+        job["match"] and job["match"]["score_state"] == "scored" for job in b_jobs
+    ), "user B's jobs should be auto-scored without a manual refresh"
+    # User A also has match scores.
+    a_jobs = client.get("/jobs", headers=a).json()["jobs"]
+    assert any(job["match"] and job["match"]["fit_score"] is not None for job in a_jobs)
+
+
+def test_discover_marks_profile_incomplete_users(client: TestClient, monkeypatch) -> None:
+    """A user with no scorable profile gets a profile_incomplete placeholder
+    (not a silent 'Not scored') when jobs are ingested."""
+    a = signup(client, "hasprofile@example.com")
+    b = signup(client, "noprofile@example.com")  # never sets a profile
     client.put("/profile", headers=a, json=ml_profile_payload())
     _patch_sources(monkeypatch, default_jobs())
 
     client.post("/jobs/discover", headers=a, json={})
-    # User B never discovered/matched: they see postings but no personal match scores.
+
     b_jobs = client.get("/jobs", headers=b).json()["jobs"]
-    assert b_jobs, "shared postings should be visible"
-    assert all(job["match"] is None for job in b_jobs)
-    # User A does have match scores.
-    a_jobs = client.get("/jobs", headers=a).json()["jobs"]
-    assert any(job["match"] and job["match"]["fit_score"] is not None for job in a_jobs)
+    assert b_jobs
+    assert all(
+        job["match"] and job["match"]["score_state"] == "profile_incomplete" for job in b_jobs
+    )
 
 
 def test_discover_does_not_crash_without_openai(client: TestClient, monkeypatch) -> None:

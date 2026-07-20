@@ -26,9 +26,10 @@ import {
   type Job,
   type JobsResponse,
   type RefreshSummary,
-  type ResumeContent
+  type ResumeContent,
+  type ScoreState
 } from "@/lib/api";
-import { getFitScoreTone } from "@/lib/fitScore";
+import { getFitScoreTone, getScoreDisplay } from "@/lib/fitScore";
 import { CompanyLogo } from "@/components/CompanyLogo";
 import { Button } from "@/components/Button";
 import { GeneratedResumePreview } from "@/components/GeneratedResumePreview";
@@ -83,6 +84,40 @@ export function JobDiscovery() {
       active = false;
     };
   }, [postedWithin]);
+
+  // Controlled polling: while any visible job is still being scored in the
+  // background, re-fetch the list on a light interval so "Calculating fit…"
+  // resolves into a real score without a manual refresh. Polling STOPS as soon
+  // as no visible score is pending, so a fully-scored list never polls.
+  const hasPendingScores = useMemo(
+    () =>
+      jobs.some((job) => {
+        const state = job.match?.score_state ?? (job.match?.fit_score == null ? "pending" : "scored");
+        return state === "pending" || state === "scoring";
+      }),
+    [jobs]
+  );
+
+  useEffect(() => {
+    if (!hasPendingScores) {
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(async () => {
+      try {
+        const result = await api<JobsResponse>(`/jobs?posted_within_days=${postedWithin}`);
+        if (active) {
+          setJobs(result.jobs);
+        }
+      } catch {
+        // Transient; the next tick (or a manual action) will retry.
+      }
+    }, 4000);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [hasPendingScores, postedWithin, jobs]);
 
   const filtered = useMemo(() => {
     // Filtering "posted within N days" is inherently time-dependent.
@@ -203,12 +238,12 @@ export function JobDiscovery() {
         <Button variant="secondary" type="button" onClick={refreshMatches} disabled={busy}>
           {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh matches
         </Button>
-        {message && <p className="self-center text-sm text-[#5d675f]">{message}</p>}
-        {error && <p className="self-center text-sm text-[#9f3d28]">{error}</p>}
+        {message && <p className="self-center text-sm text-[var(--text-muted)]">{message}</p>}
+        {error && <p className="self-center text-sm text-[var(--danger)]">{error}</p>}
       </div>
 
       {!profileComplete && (
-        <div className="mb-4 rounded-lg border border-[#ead191] bg-[#fff9e8] p-4 text-sm text-[#5b4a17]">
+        <div className="mb-4 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-sm text-[var(--warning)]">
           <p className="font-semibold">Complete your profile to discover better jobs.</p>
           <p className="mt-1">
             Add target roles and skills on your <a className="font-medium text-pine underline" href="/profile">profile</a> so we can
@@ -218,10 +253,10 @@ export function JobDiscovery() {
       )}
 
       {warnings.length > 0 && (
-        <div className="mb-4 rounded-lg border border-[#ead191] bg-[#fff9e8] p-4">
+        <div className="mb-4 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[#9a6a00]" />
-            <div className="text-sm text-[#5b4a17]">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--warning)]" />
+            <div className="text-sm text-[var(--warning)]">
               <p className="font-semibold">Some sources could not be reached</p>
               <ul className="mt-1 list-disc pl-5">
                 {warnings.map((warning) => (
@@ -242,11 +277,11 @@ export function JobDiscovery() {
         </select>
         <input aria-label="Company" className="h-10 rounded-md border border-line px-3" placeholder="Company" value={company} onChange={(event) => setCompany(event.target.value)} />
         <input aria-label="Location" className="h-10 rounded-md border border-line px-3" placeholder="Location" value={location} onChange={(event) => setLocation(event.target.value)} />
-        <label className="flex flex-col text-xs text-[#5d675f]">
+        <label className="flex flex-col text-xs text-[var(--text-muted)]">
           Min fit: {minFit}
           <input aria-label="Minimum fit score" type="range" min={0} max={100} step={5} value={minFit} onChange={(event) => setMinFit(Number(event.target.value))} />
         </label>
-        <label className="flex flex-col text-xs text-[#5d675f]">
+        <label className="flex flex-col text-xs text-[var(--text-muted)]">
           Posted within
           <select aria-label="Posted within days" className="h-10 rounded-md border border-line bg-white px-2" value={postedWithin} onChange={(event) => setPostedWithin(Number(event.target.value))}>
             <option value={7}>7 days</option>
@@ -256,9 +291,9 @@ export function JobDiscovery() {
         </label>
       </div>
 
-      <div className="mb-3 text-sm text-[#5d675f]">
+      <div className="mb-3 text-sm text-[var(--text-muted)]">
         <p>
-          <span className="font-medium text-[#33403a]">Showing {filtered.length} matched job{filtered.length === 1 ? "" : "s"}</span>
+          <span className="font-medium text-[var(--text-secondary)]">Showing {filtered.length} matched job{filtered.length === 1 ? "" : "s"}</span>
           {debug?.sources_searched ? ` · Searched ${debug.sources_searched} verified company source${debug.sources_searched === 1 ? "" : "s"}` : ""}
           {" · Filtered to your roles, level, and locations."}
         </p>
@@ -278,7 +313,7 @@ export function JobDiscovery() {
       </div>
 
       {hasDiscovered && filtered.length > 0 && filtered.length < 10 && (
-        <p className="mb-3 rounded-md border border-[#ead191] bg-[#fff9e8] px-3 py-2 text-sm text-[#5b4a17]">
+        <p className="mb-3 rounded-md border border-[var(--warning-border)] bg-[var(--warning-surface)] px-3 py-2 text-sm text-[var(--warning)]">
           We found only a few strict matches. Add more target roles or locations to broaden results.
         </p>
       )}
@@ -297,7 +332,7 @@ export function JobDiscovery() {
           />
         ))}
         {filtered.length === 0 && (
-          <div className="rounded-lg border border-line bg-white p-8 text-center text-[#5d675f]">
+          <div className="rounded-lg border border-line bg-white p-8 text-center text-[var(--text-muted)]">
             {!profileComplete
               ? "Complete your profile to discover better jobs."
               : hasDiscovered
@@ -347,15 +382,15 @@ function JobCard({
       {/* Top row: company identity + fit badge */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
-          <CompanyLogo company={job.company} logoUrl={job.company_logo_url} />
+          <CompanyLogo company={job.company} logoUrl={job.company_logo_url} proxyPath={job.company_logo_proxy_path} />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-[#33403a]">{job.company}</p>
+            <p className="truncate text-sm font-semibold text-[var(--text-secondary)]">{job.company}</p>
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
               <SourceBadge source={job.source} />
             </div>
           </div>
         </div>
-        <FitBadge score={fit} label={job.match?.fit_label ?? null} />
+        <FitBadge score={fit} label={job.match?.fit_label ?? null} scoreState={job.match?.score_state ?? null} />
       </div>
 
       {/* Title */}
@@ -364,7 +399,7 @@ function JobCard({
       </h2>
 
       {/* Metadata row */}
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[#5d675f]">
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[var(--text-muted)]">
         {job.location && <Meta icon={<MapPin className="h-3.5 w-3.5" />}>{job.location}</Meta>}
         {job.workplace_type && job.workplace_type !== "unknown" && (
           <Meta icon={<Building2 className="h-3.5 w-3.5" />}>{capitalize(job.workplace_type)}</Meta>
@@ -380,7 +415,7 @@ function JobCard({
 
       {/* AI match explanation */}
       {reasons.length > 0 ? (
-        <ul className="mt-3 grid gap-1 text-sm leading-6 text-[#33403a]">
+        <ul className="mt-3 grid gap-1 text-sm leading-6 text-[var(--text-secondary)]">
           {reasons.map((reason) => (
             <li key={reason} className="flex gap-2">
               <span aria-hidden className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-pine/70" />
@@ -389,21 +424,35 @@ function JobCard({
           ))}
         </ul>
       ) : (
-        !job.match && (
-          <p className="mt-3 text-sm text-[#5d675f]">Refresh matches after completing your profile for a fit score.</p>
-        )
+        (() => {
+          const display = getScoreDisplay(job.match?.score_state ?? null, job.match?.fit_score ?? null);
+          if (display.kind === "score") {
+            return null;
+          }
+          return (
+            <p className="mt-3 flex items-center gap-2 text-sm text-[var(--text-muted)]">
+              {display.kind === "calculating" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              <span>{display.helper}</span>
+              {display.kind === "profile_incomplete" && (
+                <a href="/profile" className="font-medium text-pine underline">
+                  Complete profile
+                </a>
+              )}
+            </p>
+          );
+        })()
       )}
 
       {/* Gaps / risks — present but visually quiet */}
       {job.match && (job.match.missing_skills.length > 0 || job.match.risk_factors.length > 0) && (
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5d675f]">
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
           {job.match.missing_skills.length > 0 && (
             <span>
               <span className="font-medium">Missing:</span> {job.match.missing_skills.slice(0, 4).join(", ")}
             </span>
           )}
           {job.match.risk_factors.length > 0 && (
-            <span className="text-[#9f3d28]">{job.match.risk_factors[0]}</span>
+            <span className="text-[var(--danger)]">{job.match.risk_factors[0]}</span>
           )}
         </div>
       )}
@@ -429,7 +478,7 @@ function JobCard({
 function Meta({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="text-[#8a958c]">{icon}</span>
+      <span className="text-[var(--text-muted)]">{icon}</span>
       {children}
     </span>
   );
@@ -531,8 +580,8 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
         <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-4">
           <div className="min-w-0">
             <h3 className="text-xl font-semibold">{isResume ? "Tailored Resume" : "Cover Letter"}</h3>
-            <p className="mt-0.5 text-sm text-[#33403a]">{subtitle}</p>
-            <p className="text-xs text-[#5d675f]">Generated from your saved profile and this job description.</p>
+            <p className="mt-0.5 text-sm text-[var(--text-secondary)]">{subtitle}</p>
+            <p className="text-xs text-[var(--text-muted)]">Generated from your saved profile and this job description.</p>
             <div className="mt-2 flex flex-wrap gap-1.5">
               {isResume && quality.ats_friendly && <QualityBadge label="ATS-friendly" />}
               {quality.job_tailored && <QualityBadge label="Tailored to job" />}
@@ -544,7 +593,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
               <button
                 type="button"
                 aria-pressed={mode === "preview"}
-                className={`px-3 py-1.5 ${mode === "preview" ? "bg-pine text-white" : "bg-white text-[#33403a]"}`}
+                className={`px-3 py-1.5 ${mode === "preview" ? "bg-pine text-white" : "bg-white text-[var(--text-secondary)]"}`}
                 onClick={() => setMode("preview")}
               >
                 Preview
@@ -552,7 +601,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
               <button
                 type="button"
                 aria-pressed={mode === "edit"}
-                className={`px-3 py-1.5 ${mode === "edit" ? "bg-pine text-white" : "bg-white text-[#33403a]"}`}
+                className={`px-3 py-1.5 ${mode === "edit" ? "bg-pine text-white" : "bg-white text-[var(--text-secondary)]"}`}
                 onClick={() => setMode("edit")}
               >
                 Edit
@@ -566,7 +615,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
 
         <div className="flex-1 overflow-auto bg-panel/50 p-6">
           {(warnings.length > 0 || (quality.missing_job_skills_not_claimed?.length ?? 0) > 0) && (
-            <div className="mx-auto mb-4 max-w-[820px] rounded-md border border-[#ead191] bg-[#fff9e8] px-3 py-2 text-xs text-[#5b4a17]">
+            <div className="mx-auto mb-4 max-w-[820px] rounded-md border border-[var(--warning-border)] bg-[var(--warning-surface)] px-3 py-2 text-xs text-[var(--warning)]">
               {warnings.map((warning) => (
                 <p key={warning}>{warning}</p>
               ))}
@@ -592,9 +641,9 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
           <Button type="button" onClick={save}><Save className="h-4 w-4" /> Save document</Button>
           <Button variant="secondary" type="button" onClick={copy}>Copy text</Button>
           <Button variant="secondary" type="button" onClick={() => download("docx")}>Download DOCX</Button>
-          <Button variant="secondary" type="button" onClick={() => download("pdf")}>Download PDF <span className="ml-1 text-[10px] uppercase text-[#5d675f]">beta</span></Button>
+          <Button variant="secondary" type="button" onClick={() => download("pdf")}>Download PDF <span className="ml-1 text-[10px] uppercase text-[var(--text-muted)]">beta</span></Button>
           <Button variant="secondary" type="button" onClick={onClose}>Close</Button>
-          {status && <span className="text-sm text-[#5d675f]">{status}</span>}
+          {status && <span className="text-sm text-[var(--text-muted)]">{status}</span>}
         </div>
       </div>
     </div>
@@ -603,7 +652,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
 
 function QualityBadge({ label }: { label: string }) {
   return (
-    <span className="inline-flex items-center rounded-full border border-[#bcd3c3] bg-[#eef5f0] px-2 py-0.5 text-[11px] font-medium text-[#2f5741]">
+    <span className="inline-flex items-center rounded-full border border-[var(--success-border)] bg-[var(--success-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)]">
       {label}
     </span>
   );
@@ -820,7 +869,7 @@ function isValidApplyUrl(url: string | null | undefined): boolean {
 function ApplyButton({ url }: { url: string | null | undefined }) {
   if (!isValidApplyUrl(url)) {
     // Never render an apply link to a missing/placeholder URL.
-    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[#5d675f]">No official link available</span>;
+    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[var(--text-muted)]">No official link available</span>;
   }
   return (
     <a
@@ -841,7 +890,7 @@ function ApplyButton({ url }: { url: string | null | undefined }) {
  */
 function AssistedApplyButton({ url, onApply }: { url: string | null | undefined; onApply: () => void }) {
   if (!isValidApplyUrl(url)) {
-    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[#5d675f]">No official link available</span>;
+    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[var(--text-muted)]">No official link available</span>;
   }
   // Keep a real href (so open-in-new-tab / right-click still reach the official
   // page) but intercept a plain click to run the assisted-apply preparation flow.
@@ -874,7 +923,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
         <div className="flex items-start justify-between gap-4 border-b border-line p-5">
           <div>
             <h3 className="text-xl font-semibold">{job.title}</h3>
-            <p className="mt-1 text-sm text-[#5d675f]">
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
               {job.company}
               {job.location ? ` · ${job.location}` : ""}
             </p>
@@ -895,7 +944,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
             <section className="mt-4 rounded-lg border border-line bg-panel/50 p-4">
               <h4 className="font-semibold">Why this matches</h4>
               {job.match.match_reasons.length === 0 && job.match.fit_score !== null && (
-                <p className="mt-1 text-xs text-[#5d675f]">Deterministic match — add more profile detail for richer reasons.</p>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">Deterministic match — add more profile detail for richer reasons.</p>
               )}
               <ul className="mt-2 list-disc pl-5 text-sm leading-6">
                 {job.match.match_reasons.map((reason) => (
@@ -906,7 +955,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
                 <p className="mt-2 text-sm"><span className="font-medium">Missing skills:</span> {job.match.missing_skills.join(", ")}</p>
               )}
               {job.match.risk_factors.length > 0 && (
-                <ul className="mt-2 list-disc pl-5 text-sm text-[#9f3d28]">
+                <ul className="mt-2 list-disc pl-5 text-sm text-[var(--danger)]">
                   {job.match.risk_factors.map((risk) => (
                     <li key={risk}>{risk}</li>
                   ))}
@@ -921,7 +970,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
           {job.responsibilities && job.responsibilities.length > 0 && (
             <section className="mt-4">
               <h4 className="font-semibold">Responsibilities</h4>
-              <ul className="mt-2 list-disc pl-5 text-sm leading-6 text-[#33403a]">
+              <ul className="mt-2 list-disc pl-5 text-sm leading-6 text-[var(--text-secondary)]">
                 {job.responsibilities.map((item) => (
                   <li key={item}>{item}</li>
                 ))}
@@ -943,7 +992,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
           {job.description_clean && (
             <section className="mt-4">
               <h4 className="font-semibold">Description</h4>
-              <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#33403a]">{job.description_clean.slice(0, 4000)}</p>
+              <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[var(--text-secondary)]">{job.description_clean.slice(0, 4000)}</p>
             </section>
           )}
         </div>
@@ -956,11 +1005,45 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
   );
 }
 
-function FitBadge({ score, label }: { score: number | null; label: string | null }) {
+function FitBadge({
+  score,
+  label,
+  scoreState
+}: {
+  score: number | null;
+  label: string | null;
+  scoreState?: ScoreState | null;
+}) {
+  const display = getScoreDisplay(scoreState, score);
+
+  // Non-scored lifecycle states get a neutral badge with a clear message so a
+  // pending/incomplete/failed score never reads as a permanent "Not scored".
+  if (display.kind !== "score") {
+    return (
+      <div
+        data-fit-tone="none"
+        data-score-state={scoreState ?? "pending"}
+        className="w-24 shrink-0 rounded-xl border border-line bg-panel px-2 py-2 text-center text-[var(--text-muted)]"
+        title={display.helper}
+      >
+        <p className="text-[10px] font-medium uppercase tracking-wide opacity-70">Fit score</p>
+        {display.kind === "calculating" ? (
+          <p className="flex h-8 items-center justify-center" aria-label="Calculating fit">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </p>
+        ) : (
+          <p className="text-2xl font-bold leading-tight">—</p>
+        )}
+        <p className="mt-0.5 text-[10px] font-semibold leading-tight">{display.label}</p>
+      </div>
+    );
+  }
+
   const tone = getFitScoreTone(score);
   return (
     <div
       data-fit-tone={tone.key}
+      data-score-state="scored"
       className={`w-24 shrink-0 rounded-xl border px-2 py-2 text-center ${tone.container}`}
       title={tone.description}
     >
@@ -978,7 +1061,7 @@ function SourceBadge({ source }: { source: string | null }) {
     return null;
   }
   const label = SOURCE_LABELS[source.toLowerCase()] ?? source[0].toUpperCase() + source.slice(1);
-  return <span className="rounded-full border border-line px-2 py-0.5 text-xs text-[#5d675f]">{label}</span>;
+  return <span className="rounded-full border border-line px-2 py-0.5 text-xs text-[var(--text-muted)]">{label}</span>;
 }
 
 function WorkplaceBadge({ type }: { type: string | null }) {
@@ -997,7 +1080,7 @@ function PostedBadge({ postedAt }: { postedAt: string | null }) {
   if (!label) {
     return null;
   }
-  return <span className="rounded-full bg-panel px-2 py-0.5 text-xs text-[#5d675f]">{label}</span>;
+  return <span className="rounded-full bg-panel px-2 py-0.5 text-xs text-[var(--text-muted)]">{label}</span>;
 }
 
 function daysAgo(postedAt: string | null, now: number): number | null {

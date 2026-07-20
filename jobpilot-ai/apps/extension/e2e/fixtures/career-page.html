@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Careers — Example Corp</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; }
+      nav { padding: 12px 24px; border-bottom: 1px solid #ddd; }
+      iframe { width: 100%; height: 900px; border: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      The CARRIER page: a normal careers site whose own document contains only
+      site chrome and a job-search box. The application itself lives in a
+      cross-origin iframe (served from a different port).
+
+      This is the exact shape of the live failure: the top frame legitimately
+      has no application, and previously reported "JobPilot couldn't identify
+      the application form on this page" on behalf of the whole tab.
+    -->
+    <nav role="navigation">
+      <form role="search" id="site-search">
+        <label for="q">Search jobs</label>
+        <input id="q" type="search" placeholder="Search jobs" />
+        <button type="submit">Search</button>
+      </form>
+    </nav>
+
+    <main>
+      <h1>Software Engineer, Payments</h1>
+      <p>Apply below.</p>
+      <!-- src is injected by the test so the port can vary. -->
+      <iframe id="ats-frame" title="Application" data-role="application"></iframe>
+    </main>
+
+    <script>
+      const params = new URLSearchParams(location.search);
+      const embed = params.get("embed");
+      if (embed) document.getElementById("ats-frame").src = embed;
+    </script>
+  </body>
+</html>

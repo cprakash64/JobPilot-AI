@@ -7,10 +7,20 @@
 export type CanonicalField =
   // personal / contact
   | "first_name"
+  | "middle_name"
   | "last_name"
   | "full_name"
+  | "preferred_name"
+  | "preferred_first_name"
+  | "preferred_last_name"
+  | "pronouns"
   | "email"
+  // Phone comes in three shapes so a form that splits the country selector from
+  // the national number can be filled without concatenating (and without
+  // duplicating "+1"). "phone" is E.164 and is used for single-input forms.
   | "phone"
+  | "phone_country"
+  | "phone_national"
   | "address"
   | "city"
   | "state"
@@ -20,6 +30,11 @@ export type CanonicalField =
   | "linkedin_url"
   | "github_url"
   | "portfolio_url"
+  // company-specific (never reused across employers — see mapping.ts / vault scope)
+  | "referral_source"
+  | "previously_employed"
+  | "relatives_employed"
+  | "previously_interviewed"
   // employment / education
   | "current_company"
   | "current_title"
@@ -30,6 +45,11 @@ export type CanonicalField =
   | "work_authorization_us"
   | "sponsorship_required_now"
   | "sponsorship_required_future"
+  // A narrow, non-factual consent: the employer's candidate/data privacy
+  // policy acknowledgement. This is intentionally separate from
+  // `legal_attestation`, which may assert facts and always needs an explicit
+  // stored answer.
+  | "privacy_policy_acknowledgement"
   // location / preferences
   | "willing_to_relocate"
   | "preferred_workplace"
@@ -76,3 +96,17 @@ export const CUSTOM_RESPONSE_FIELDS: ReadonlySet<CanonicalField> = new Set([
 ]);
 
 export const UPLOAD_FIELDS: ReadonlySet<CanonicalField> = new Set(["resume_upload", "cover_letter_upload"]);
+
+/** Canonical keys whose saved answers default to "company" scope in the
+ * answer vault — reusable at THIS employer only, never auto-applied to a
+ * different one (mirrors apps/api's COMPANY_SCOPED_KEYS). */
+export const COMPANY_SCOPED_FIELDS: ReadonlySet<CanonicalField> = new Set([
+  "referral_source",
+  "previously_employed",
+  "relatives_employed",
+  "previously_interviewed"
+]);
+
+export function defaultScopeForField(key: CanonicalField): "global" | "company" {
+  return COMPANY_SCOPED_FIELDS.has(key) ? "company" : "global";
+}

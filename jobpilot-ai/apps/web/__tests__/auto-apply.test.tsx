@@ -11,7 +11,8 @@ vi.mock("@/lib/autoApply", async (importOriginal) => {
     ...actual,
     detectExtension: vi.fn().mockResolvedValue(false),
     detectExtensionState: vi.fn(),
-    handoffToExtension: vi.fn(),
+    stageLaunch: vi.fn(),
+    startAssistedApply: vi.fn().mockResolvedValue({ ok: true, applicationId: "55", tabId: 99 }),
     openOfficialSite: vi.fn().mockReturnValue({} as Window)
   };
 });
@@ -22,7 +23,7 @@ import * as autoApply from "@/lib/autoApply";
 const EXT_CONNECTED = {
   present: true as const,
   outdated: false,
-  info: { installed: true as const, version: "0.1.0", protocolVersion: 1, capabilities: ["fill", "upload"] }
+  info: { installed: true as const, version: "0.2.0", protocolVersion: 3, capabilities: ["fill", "upload"] }
 };
 const EXT_ABSENT = { present: false as const };
 const EXT_OUTDATED = {
@@ -135,13 +136,24 @@ describe("AutoApplyModal", () => {
     expect(screen.getByRole("button", { name: /Open official application/i })).toBeInTheDocument();
   });
 
-  it("hands off the launch token and opens the official site on click when connected", async () => {
+  it("requires an acknowledged launch and lets the extension own the tab (no window.open)", async () => {
     renderModal();
+    // The launch is staged as soon as the session is prepared (before any click),
+    // so the extension's capture-phase click handler already has the payload.
+    await waitFor(() =>
+      expect(autoApply.stageLaunch).toHaveBeenCalledWith(
+        expect.any(String),
+        "launch-token-abc",
+        expect.any(Object)
+      )
+    );
     const openBtn = await screen.findByRole("button", { name: /Open and autofill application/i });
     await userEvent.click(openBtn);
 
-    await waitFor(() => expect(autoApply.handoffToExtension).toHaveBeenCalledWith("launch-token-abc", expect.any(Object)));
-    expect(autoApply.openOfficialSite).toHaveBeenCalledWith(OFFICIAL_URL);
+    // Extension path: the background creates the tab; the web app must NOT also
+    // window.open (that would be a duplicate tab it can't control).
+    expect(autoApply.openOfficialSite).not.toHaveBeenCalled();
+    expect(autoApply.startAssistedApply).toHaveBeenCalledWith(expect.any(String), "launch-token-abc", expect.any(Object));
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
         expect.stringContaining("/application-sessions/55/status"),
@@ -150,13 +162,23 @@ describe("AutoApplyModal", () => {
     );
   });
 
-  it("does not hand off the launch token when the extension is absent", async () => {
+  it("does not claim opened when the extension rejects the handoff", async () => {
+    vi.mocked(autoApply.startAssistedApply).mockResolvedValueOnce({
+      ok: false, code: "CONTENT_SCRIPT_NOT_INJECTED", message: "The application page could not be initialized."
+    });
+    renderModal();
+    await userEvent.click(await screen.findByRole("button", { name: /Open and autofill application/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("CONTENT_SCRIPT_NOT_INJECTED");
+    expect(screen.getByRole("button", { name: /Open and autofill application/i })).toBeInTheDocument();
+  });
+
+  it("opens the official site manually and does not stage a launch when the extension is absent", async () => {
     vi.mocked(autoApply.detectExtensionState).mockResolvedValue(EXT_ABSENT);
     renderModal();
     const openBtn = await screen.findByRole("button", { name: /Open official application/i });
     await userEvent.click(openBtn);
     expect(autoApply.openOfficialSite).toHaveBeenCalledWith(OFFICIAL_URL);
-    expect(autoApply.handoffToExtension).not.toHaveBeenCalled();
+    expect(autoApply.stageLaunch).not.toHaveBeenCalled();
   });
 
   it("shows a backend-unreachable message when fetch rejects (Failed to fetch)", async () => {
@@ -278,10 +300,13 @@ describe("AutoApplyModal", () => {
     expect(postCount).toBe(1);
   });
 
-  it("handles a blocked popup by keeping a manual link", async () => {
+  it("handles a blocked popup by keeping a manual link (manual/no-extension flow)", async () => {
+    // The popup-blocker path only applies to the manual window.open fallback; with
+    // the extension connected the background owns the tab and never window.opens.
+    vi.mocked(autoApply.detectExtensionState).mockResolvedValue(EXT_ABSENT);
     (autoApply.openOfficialSite as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(null);
     renderModal();
-    await userEvent.click(await screen.findByRole("button", { name: /Open and autofill application/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /Open official application/i }));
     expect(await screen.findByText(/browser blocked the new tab/i)).toBeInTheDocument();
   });
 });

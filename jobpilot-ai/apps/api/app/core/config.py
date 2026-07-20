@@ -32,9 +32,24 @@ class Settings(BaseSettings):
     jwt_expires_minutes: int = 60 * 24 * 7
     cors_origins: list[str] = ["http://localhost:3000"]
     app_env: str = "development"
+    # Validated at startup by app.core.config_validation: when app_env names a
+    # production environment, development defaults (the shipped SECRET_KEY, the
+    # compose database password, wildcard CORS, DEBUG) are refused outright.
+    debug: bool = False
+    # Whether CORS responses may carry credentials — paired with cors_origins by
+    # the wildcard check, since "*" plus credentials is both unsafe and broken.
+    cors_allow_credentials: bool = True
+    # Set true once demographics are stored encrypted; makes the encryption key
+    # mandatory in production rather than optional.
+    demographics_encryption_required: bool = False
+    # None = follow app_env (docs served outside production only).
+    docs_enabled: bool | None = None
     openai_api_key: str | None = None
-    openai_model_smart: str = "gpt-5.5"
-    openai_model_fast: str = "gpt-5-mini"
+    # Role-preserving GPT-5.6 defaults: Sol for quality-first document
+    # generation, Terra for the lower-latency/price path. Environment overrides
+    # remain supported for deployments with pinned models.
+    openai_model_smart: str = "gpt-5.6-sol"
+    openai_model_fast: str = "gpt-5.6-terra"
     openai_embedding_model: str = "text-embedding-3-small"
     demographics_encryption_key: str | None = None
     upload_dir: str = "uploads"
@@ -80,6 +95,20 @@ class Settings(BaseSettings):
                     return [str(item).strip() for item in parsed if str(item).strip()]
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+
+    def docs_are_enabled(self) -> bool:
+        """Serve /docs, /redoc and the OpenAPI schema?
+
+        Explicit DOCS_ENABLED wins; otherwise docs are on everywhere except a
+        production environment. The schema enumerates every endpoint and payload
+        shape, which is free reconnaissance in production.
+        """
+        if self.docs_enabled is not None:
+            return self.docs_enabled
+        from app.core.config_validation import is_production
+
+        return not is_production(self.app_env)
 
 
 @lru_cache

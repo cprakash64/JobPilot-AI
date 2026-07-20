@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class CreateSessionIn(BaseModel):
@@ -39,6 +39,40 @@ class AnswerUpsertIn(BaseModel):
     is_user_verified: bool | None = None
     allow_auto_fill: bool | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
+    scope: str | None = None
+    company_key: str | None = None
+
+
+class SessionAnswerUpsertIn(BaseModel):
+    """Save-for-future-applications from the extension's review widget. Always
+    an explicit, user-initiated confirmation — the caller (background.ts)
+    only sends this after the user picks "Save and fill" on an unresolved
+    question, so it is always recorded as ``source="user_confirmed"`` and
+    verified."""
+
+    value: str = Field(min_length=1, max_length=4000)
+    display_value: str | None = Field(default=None, max_length=4000)
+    scope: str | None = None
+    company_key: str | None = Field(default=None, max_length=160)
+
+
+class SessionNameConfirmIn(BaseModel):
+    """Session-scoped structured-name confirmation. ``given_name``/
+    ``family_name`` stay accepted as aliases for older extension builds."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    first_name: str = Field(
+        min_length=1, max_length=120,
+        validation_alias=AliasChoices("first_name", "given_name"),
+    )
+    last_name: str = Field(
+        min_length=1, max_length=120,
+        validation_alias=AliasChoices("last_name", "family_name"),
+    )
+    middle_name: str | None = Field(default=None, max_length=120)
+    preferred_first_name: str | None = Field(default=None, max_length=120)
+    preferred_last_name: str | None = Field(default=None, max_length=120)
 
 
 class AutofillFailure(BaseModel):
@@ -47,6 +81,18 @@ class AutofillFailure(BaseModel):
 
     field_key: str = Field(min_length=1, max_length=120)
     reason_code: str = Field(min_length=1, max_length=60)
+
+
+class MapOptionIn(BaseModel):
+    """Request to translate a confirmed answer into an employer's exact option
+    wording. Carries ONLY the question, its options, the canonical key, and the
+    confirmed answer — never profile data, tokens, or document content."""
+
+    question_label: str = Field(min_length=1, max_length=500)
+    options: list[str] = Field(min_length=1, max_length=200)
+    canonical_key: str = Field(min_length=1, max_length=100)
+    confirmed_answer: str | None = Field(default=None, max_length=500)
+    help_text: str | None = Field(default=None, max_length=1000)
 
 
 class AutofillResultIn(BaseModel):

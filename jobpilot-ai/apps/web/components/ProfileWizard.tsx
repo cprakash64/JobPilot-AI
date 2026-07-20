@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ClipboardPaste,
   Loader2,
@@ -11,13 +11,24 @@ import {
   X
 } from "lucide-react";
 import { Button } from "@/components/Button";
+import { DemographicsForm } from "@/components/DemographicsForm";
 import {
   ImportProfilePreview,
   type EditableImportDraft,
   type ImportApplyMode,
   type ImportSection
 } from "@/components/ImportProfilePreview";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { validateApplicationEmail } from "@/lib/emailValidation";
+import { composeFullName } from "@/lib/names";
+import { SectionError, toSectionError, type SectionErrorInfo } from "@/components/SectionError";
+import {
+  emptyProfile,
+  normalizeProfile,
+  profileToWire,
+  type ProfileForm,
+  type ProfileWire
+} from "@/lib/profileForm";
 
 const steps = [
   "Import",
@@ -175,25 +186,6 @@ const skillSuggestions: Record<string, string[]> = {
   "Data Analyst": ["SQL", "Excel", "Tableau", "Power BI", "Python", "Pandas"]
 };
 
-type ProfileForm = {
-  full_name: string;
-  phone: string;
-  location_city: string;
-  location_state: string;
-  location_country: string;
-  work_authorization: string;
-  requires_sponsorship: boolean;
-  open_to_relocation: boolean;
-  target_roles: string[];
-  target_levels: string[];
-  preferred_locations: string[];
-  remote_preference: "everything" | "remote" | "hybrid" | "onsite";
-  skills: string[];
-  linkedin_url: string;
-  github_url: string;
-  portfolio_url: string;
-};
-
 type EducationRecord = {
   school: string;
   degree: string;
@@ -268,24 +260,6 @@ type ImportDraft = {
   low_confidence_fields?: string[];
 };
 
-const emptyProfile: ProfileForm = {
-  full_name: "",
-  phone: "",
-  location_city: "",
-  location_state: "",
-  location_country: "United States",
-  work_authorization: "prefer_not_to_say",
-  requires_sponsorship: false,
-  open_to_relocation: false,
-  target_roles: [],
-  target_levels: [],
-  preferred_locations: [],
-  remote_preference: "everything",
-  skills: [],
-  linkedin_url: "",
-  github_url: "",
-  portfolio_url: ""
-};
 
 const emptyCareer: CareerForm = {
   education: [],
@@ -294,6 +268,37 @@ const emptyCareer: CareerForm = {
   certifications: [],
   awards: []
 };
+
+
+/** Turn a FastAPI 422 validation body into per-field messages.
+ *
+ * FastAPI reports `detail: [{loc: ["body", "field"], msg}]`. Anything that is
+ * not that shape yields {} so the caller falls back to a banner. Never returns
+ * the submitted VALUE, only the field name and the reason. */
+function fieldErrorsFromApi(error: unknown): Record<string, string> {
+  if (!(error instanceof ApiError) || error.status !== 422) return {};
+  // For an HTTP error the api() helper leaves the raw body in `message` when it
+  // is not a plain `detail` string — which is exactly the FastAPI 422 shape.
+  const raw = error.details ?? error.message;
+  let detail: unknown = raw;
+  if (typeof raw === "string") {
+    try { detail = JSON.parse(raw); } catch { return {}; }
+  }
+  const items = Array.isArray(detail)
+    ? detail
+    : Array.isArray((detail as { detail?: unknown })?.detail)
+      ? (detail as { detail: unknown[] }).detail
+      : [];
+  const result: Record<string, string> = {};
+  for (const item of items) {
+    const loc = (item as { loc?: unknown[] })?.loc;
+    const msg = (item as { msg?: unknown })?.msg;
+    if (!Array.isArray(loc) || typeof msg !== "string") continue;
+    const field = loc.filter((p) => typeof p === "string" && p !== "body").pop();
+    if (typeof field === "string") result[field] = msg;
+  }
+  return result;
+}
 
 export function ProfileWizard() {
   const [step, setStep] = useState(0);
@@ -306,39 +311,66 @@ export function ProfileWizard() {
   const [importLoading, setImportLoading] = useState("");
   const [importSaving, setImportSaving] = useState(false);
   const [importApplyError, setImportApplyError] = useState("");
+  const [loadError, setLoadError] = useState<SectionErrorInfo | null>(null);
+  // Bumping this re-runs the load effect — the Retry affordance.
+  const [reloadToken, setReloadToken] = useState(0);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // True once the user has edited anything. The profile GET must never
+  // overwrite their in-progress edits if it resolves late — that silently
+  // discarded typed input and then failed validation on save.
+  const [dirty, setDirty] = useState(false);
   const [form, setForm] = useState<ProfileForm>(emptyProfile);
   const [career, setCareer] = useState<CareerForm>(emptyCareer);
+
+  // Current employer is not a profile column — it is the most recent
+  // Experience entry, shown read-only so the two cannot disagree.
+  const currentEmployer = useMemo(() => {
+    const current = career.experience.find((item) => item.currently_working) ?? career.experience[0];
+    return current?.company ?? "";
+  }, [career.experience]);
+
+  const derivedFullName = useMemo(
+    () =>
+      composeFullName({
+        firstName: form.first_name,
+        middleName: form.middle_name,
+        lastName: form.last_name
+      }),
+    [form.first_name, form.middle_name, form.last_name]
+  );
 
   const suggestedSkills = useMemo(() => {
     const suggestions = form.target_roles.flatMap((role) => skillSuggestions[role] ?? []);
     return unique(suggestions).filter((skill) => !form.skills.includes(skill));
   }, [form.target_roles, form.skills]);
 
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
   useEffect(() => {
     let mounted = true;
     async function loadProfile() {
       setLoading(true);
+      setLoadError(null);
       try {
-        const [profileResult, careerResult] = await Promise.all([
-          api<{ profile: (Partial<ProfileForm> & { work_preference?: ProfileForm["remote_preference"] }) | null }>("/profile"),
-          api<Partial<CareerForm>>("/profile/career")
+        const [profileResult, careerResult, account] = await Promise.all([
+          api<{ profile: ProfileWire | null }>("/profile"),
+          api<Partial<CareerForm>>("/profile/career"),
+          // Email lives on the account, not the profile record.
+          api<{ email?: string }>("/auth/me").catch(() => ({ email: "" }))
         ]);
         if (!mounted) {
           return;
         }
-        if (profileResult.profile) {
-          const profile = profileResult.profile;
-          setForm({
-            ...emptyProfile,
-            ...profile,
-            work_authorization: profile.work_authorization ?? "prefer_not_to_say",
-            remote_preference: profile.work_preference ?? profile.remote_preference ?? "everything",
-            target_roles: profile.target_roles ?? [],
-            target_levels: profile.target_levels ?? [],
-            preferred_locations: profile.preferred_locations ?? [],
-            skills: profile.skills ?? []
-          });
-        }
+        // ONE normalization boundary — see lib/profileForm.ts. Never spread an
+        // API profile straight into form state: the wire sends null for any
+        // unset column, and a null in a controlled input crashes the page.
+        // Only seed the form while it is still pristine.
+        setForm((current) =>
+          dirtyRef.current ? current : normalizeProfile(profileResult.profile, account?.email ?? "")
+        );
         setCareer({
           education: normalizeEducationList(careerResult.education ?? []),
           experience: normalizeExperienceList(careerResult.experience ?? []),
@@ -348,7 +380,9 @@ export function ProfileWizard() {
         });
       } catch (loadError) {
         if (mounted) {
-          setError(loadError instanceof Error ? loadError.message : "Could not load profile.");
+          // A failed load is a SECTION-level problem, not a page crash: the
+          // wizard still renders, with a retry affordance and the request id.
+          setLoadError(toSectionError(loadError));
         }
       } finally {
         if (mounted) {
@@ -360,9 +394,10 @@ export function ProfileWizard() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [reloadToken]);
 
   function update<K extends keyof ProfileForm>(key: K, value: ProfileForm[K]) {
+    setDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -377,8 +412,8 @@ export function ProfileWizard() {
   async function save() {
     setMessage("");
     setError("");
-    if (!form.full_name.trim()) {
-      setError("Full name is required.");
+    if (!form.first_name.trim() || !form.last_name.trim()) {
+      setError("First and last name are required.");
       setStep(1);
       return;
     }
@@ -388,16 +423,24 @@ export function ProfileWizard() {
       return;
     }
     setSaving(true);
+    setFieldErrors({});
     try {
-      await api("/profile", {
+      // profileToWire() is the counterpart of normalizeProfile(): one place
+      // that knows the wire shape, so form state and payload cannot drift.
+      await api("/profile", { method: "PUT", body: JSON.stringify(profileToWire(form)) });
+      // The structured name goes through its own endpoint: PUT /profile is a
+      // full overwrite that deliberately does not carry the name parts or the
+      // confirmation flag. Editing the name here IS an explicit confirmation of
+      // the split, so it is never re-derived from full_name afterwards. Runs
+      // after PUT /profile so a first-time save has a profile to attach to.
+      await api("/profile/name", {
         method: "PUT",
         body: JSON.stringify({
-          ...form,
-          work_authorization_status: form.work_authorization,
-          work_preference: form.remote_preference,
-          linkedin_url: form.linkedin_url || null,
-          github_url: form.github_url || null,
-          portfolio_url: form.portfolio_url || null
+          first_name: form.first_name.trim(),
+          middle_name: form.middle_name.trim() || null,
+          last_name: form.last_name.trim(),
+          preferred_first_name: form.preferred_first_name.trim() || null,
+          preferred_last_name: form.preferred_last_name.trim() || null
         })
       });
       await api("/profile/career", {
@@ -412,7 +455,16 @@ export function ProfileWizard() {
       });
       setMessage("Profile saved.");
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Could not save profile.");
+      // Field-level validation (422) is shown against the offending fields
+      // rather than as an opaque banner — and never crashes the page.
+      const perField = fieldErrorsFromApi(saveError);
+      if (Object.keys(perField).length > 0) {
+        setFieldErrors(perField);
+        setError("Some fields need attention before this can be saved.");
+        setStep(1);
+      } else {
+        setError(saveError instanceof Error ? saveError.message : "Could not save profile.");
+      }
     } finally {
       setSaving(false);
     }
@@ -467,7 +519,7 @@ export function ProfileWizard() {
         body: JSON.stringify({ draft, sections, overwrite: overwriteConflicts })
       });
       if (result.profile) {
-        setForm(formFromProfile(result.profile));
+        setForm(normalizeProfile(result.profile as ProfileWire, form.email));
       }
       setCareer(careerFromResponse(result.career));
       setImportOpen(false);
@@ -488,7 +540,7 @@ export function ProfileWizard() {
           <li key={label}>
             <button
               className={`focus-ring w-full rounded-md px-3 py-2 text-left text-sm ${
-                index === step ? "bg-panel font-medium text-pine" : "text-[#5d675f]"
+                index === step ? "bg-panel font-medium text-pine" : "text-[var(--text-muted)]"
               }`}
               onClick={() => setStep(index)}
               type="button"
@@ -503,7 +555,7 @@ export function ProfileWizard() {
         <div className="flex flex-col gap-3 border-b border-line pb-4 md:flex-row md:items-start md:justify-between">
           <div>
             <h2 className="text-xl font-semibold">{steps[step]}</h2>
-            <p className="mt-1 text-sm text-[#5d675f]">
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
               {loading ? "Loading saved profile..." : "Update any section and save when ready."}
             </p>
           </div>
@@ -514,14 +566,25 @@ export function ProfileWizard() {
         </div>
 
         {message && (
-          <p className="mt-4 rounded-md border border-[#b9d7c3] bg-[#eef8f1] px-3 py-2 text-sm text-pine">{message}</p>
+          <p className="mt-4 rounded-md border border-[var(--success-border)] bg-[var(--success-surface)] px-3 py-2 text-sm text-pine">{message}</p>
         )}
         {error && (
-          <p className="mt-4 rounded-md border border-[#f0b4a4] bg-[#fff3ef] px-3 py-2 text-sm text-[#9f3d28]">{error}</p>
+          <p className="mt-4 rounded-md border border-[var(--danger-border)] bg-[var(--danger-surface)] px-3 py-2 text-sm text-[var(--danger)]">{error}</p>
         )}
 
         <div className="mt-5">
-          {step === 0 && (
+          {/* A failed load is section-scoped: the wizard chrome stays usable and
+              the user gets Retry / Back to Import instead of losing the page to
+              the global error boundary. */}
+          {loadError && (
+            <SectionError
+              error={loadError}
+              onRetry={() => { setDirty(false); dirtyRef.current = false; setReloadToken((token) => token + 1); }}
+              onBack={() => { setLoadError(null); setStep(0); }}
+            />
+          )}
+
+          {!loadError && step === 0 && (
             <ImportIntro
               loadingLabel={importLoading}
               onOpenPaste={() => {
@@ -533,13 +596,70 @@ export function ProfileWizard() {
             />
           )}
 
-          {step === 1 && (
+          {!loadError && step === 1 && (
             <div className="grid gap-4 md:grid-cols-2">
-              <Field label="Full name" value={form.full_name} required onChange={(value) => update("full_name", value)} />
-              <Field label="Phone" value={form.phone} onChange={(value) => update("phone", value)} />
-              <Field label="City" value={form.location_city} onChange={(value) => update("location_city", value)} />
-              <Field label="State" value={form.location_state} onChange={(value) => update("location_state", value)} />
+              <Field label="First name" value={form.first_name} required onChange={(value) => update("first_name", value)} error={fieldErrors.first_name} />
+              <Field label="Middle name (optional)" value={form.middle_name} onChange={(value) => update("middle_name", value)} />
+              <Field label="Last name" value={form.last_name} required onChange={(value) => update("last_name", value)} error={fieldErrors.last_name} />
+              <div className="md:col-span-2 -mt-2 text-xs text-neutral-500">
+                Applications will use{" "}
+<strong>{derivedFullName || "your full name"}</strong>{" "}for a
+                &ldquo;full name&rdquo; field, and only <strong>{form.last_name || "your last name"}</strong>{" "}
+                for a &ldquo;last name&rdquo; field.
+              </div>
+              <Field
+                label="Preferred first name (optional)"
+                value={form.preferred_first_name}
+                onChange={(value) => update("preferred_first_name", value)}
+              />
+              <Field
+                label="Preferred last name (optional)"
+                value={form.preferred_last_name}
+                onChange={(value) => update("preferred_last_name", value)}
+              />
+              <Field
+                label="Email"
+                value={form.email}
+                readOnly
+                hint="Your JobPilot login. Change it in Settings."
+              />
+              <Field
+                label="Application email"
+                type="email"
+                value={form.application_email}
+                onChange={(value) => update("application_email", value)}
+                error={fieldErrors.application_email ?? validateApplicationEmail(form.application_email) ?? undefined}
+                hint="This email will be used on job applications. It can be different from your JobPilot login email."
+              />
+              <label>
+                <span className="text-sm font-medium">Phone country</span>
+                <select
+                  className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] px-3 text-[var(--text-primary)]"
+                  value={form.phone_country_iso2}
+                  onChange={(event) => update("phone_country_iso2", event.target.value)}
+                >
+                  {phoneCountryOptions.map(([iso2, label]) => (
+                    <option key={iso2} value={iso2}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <Field
+                label="Phone number"
+                value={form.phone}
+                onChange={(value) => update("phone", value)}
+                error={fieldErrors.phone}
+                hint="Saved in international format so application forms accept it."
+              />
+              <Field label="City" value={form.location_city} onChange={(value) => update("location_city", value)} error={fieldErrors.location_city} />
+              <Field label="State/region" value={form.location_state} onChange={(value) => update("location_state", value)} />
+              <Field label="ZIP/postal code" value={form.location_postal_code} onChange={(value) => update("location_postal_code", value)} />
               <Field label="Country" value={form.location_country} onChange={(value) => update("location_country", value)} />
+              <Field
+                label="Current employer"
+                value={currentEmployer}
+                readOnly
+                hint="Taken from your most recent Experience entry."
+              />
               <label>
                 <span className="text-sm font-medium">Work authorization</span>
                 <select
@@ -552,11 +672,22 @@ export function ProfileWizard() {
                   ))}
                 </select>
               </label>
-              <Toggle
-                label="Requires sponsorship"
-                checked={form.requires_sponsorship}
-                onChange={(value) => update("requires_sponsorship", value)}
-              />
+              <label>
+                <span className="text-sm font-medium">
+                  Will you now or in the future require company sponsorship to retain or extend your work authorization?
+                </span>
+                <select
+                  className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3"
+                  value={form.requires_sponsorship ? "yes" : "no"}
+                  onChange={(event) => update("requires_sponsorship", event.target.value === "yes")}
+                >
+                  <option value="no">No</option>
+                  <option value="yes">Yes</option>
+                </select>
+                <span className="mt-1 block text-xs text-muted">
+                  JobPilot uses this answer for sponsorship questions on employer applications.
+                </span>
+              </label>
               <Toggle
                 label="Open to relocation"
                 checked={form.open_to_relocation}
@@ -565,7 +696,7 @@ export function ProfileWizard() {
             </div>
           )}
 
-          {step === 2 && (
+          {!loadError && step === 2 && (
             <div className="grid gap-5">
               <MultiSelect
                 label="Target roles"
@@ -605,28 +736,28 @@ export function ProfileWizard() {
             </div>
           )}
 
-          {step === 3 && (
+          {!loadError && step === 3 && (
             <EducationEditor
               records={career.education}
               onChange={(education) => setCareer((current) => ({ ...current, education }))}
             />
           )}
 
-          {step === 4 && (
+          {!loadError && step === 4 && (
             <ExperienceEditor
               records={career.experience}
               onChange={(experience) => setCareer((current) => ({ ...current, experience }))}
             />
           )}
 
-          {step === 5 && (
+          {!loadError && step === 5 && (
             <ProjectEditor
               records={career.projects}
               onChange={(projects) => setCareer((current) => ({ ...current, projects }))}
             />
           )}
 
-          {step === 6 && (
+          {!loadError && step === 6 && (
             <div className="grid gap-4">
               <ChipInput
                 label="Skills"
@@ -638,7 +769,7 @@ export function ProfileWizard() {
             </div>
           )}
 
-          {step === 7 && (
+          {!loadError && step === 7 && (
             <div className="grid gap-4 md:grid-cols-2">
               <Field label="LinkedIn" value={form.linkedin_url} onChange={(value) => update("linkedin_url", value)} />
               <Field label="GitHub" value={form.github_url} onChange={(value) => update("github_url", value)} />
@@ -646,13 +777,11 @@ export function ProfileWizard() {
             </div>
           )}
 
-          {step === 8 && (
-            <div className="rounded-md border border-line bg-panel p-4 text-sm leading-6 text-[#5d675f]">
-              This information is optional. Prefer not to answer is always available. It is stored separately and is never used to rank jobs or generate resume content. You can delete it anytime from the EEO page.
-            </div>
+          {!loadError && step === 8 && (
+            <DemographicsForm />
           )}
 
-          {step === 9 && (
+          {!loadError && step === 9 && (
             <div className="grid gap-4">
               <ReviewBlock title="Profile" data={form} />
               <ReviewBlock title="Career" data={career} />
@@ -697,13 +826,13 @@ function ImportIntro({
     <div className="grid gap-4">
       <div className="rounded-lg border border-line bg-panel p-5">
         <h3 className="text-lg font-semibold">Import your profile faster</h3>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-[#5d675f]">
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-muted)]">
           Upload a resume, upload your LinkedIn PDF, or paste your profile text. JobPilot AI will extract a draft profile that you can review and edit.
         </p>
         <p className="mt-3 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium">
           We do not log into LinkedIn or scrape your account. You control what you upload or paste.
         </p>
-        <p className="mt-3 text-sm leading-6 text-[#5d675f]">
+        <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
           On LinkedIn, open your profile, choose More, then Save to PDF. Upload that file here.
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
@@ -811,7 +940,7 @@ function ImportProfileModal({
     <div className="fixed inset-0 z-50 bg-black/40 p-4">
       <div className="mx-auto mt-4 flex max-h-[92vh] max-w-[1100px] flex-col overflow-hidden rounded-lg bg-white shadow-xl">
         <div className="flex items-start justify-between gap-4 border-b border-line bg-white px-5 py-3">
-          <p className="text-xs text-[#5d675f]">
+          <p className="text-xs text-[var(--text-muted)]">
             We do not log into LinkedIn or scrape your account. You control what you upload or paste.
           </p>
           <button className="focus-ring rounded-md p-1.5" type="button" onClick={onClose} aria-label="Close import modal">
@@ -819,14 +948,14 @@ function ImportProfileModal({
           </button>
         </div>
         {applyError && (
-          <p className="mx-5 mt-4 rounded-md border border-[#f0b4a4] bg-[#fff3ef] px-3 py-2 text-sm text-[#9f3d28]">
+          <p className="mx-5 mt-4 rounded-md border border-[var(--danger-border)] bg-[var(--danger-surface)] px-3 py-2 text-sm text-[var(--danger)]">
             {applyError}
           </p>
         )}
         {!draft ? (
           <div className="overflow-auto p-5">
             <h3 className="text-xl font-semibold">Paste profile text</h3>
-            <p className="mb-3 mt-1 text-sm text-[#5d675f]">
+            <p className="mb-3 mt-1 text-sm text-[var(--text-muted)]">
               Paste your resume or LinkedIn “Save to PDF” text and we will extract a reviewable draft.
             </p>
             <textarea
@@ -919,7 +1048,7 @@ function MultiSelect({
       <div className="mt-3 grid gap-3">
         {visibleGroups.map((group) => (
           <div key={group.label}>
-            <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-[#6b756d]">{group.label}</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">{group.label}</h4>
             <div className="mt-2 flex flex-wrap gap-2">
               {group.options.map((option) => (
                 <button
@@ -1127,14 +1256,14 @@ function RepeatableSection<T>({
   return (
     <div className="grid gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-[#5d675f]">Add, edit, or delete {title} records. Save persists all changes.</p>
+        <p className="text-sm text-[var(--text-muted)]">Add, edit, or delete {title} records. Save persists all changes.</p>
         <Button type="button" onClick={() => onChange([...records, newRecord()])}>
           <Plus className="h-4 w-4" /> Add {title}
         </Button>
       </div>
       {records.length === 0 && (
         <button
-          className="rounded-lg border border-dashed border-line bg-panel p-8 text-center text-sm font-medium text-[#5d675f]"
+          className="rounded-lg border border-dashed border-line bg-panel p-8 text-center text-sm font-medium text-[var(--text-muted)]"
           type="button"
           onClick={() => onChange([newRecord()])}
         >
@@ -1165,26 +1294,71 @@ function Field({
   value,
   onChange,
   type = "text",
-  required = false
+  required = false,
+  readOnly = false,
+  error,
+  hint
 }: {
   label: string;
   value: string;
-  onChange: (value: string) => void;
+  onChange?: (value: string) => void;
   type?: string;
   required?: boolean;
+  readOnly?: boolean;
+  error?: string;
+  hint?: string;
 }) {
+  // `value ?? ""` keeps the input CONTROLLED even if a caller ever hands it a
+  // null: React warns (and the field silently stops accepting edits) when an
+  // input flips between undefined and a string.
+  const safeValue = value ?? "";
   return (
-    <label>
-      <span className="text-sm font-medium">{label}{required ? " *" : ""}</span>
+    <label className="block">
+      <span className="text-sm font-medium text-[var(--text-primary)]">
+        {label}
+        {required ? <span aria-hidden="true"> *</span> : null}
+        {required ? <span className="sr-only"> (required)</span> : null}
+      </span>
       <input
-        className="mt-2 h-10 w-full rounded-md border border-line px-3"
+        className={`mt-2 h-10 w-full rounded-md border px-3 bg-[var(--input-background)] text-[var(--text-primary)] ${
+          error ? "border-[var(--danger)]" : "border-[var(--border)]"
+        } ${readOnly ? "bg-[var(--disabled-background)] text-[var(--text-secondary)]" : ""}`}
         type={type}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
+        value={safeValue}
+        readOnly={readOnly}
+        required={required}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${label}-error` : hint ? `${label}-hint` : undefined}
+        onChange={(event) => onChange?.(event.target.value)}
       />
+      {/* Errors are announced and prefixed, never signalled by colour alone. */}
+      {error && (
+        <span id={`${label}-error`} role="alert" className="mt-1 block text-xs text-[var(--danger)]">
+          Error: {error}
+        </span>
+      )}
+      {!error && hint && (
+        <span id={`${label}-hint`} className="mt-1 block text-xs text-[var(--text-muted)]">
+          {hint}
+        </span>
+      )}
     </label>
   );
 }
+
+/** Phone countries offered in Basic info. Deliberately a short, common list —
+ * the stored value is the ISO2 code, and the API normalizes the number to
+ * E.164 using it (app/profile/phone.py). */
+const phoneCountryOptions: [string, string][] = [
+  ["US", "United States (+1)"],
+  ["CA", "Canada (+1)"],
+  ["GB", "United Kingdom (+44)"],
+  ["IN", "India (+91)"],
+  ["AU", "Australia (+61)"],
+  ["DE", "Germany (+49)"],
+  ["FR", "France (+33)"],
+  ["SG", "Singapore (+65)"]
+];
 
 function TextArea({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return (
@@ -1218,41 +1392,11 @@ function ReviewBlock({ title, data }: { title: string; data: unknown }) {
   return (
     <section>
       <h3 className="mb-2 font-semibold">{title}</h3>
-      <pre className="overflow-auto rounded-md bg-[#17211b] p-4 text-xs text-white">
+      <pre className="overflow-auto rounded-md bg-[var(--text-primary)] p-4 text-xs text-white">
         {JSON.stringify(data, null, 2)}
       </pre>
     </section>
   );
-}
-
-function formFromProfile(
-  profile: Partial<ProfileForm> & {
-    work_authorization_status?: string | null;
-    work_authorization?: string | null;
-    work_preference?: ProfileForm["remote_preference"] | null;
-    remote_preference?: ProfileForm["remote_preference"] | null;
-  }
-): ProfileForm {
-  return {
-    ...emptyProfile,
-    ...profile,
-    full_name: profile.full_name ?? "",
-    phone: profile.phone ?? "",
-    location_city: profile.location_city ?? "",
-    location_state: profile.location_state ?? "",
-    location_country: profile.location_country ?? "United States",
-    work_authorization: profile.work_authorization_status ?? profile.work_authorization ?? "prefer_not_to_say",
-    requires_sponsorship: Boolean(profile.requires_sponsorship),
-    open_to_relocation: Boolean(profile.open_to_relocation),
-    target_roles: profile.target_roles ?? [],
-    target_levels: profile.target_levels ?? [],
-    preferred_locations: profile.preferred_locations ?? [],
-    remote_preference: profile.work_preference ?? profile.remote_preference ?? "everything",
-    skills: profile.skills ?? [],
-    linkedin_url: profile.linkedin_url ?? "",
-    github_url: profile.github_url ?? "",
-    portfolio_url: profile.portfolio_url ?? ""
-  };
 }
 
 function careerFromResponse(careerResult: Partial<CareerForm>): CareerForm {

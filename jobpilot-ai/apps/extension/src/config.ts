@@ -11,10 +11,13 @@ export async function getApiBase(): Promise<string> {
   }
 }
 
-/** Origins allowed to hand a launch token to the extension. Local dev by
- * default; set a production origin here (and in the manifest content_scripts /
- * host_permissions) before shipping. Kept in one place so it is easy to audit. */
-export const JOBPILOT_WEB_ORIGINS = ["http://localhost:3000"];
+/** Origins allowed to hand a launch token to the extension. Kept in sync with
+ * the manifest `content_scripts`, `host_permissions`, and `externally_connectable`
+ * so the JobPilot-origin role only activates on trusted JobPilot origins. */
+export const JOBPILOT_WEB_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000", "https://app.jobpilot.ai"];
+export function isApprovedJobPilotOrigin(origin: string): boolean {
+  return JOBPILOT_WEB_ORIGINS.includes(origin);
+}
 
 import type { Capability } from "./messages";
 

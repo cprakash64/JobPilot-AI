@@ -85,6 +85,9 @@ function mockProfileFetch(existingProfile: Record<string, unknown> | null = null
     if (url.endsWith("/profile/career")) {
       return Promise.resolve(jsonResponse({ education: [], experience: [], projects: [], certifications: [], awards: [] }));
     }
+    if (url.endsWith("/profile/demographics")) {
+      return Promise.resolve(jsonResponse({ demographics: null }));
+    }
     if (url.endsWith("/profile")) {
       return Promise.resolve(jsonResponse({ profile: existingProfile }));
     }
@@ -110,6 +113,15 @@ describe("ProfileWizard", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "3. Job targets" }));
     expect(screen.getByLabelText("Preference")).toHaveValue("everything");
+  });
+
+  it("keeps the single EEO editor inside the Profile wizard", async () => {
+    mockProfileFetch();
+    render(React.createElement(ProfileWizard));
+
+    await userEvent.click(screen.getByRole("button", { name: "9. Optional EEO" }));
+    expect(await screen.findByRole("group", { name: "Gender identity" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /I consent/i })).toBeInTheDocument();
   });
 
   it("supports target role, level, and location chips", async () => {
@@ -161,12 +173,15 @@ describe("ProfileWizard", () => {
     expect(await screen.findByRole("heading", { name: "Review imported profile" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Imported Candidate" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Professional Experience" })).toBeInTheDocument();
-    expect(screen.queryByLabelText("Full name")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("First name")).not.toBeInTheDocument();
     expect(screen.getAllByText("AI parsing is unavailable. We extracted basic fields using a simple parser.")).toHaveLength(1);
 
     // Clicking Edit reveals the editable header fields.
     await userEvent.click(screen.getByRole("button", { name: "Edit Header" }));
-    expect(screen.getByLabelText("Full name")).toHaveValue("Imported Candidate");
+    // The parsed name is proposed SPLIT, for the user to confirm or correct —
+    // never saved as a single string to be re-split later.
+    expect(screen.getByLabelText("First name")).toHaveValue("Imported");
+    expect(screen.getByLabelText("Last name")).toHaveValue("Candidate");
   });
 
   it("empty imported sections are hidden from the resume by default", async () => {
@@ -199,8 +214,10 @@ describe("ProfileWizard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Extract draft profile" }));
 
     await userEvent.click(await screen.findByRole("button", { name: "Edit Header" }));
-    await userEvent.clear(screen.getByLabelText("Full name"));
-    await userEvent.type(screen.getByLabelText("Full name"), "Edited Candidate");
+    await userEvent.clear(screen.getByLabelText("First name"));
+    await userEvent.type(screen.getByLabelText("First name"), "Edited");
+    await userEvent.clear(screen.getByLabelText("Last name"));
+    await userEvent.type(screen.getByLabelText("Last name"), "Candidate");
 
     await userEvent.click(screen.getByRole("button", { name: "Edit Professional Experience" }));
     await userEvent.clear(screen.getByLabelText("Experience 1 bullets"));
@@ -210,7 +227,8 @@ describe("ProfileWizard", () => {
     await waitFor(() => expect(screen.getByText("Imported profile saved successfully.")).toBeInTheDocument());
     const applyCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith("/profile/import/apply"));
     const body = JSON.parse(String(applyCall?.[1]?.body));
-    expect(body.draft.basic_info.full_name).toBe("Edited Candidate");
+    expect(body.draft.basic_info.first_name).toBe("Edited");
+    expect(body.draft.basic_info.last_name).toBe("Candidate");
     expect(body.draft.experience[0].bullets).toEqual(["Edited-production-API-bullet"]);
   });
 
@@ -300,7 +318,8 @@ describe("ProfileWizard", () => {
     render(React.createElement(ProfileWizard));
 
     await userEvent.click(screen.getByRole("button", { name: "2. Basic info" }));
-    await userEvent.type(await screen.findByLabelText("Full name *"), "Test Candidate");
+    await userEvent.type(await screen.findByLabelText(/First name/), "Test");
+    await userEvent.type(await screen.findByLabelText(/Last name/), "Candidate");
     await userEvent.click(screen.getByRole("button", { name: "3. Job targets" }));
     await userEvent.click(await screen.findByRole("button", { name: "Backend Engineer" }));
     await userEvent.selectOptions(screen.getByLabelText("Preference"), "remote");

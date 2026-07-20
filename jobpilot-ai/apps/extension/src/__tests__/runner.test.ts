@@ -21,9 +21,9 @@ function session(): ApplicationSessionData {
 }
 
 describe("fill runner (end-to-end on a fixture)", () => {
-  it("fills verified fields, flags review items, never touches sensitive fields", () => {
+  it("fills verified fields, flags review items, never touches sensitive fields", async () => {
     mountFixture(GREENHOUSE_FIXTURE);
-    const summary = runFill(document.querySelector("#application_form")!, session());
+    const summary = await runFill(document.querySelector("#application_form")!, session());
 
     expect((document.getElementById("first_name") as HTMLInputElement).value).toBe("Chandra");
     expect((document.getElementById("email") as HTMLInputElement).value).toBe("cp@example.com");
@@ -38,9 +38,9 @@ describe("fill runner (end-to-end on a fixture)", () => {
     expect(summary.errors).toEqual([]);
   });
 
-  it("clears every JobPilot-filled value, leaving the form as it was", () => {
+  it("clears every JobPilot-filled value, leaving the form as it was", async () => {
     mountFixture(GREENHOUSE_FIXTURE);
-    runFill(document.querySelector("#application_form")!, session());
+    await runFill(document.querySelector("#application_form")!, session());
     const cleared = clearJobPilotFields(document);
     expect(cleared).toBeGreaterThanOrEqual(3);
     expect((document.getElementById("first_name") as HTMLInputElement).value).toBe("");

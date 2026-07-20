@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Samsara — Software Engineer — Application</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; padding: 24px; max-width: 720px; }
+  .field { margin: 18px 0; }
+  label, .lbl { display: block; font-weight: 600; margin-bottom: 4px; }
+  input[type=text], input[type=email], input[type=tel], select { width: 100%; padding: 8px; box-sizing: border-box; }
+  /* React-Select shaped control */
+  .select__control { border: 1px solid #ccc; border-radius: 4px; padding: 8px; cursor: pointer;
+                     display: flex; align-items: center; gap: 6px; min-height: 20px; background: #fff; }
+  .select__placeholder { color: #999; }
+  .select__input { border: 0; outline: none; flex: 1; min-width: 40px; }
+  .select__menu { position: absolute; z-index: 50; background: #fff; border: 1px solid #ccc;
+                  border-radius: 4px; box-shadow: 0 4px 12px #0002; max-height: 220px; overflow: auto; min-width: 260px; }
+  .select__option { padding: 8px 10px; cursor: pointer; }
+  .select__option:hover, .select__option[data-focused="true"] { background: #eef5f0; }
+  .select__option[aria-disabled="true"] { color: #bbb; cursor: not-allowed; }
+  .select__multi-value { background: #eef5f0; border-radius: 3px; padding: 2px 6px; margin-right: 4px; }
+  /* A floating panel occupying the same corner the JobPilot widget uses. */
+  #fake-widget { position: fixed; right: 18px; bottom: 18px; width: 320px; height: 260px;
+                 background: #fff; border: 1px solid #bcd3c3; z-index: 2147483647; }
+  .spacer { height: 700px; }
+</style>
+</head>
+<body>
+<h1>Apply: Software Engineer</h1>
+<form id="application-form" aria-label="Application for Software Engineer at Samsara">
+
+  <div class="field">
+    <label for="first_name">First Name *</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required />
+  </div>
+
+  <!-- 1. NATIVE SELECT -->
+  <div class="field">
+    <label for="work_auth">Do you have current legal authorization to work in the United States? *</label>
+    <select id="work_auth" required>
+      <option value="">Select...</option><option>Yes</option><option>No</option>
+    </select>
+  </div>
+
+  <!-- 2. GREENHOUSE CUSTOM SINGLE-SELECT (menu inline, opens on mousedown) -->
+  <div class="field" data-required="true">
+    <span class="lbl" id="prev-label">Have you previously worked at Samsara? *</span>
+    <div id="prev_samsara" class="select__control" role="combobox" aria-labelledby="prev-label"
+         aria-expanded="false" aria-controls="prev-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 3. REACT SELECT WITH MENU PORTAL (menu appended to document.body) -->
+  <div class="field" data-required="true">
+    <span class="lbl" id="country-label">Country *</span>
+    <div id="country" class="select__control" role="combobox" aria-labelledby="country-label"
+         aria-expanded="false" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 4. SEARCHABLE COMBOBOX (filters as you type) -->
+  <div class="field" data-required="true">
+    <span class="lbl" id="sponsor-label">Will you now or in the future require Samsara to sponsor an immigration case? *</span>
+    <div id="sponsor" class="select__control" role="combobox" aria-labelledby="sponsor-label"
+         aria-autocomplete="list" aria-expanded="false" aria-controls="sponsor-menu">
+      <span class="select__placeholder">Select...</span>
+      <span class="select__value"></span>
+      <input class="select__input" type="text" aria-labelledby="sponsor-label" />
+    </div>
+  </div>
+
+  <!-- 5. MULTI-SELECT (menu stays open; chips render) -->
+  <div class="field" data-required="true">
+    <span class="lbl" id="learned-label">Where have you learned about Samsara? (select all that apply) *</span>
+    <div id="learned" class="select__control" role="combobox" aria-labelledby="learned-label"
+         aria-multiselectable="true" aria-expanded="false" aria-controls="learned-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 6. CASCADE: country2 -> state (state options depend on country2) -->
+  <div class="field">
+    <span class="lbl" id="country2-label">Billing country</span>
+    <div id="country2" class="select__control" role="combobox" aria-labelledby="country2-label"
+         aria-expanded="false" aria-controls="country2-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+  <div class="field">
+    <span class="lbl" id="state-label">State / Province</span>
+    <div id="state" class="select__control" role="combobox" aria-labelledby="state-label"
+         aria-expanded="false" aria-controls="state-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 7. DELAYED OPTIONS (async load after opening) -->
+  <div class="field">
+    <span class="lbl" id="referral-label">How did you hear about this opportunity?</span>
+    <div id="referral" class="select__control" role="combobox" aria-labelledby="referral-label"
+         aria-expanded="false" aria-controls="referral-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 8. VIRTUALIZED LIST (only a window of options is in the DOM) -->
+  <div class="field">
+    <span class="lbl" id="virt-label">Nationality</span>
+    <div id="virt" class="select__control" role="combobox" aria-labelledby="virt-label"
+         aria-expanded="false" aria-controls="virt-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 9. FLAKY OPEN: ignores the first open attempt -->
+  <div class="field">
+    <span class="lbl" id="flaky-label">Preferred pronouns</span>
+    <div id="flaky" class="select__control" role="combobox" aria-labelledby="flaky-label"
+         aria-expanded="false" aria-controls="flaky-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <!-- 10. INERT list: opens and renders options, but selecting commits nothing -->
+  <div class="field" data-required="true">
+    <span class="lbl" id="inert-label">Gender identity</span>
+    <div id="inert" class="select__control" role="combobox" aria-labelledby="inert-label"
+         aria-expanded="false" aria-controls="inert-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+  <!-- 11. Dropdown positioned right where the JobPilot widget floats -->
+  <div class="field" style="position: fixed; right: 40px; bottom: 120px; width: 260px;">
+    <span class="lbl" id="behind-label">Veteran status</span>
+    <div id="behind" class="select__control" role="combobox" aria-labelledby="behind-label"
+         aria-expanded="false" aria-controls="behind-menu" tabindex="0">
+      <span class="select__placeholder">Select...</span><span class="select__value"></span>
+    </div>
+  </div>
+
+  <button id="submit_app" type="submit">Submit Application</button>
+</form>
+
+<script>
+/* ------------------------------------------------------------------------ *
+ * Real dropdown components. These behave like React Select / Greenhouse's
+ * custom control: they open on mousedown, render options (sometimes into a
+ * body portal, sometimes asynchronously), and only commit a selection when an
+ * option is genuinely activated.
+ * ------------------------------------------------------------------------ */
+window.__submitClicked = false;
+document.getElementById('submit_app').addEventListener('click', (e) => {
+  e.preventDefault();
+  window.__submitClicked = true;
+});
+
+function makeSelect(opts) {
+  const control = document.getElementById(opts.id);
+  const value = control.querySelector('.select__value');
+  const placeholder = control.querySelector('.select__placeholder');
+  const searchInput = control.querySelector('.select__input');
+  const selected = new Set();
+  let menu = null;
+  let openAttempts = 0;
+
+  function currentOptions() {
+    const list = typeof opts.options === 'function' ? opts.options() : opts.options;
+    const filter = searchInput ? searchInput.value.trim().toLowerCase() : '';
+    return filter ? list.filter((o) => o.toLowerCase().includes(filter)) : list;
+  }
+
+  function render() {
+    if (!menu) return;
+    const list = currentOptions();
+    // Virtualized lists only put a window of rows in the DOM.
+    const rows = opts.virtualized ? list.slice(0, 8) : list;
+    menu.innerHTML = '';
+    rows.forEach((label) => {
+      const o = document.createElement('div');
+      o.className = 'select__option';
+      o.setAttribute('role', 'option');
+      o.setAttribute('aria-selected', selected.has(label) ? 'true' : 'false');
+      o.textContent = label;
+      if (opts.disabledOptions && opts.disabledOptions.includes(label)) {
+        o.setAttribute('aria-disabled', 'true');
+      } else {
+        o.addEventListener('click', () => commit(label));
+      }
+      menu.appendChild(o);
+    });
+  }
+
+  function open() {
+    openAttempts += 1;
+    if (opts.failFirstOpen && openAttempts === 1) return;   // flaky control
+    if (control.getAttribute('aria-expanded') === 'true') return;
+    const show = () => {
+      menu = document.createElement('div');
+      menu.className = 'select__menu';
+      menu.id = opts.id + '-menu';
+      menu.setAttribute('role', 'listbox');
+      if (opts.multiple) menu.setAttribute('aria-multiselectable', 'true');
+      // Portal: append to body, far from the control (React Select menuPortalTarget).
+      if (opts.portal) {
+        document.body.appendChild(menu);
+        const r = control.getBoundingClientRect();
+        menu.style.position = 'absolute';
+        menu.style.top = (window.scrollY + r.bottom) + 'px';
+        menu.style.left = (window.scrollX + r.left) + 'px';
+      } else {
+        control.parentElement.appendChild(menu);
+      }
+      render();
+      control.setAttribute('aria-expanded', 'true');
+    };
+    if (opts.optionDelayMs) setTimeout(show, opts.optionDelayMs);
+    else show();
+  }
+
+  function close() {
+    if (menu) menu.remove();
+    menu = null;
+    control.setAttribute('aria-expanded', 'false');
+  }
+
+  function commit(label) {
+    if (opts.inert) return;                 // renders options but never commits
+    if (opts.multiple) {
+      selected.has(label) ? selected.delete(label) : selected.add(label);
+      render();                              // multi-select menu stays open
+    } else {
+      selected.clear(); selected.add(label); close();
+    }
+    if (placeholder) placeholder.style.display = selected.size ? 'none' : '';
+    if (opts.multiple) {
+      value.innerHTML = '';
+      selected.forEach((v) => {
+        const chip = document.createElement('span');
+        chip.className = 'select__multi-value';
+        chip.textContent = v;
+        value.appendChild(chip);
+      });
+    } else {
+      value.textContent = label;
+      value.className = 'select__value select__singleValue';
+    }
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    if (opts.onCommit) opts.onCommit(label);
+  }
+
+  control.addEventListener('mousedown', open);
+  control.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') open();
+    if (e.key === 'Escape') close();
+  });
+  if (searchInput) searchInput.addEventListener('input', render);
+  return { getSelected: () => Array.from(selected) };
+}
+
+makeSelect({ id: 'prev_samsara', options: ['Yes', 'No'] });
+makeSelect({ id: 'country', options: ['United States', 'Canada', 'India'], portal: true });
+makeSelect({ id: 'sponsor', options: ['Yes', 'No'] });
+makeSelect({ id: 'learned', multiple: true,
+            options: ['LinkedIn', 'Instagram', 'Friend or colleague', 'Industry event', 'Other'] });
+
+let billingCountry = null;
+makeSelect({ id: 'country2', options: ['United States', 'Canada'], portal: true,
+             onCommit: (v) => { billingCountry = v; } });
+makeSelect({ id: 'state', portal: true, options: () =>
+  billingCountry === 'United States' ? ['Arizona', 'California', 'New York']
+  : billingCountry === 'Canada' ? ['Alberta', 'Ontario'] : [] });
+
+makeSelect({ id: 'referral', optionDelayMs: 350,
+             options: ['LinkedIn', 'Job board', 'Employee referral', 'Company website'] });
+
+const nationalities = Array.from({ length: 180 }, (_, i) => 'Country ' + (i + 1));
+nationalities[120] = 'Nepal';
+makeSelect({ id: 'virt', options: nationalities, virtualized: true, portal: true });
+
+makeSelect({ id: 'flaky', failFirstOpen: true, options: ['He/him', 'She/her', 'They/them'] });
+makeSelect({ id: 'inert', inert: true, options: ['Male', 'Female', 'Non-binary'] });
+makeSelect({ id: 'behind', portal: true, options: ['I am a veteran', 'I am not a veteran'] });
+</script>
+</body>
+</html>

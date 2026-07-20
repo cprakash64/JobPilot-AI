@@ -166,7 +166,7 @@ def _run_locked(
 
     expired = _expire_stale_jobs(db)
 
-    queued = enqueue_scoring_for_jobs(changed_ids) if changed_ids else 0
+    queued = enqueue_scoring_for_jobs(db, changed_ids) if changed_ids else 0
 
     succeeded = int(stats.get("sources_succeeded", 0))
     failed = int(stats.get("sources_failed", 0))

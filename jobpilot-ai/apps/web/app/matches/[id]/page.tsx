@@ -7,7 +7,7 @@ export default async function MatchExplanationPage({ params }: { params: Promise
     <AppShell>
       <header className="mb-6">
         <h1 className="text-3xl font-semibold">Match explanation</h1>
-        <p className="mt-2 text-[#5d675f]">Job ID {id}. Match scoring uses career-profile data only and excludes sensitive demographics.</p>
+        <p className="mt-2 text-[var(--text-muted)]">Job ID {id}. Match scoring uses career-profile data only and excludes sensitive demographics.</p>
       </header>
       <div className="rounded-lg border border-line bg-white p-5">
         <Link className="text-pine" href="/jobs">Back to job discovery</Link>

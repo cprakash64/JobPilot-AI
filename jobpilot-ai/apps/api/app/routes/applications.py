@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.applications import answer_vault_service as vault
+from app.applications.session_refresh import refresh_if_stale, refresh_session_answers
+from app.applications import option_mapping_service
 from app.applications import preparation
 from app.applications.canonical import CANONICAL_KEYS, is_sensitive_key
 from app.applications.preparation import PreparationError
@@ -38,6 +40,7 @@ from app.applications.session_service import (
 from app.core.security import decode_access_token
 from app.core.session_tokens import decode_scoped_token
 from app.db.session import get_db
+from app.documents.filenames import build_document_filename
 from app.documents.store import export_document as render_document_file
 from app.models.entities import (
     ApplicationActionType,
@@ -49,12 +52,15 @@ from app.models.entities import (
     User,
 )
 from app.schemas.applications import (
+    MapOptionIn,
     AnswerUpsertIn,
     AutofillResultIn,
     CompleteSessionIn,
     CreateSessionIn,
     ExchangeTokenIn,
+    SessionAnswerUpsertIn,
     SessionEventIn,
+    SessionNameConfirmIn,
     StatusPatchIn,
 )
 
@@ -192,12 +198,126 @@ def get_session(session: ApplicationSession = Depends(session_access), db: Sessi
 
 
 @router.get("/{session_id}/answers")
-def get_session_answers(session: ApplicationSession = Depends(session_access)) -> dict:
+def get_session_answers(
+    session: ApplicationSession = Depends(session_access),
+    db: Session = Depends(get_db),
+) -> dict:
     """Safe, auto-fillable answers for the extension. Sensitive/unverified items
-    are never included here — they live in ``unresolved_questions``."""
+    are never included here — they live in ``unresolved_questions``.
+
+    Refreshes from the profile first when the snapshot is stale. Without this a
+    session prepared BEFORE the user fixed their name/email kept serving the old
+    answers forever, which is what left the employer form empty.
+    """
+    user = db.get(User, session.user_id)
+    meta = refresh_if_stale(db, session, user) if user else {"refreshed": False}
+    if meta.get("refreshed"):
+        db.commit()
+        db.refresh(session)
     return {
         "answers": session.generated_answers or [],
         "unresolved_questions": session.unresolved_questions or [],
+        "refreshed": bool(meta.get("refreshed")),
+        "profile_revision": session.profile_revision,
+    }
+
+
+@router.post("/{session_id}/refresh-from-profile")
+def refresh_session_from_profile(
+    session: ApplicationSession = Depends(session_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Explicitly rebuild this session's answers from the current profile.
+
+    Ownership is enforced by ``session_access``. The response is sanitized: it
+    reports WHICH canonical keys the session now carries, never their values.
+    """
+    user = db.get(User, session.user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session owner not found")
+    meta = refresh_session_answers(db, session, user, force=True)
+    db.commit()
+    db.refresh(session)
+    return {
+        "ok": True,
+        "refreshed": meta["refreshed"],
+        "reason": meta["reason"],
+        "profile_revision": session.profile_revision,
+        "answer_keys": meta.get("answer_keys", []),
+        "unresolved_keys": meta.get("unresolved_keys", []),
+    }
+
+
+@router.put("/{session_id}/answers/{canonical_key}")
+def save_session_answer(
+    canonical_key: str,
+    payload: SessionAnswerUpsertIn,
+    session: ApplicationSession = Depends(session_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Extension "Save for future applications" — the ONLY answer-vault write
+    path the extension can reach (it holds a session-scoped token, never the
+    user's main token, so the owner-only /application-answers routes below are
+    not callable from the extension). Always an explicit, user-initiated
+    confirmation from the review widget: recorded verified, source=user_confirmed.
+    """
+    if canonical_key not in CANONICAL_KEYS and not is_sensitive_key(canonical_key):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown canonical key")
+    row = vault.upsert_answer(
+        db,
+        session.user_id,
+        canonical_key,
+        {
+            "value": payload.value,
+            "display_value": payload.display_value or payload.value,
+            "source": "user_confirmed",
+            "is_user_verified": True,
+            "allow_auto_fill": True,
+            "scope": payload.scope,
+            "company_key": payload.company_key,
+        },
+    )
+    db.commit()
+    db.refresh(row)
+    log_action(db, session.id, ApplicationActionType.status_changed, field_key=canonical_key,
+               source="extension", status="answer_saved")
+    db.commit()
+    return {"ok": True, "answer": _serialize_answer(row)}
+
+
+@router.put("/{session_id}/profile/name")
+def confirm_session_profile_name(
+    payload: SessionNameConfirmIn,
+    session: ApplicationSession = Depends(session_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Extension-facing structured-name confirmation (session-scoped token —
+    mirrors PUT /profile/name, which requires the user's main token)."""
+    from app.applications.answer_vault_service import confirm_name
+
+    profile = confirm_name(
+        db,
+        session.user_id,
+        payload.first_name,
+        payload.last_name,
+        middle_name=payload.middle_name,
+        preferred_first_name=payload.preferred_first_name,
+        preferred_last_name=payload.preferred_last_name,
+    )
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    db.commit()
+    return {
+        "ok": True,
+        "first_name": profile.first_name,
+        "middle_name": profile.middle_name,
+        "last_name": profile.last_name,
+        "preferred_first_name": profile.preferred_first_name,
+        "preferred_last_name": profile.preferred_last_name,
+        "full_name": profile.full_name,
+        # Legacy keys for older extension builds.
+        "given_name": profile.first_name,
+        "family_name": profile.last_name,
     }
 
 
@@ -302,6 +422,55 @@ def post_event(
     )
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{session_id}/map-option")
+async def map_dropdown_option(
+    payload: MapOptionIn,
+    session: ApplicationSession = Depends(session_access),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Translate a CONFIRMED canonical answer into one of the exact option labels
+    an employer's dropdown offers (section E/G).
+
+    The extension calls this only after deterministic exact/alias matching has
+    already failed, and only for a field scoped inside the verified application
+    form. The service enforces — in code, not prompt text — that the model may
+    never originate a consequential answer and may never return a label we did
+    not supply. The OpenAI key never leaves the server.
+    """
+    confirmed = (payload.confirmed_answer or "").strip()
+    if not confirmed:
+        # Look for a verified vault answer for this key before giving up, so the
+        # extension does not have to send profile data it may not hold.
+        row = next(
+            (r for r in vault.list_answers(db, session.user_id)
+             if r.canonical_key == payload.canonical_key and r.is_user_verified),
+            None,
+        )
+        confirmed = (row.value or "").strip() if row else ""
+
+    mapping = await option_mapping_service.map_option(
+        question_label=payload.question_label,
+        options=payload.options,
+        canonical_key=payload.canonical_key,
+        confirmed_answer=confirmed or None,
+        help_text=payload.help_text or "",
+    )
+    log_action(
+        db, session.id, "option_mapping", field_key=payload.canonical_key,
+        source="extension",
+        status="mapped" if mapping.usable else "needs_user",
+        confidence=mapping.confidence,
+    )
+    db.commit()
+    return {
+        "selected_option_label": mapping.selected_option_label,
+        "confidence": mapping.confidence,
+        "requires_user_confirmation": mapping.requires_user_confirmation,
+        "usable": mapping.usable,
+        "reason": mapping.reason,
+    }
 
 
 _ALLOWED_AUTOFILL_STATUS = {
@@ -451,7 +620,15 @@ def _document_response(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     path = render_document_file(record, fmt)
     db.commit()
-    filename = f"{(record.title or kind).replace(' ', '_')}.{fmt.value}"
+    profile = session.profile_snapshot or {}
+    filename = build_document_filename(
+        kind=kind,
+        fmt=fmt.value,
+        full_name=profile.get("full_name"),
+        first_name=profile.get("first_name") or profile.get("given_name"),
+        last_name=profile.get("last_name") or profile.get("family_name"),
+        company=(session.job_snapshot or {}).get("company"),
+    )
     return FileResponse(path, filename=filename)
 
 
@@ -470,6 +647,7 @@ def _serialize_session(db: Session, session: ApplicationSession) -> dict[str, An
             "company": job.get("company"),
             "location": job.get("location"),
         },
+        "profile": session.profile_snapshot or {},
         "resume": _doc_status(db, session.id, session.tailored_resume_id, "resume"),
         "cover_letter": _doc_status(db, session.id, session.tailored_cover_letter_id, "cover-letter"),
         "answers_available": sum(1 for a in answers if not a.get("requires_review")),
@@ -497,6 +675,8 @@ def _serialize_answer(row) -> dict[str, Any]:
         "canonical_key": row.canonical_key,
         "value": row.value,
         "display_value": row.display_value,
+        "scope": row.scope,
+        "company_key": row.company_key,
         "source": row.source,
         "is_user_verified": row.is_user_verified,
         "verification_required": row.verification_required,

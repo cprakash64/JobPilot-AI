@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Apply — Software Engineer</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
+      .row { margin-bottom: 14px; }
+      label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+      input[type="text"], input[type="email"], input[type="tel"] { width: 320px; height: 32px; }
+      .select-trigger { width: 320px; height: 34px; text-align: left; background: #fff; border: 1px solid #ccc; }
+      .visually-hidden-file { position: absolute; width: 1px; height: 1px; opacity: 0; }
+      #portal-root { position: absolute; top: 0; left: 0; }
+      [role="listbox"] { border: 1px solid #ccc; background: #fff; list-style: none; margin: 0; padding: 4px; }
+      [role="option"] { padding: 6px 10px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <!--
+      A modern Greenhouse/React-style application:
+        * NO <form> element anywhere
+        * controls spread across sibling divs, so their common ancestor is <body>
+        * the resume input is hidden behind an "Attach" button
+        * the country dropdown is a button[aria-haspopup=listbox] whose options
+          are rendered into a PORTAL at the end of <body>, not inside the trigger
+      This is the shape that produced "couldn't identify the application form".
+    -->
+    <h1>Software Engineer, Payments</h1>
+
+    <div class="row">
+      <label for="first_name">First Name <span aria-hidden="true">*</span></label>
+      <input id="first_name" type="text" required />
+    </div>
+    <div class="row">
+      <label for="last_name">Last Name <span aria-hidden="true">*</span></label>
+      <input id="last_name" type="text" required />
+    </div>
+    <div class="row">
+      <label for="email">Email <span aria-hidden="true">*</span></label>
+      <input id="email" type="email" required />
+    </div>
+
+    <div class="row">
+      <span id="country-label">Phone country <span aria-hidden="true">*</span></span>
+      <button
+        id="country-trigger"
+        class="select-trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+        aria-labelledby="country-label"
+        aria-controls="country-listbox"
+      >
+        Select...
+      </button>
+      <input id="country-value" type="hidden" />
+    </div>
+
+    <div class="row">
+      <label for="phone">Phone <span aria-hidden="true">*</span></label>
+      <input id="phone" type="tel" required />
+    </div>
+    <div class="row">
+      <label for="location">Location (City) <span aria-hidden="true">*</span></label>
+      <input id="location" type="text" required />
+    </div>
+    <div class="row">
+      <label for="linkedin">LinkedIn Profile</label>
+      <input id="linkedin" type="text" />
+    </div>
+
+    <div class="row">
+      <span id="resume-label">Resume/CV <span aria-hidden="true">*</span></span>
+      <button type="button" id="attach-resume">Attach</button>
+      <input id="resume" class="visually-hidden-file" type="file" aria-labelledby="resume-label" required />
+    </div>
+    <div class="row">
+      <span id="cover-label">Cover Letter</span>
+      <button type="button" id="attach-cover">Attach</button>
+      <input id="cover_letter" class="visually-hidden-file" type="file" aria-labelledby="cover-label" />
+    </div>
+
+    <div class="row">
+      <span id="referral-label">How did you hear about this job? <span aria-hidden="true">*</span></span>
+      <button
+        id="referral-trigger"
+        class="select-trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+        aria-labelledby="referral-label"
+        aria-controls="referral-listbox"
+      >
+        Select...
+      </button>
+      <input id="referral-value" type="hidden" />
+    </div>
+
+    <button type="button" id="submit-application">Submit application</button>
+
+    <!-- Portal target: listbox options are rendered HERE, far from their trigger. -->
+    <div id="portal-root"></div>
+
+    <script>
+      // Minimal React-like custom select: opens on click, renders its options
+      // into a body-level portal, and commits to a hidden input.
+      const OPTIONS = {
+        "country-trigger": {
+          listbox: "country-listbox",
+          value: "country-value",
+          items: ["United States (+1)", "United Kingdom (+44)", "India (+91)"]
+        },
+        "referral-trigger": {
+          listbox: "referral-listbox",
+          value: "referral-value",
+          items: ["LinkedIn", "Company website", "Referral from an employee", "Other"]
+        }
+      };
+
+      const portal = document.getElementById("portal-root");
+
+      function closeAll() {
+        portal.innerHTML = "";
+        for (const id of Object.keys(OPTIONS)) {
+          document.getElementById(id).setAttribute("aria-expanded", "false");
+        }
+      }
+
+      for (const [triggerId, config] of Object.entries(OPTIONS)) {
+        const trigger = document.getElementById(triggerId);
+        trigger.addEventListener("click", () => {
+          const alreadyOpen = trigger.getAttribute("aria-expanded") === "true";
+          closeAll();
+          if (alreadyOpen) return;
+
+          const list = document.createElement("ul");
+          list.id = config.listbox;
+          list.setAttribute("role", "listbox");
+          for (const label of config.items) {
+            const option = document.createElement("li");
+            option.setAttribute("role", "option");
+            option.setAttribute("aria-selected", "false");
+            option.textContent = label;
+            option.addEventListener("click", () => {
+              trigger.textContent = label;
+              option.setAttribute("aria-selected", "true");
+              document.getElementById(config.value).value = label;
+              closeAll();
+            });
+            list.appendChild(option);
+          }
+          portal.appendChild(list);
+          trigger.setAttribute("aria-expanded", "true");
+        });
+      }
+
+      for (const id of ["attach-resume", "attach-cover"]) {
+        document.getElementById(id).addEventListener("click", () => {
+          document.getElementById(id === "attach-resume" ? "resume" : "cover_letter").click();
+        });
+      }
+
+      // The extension must NEVER click this.
+      document.getElementById("submit-application").addEventListener("click", () => {
+        window.__APPLICATION_SUBMITTED__ = true;
+      });
+    </script>
+  </body>
+</html>

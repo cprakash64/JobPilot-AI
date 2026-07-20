@@ -7,7 +7,7 @@ export default function DashboardPage() {
     <AppShell>
       <header className="mb-6">
         <h1 className="text-3xl font-semibold">Dashboard</h1>
-        <p className="mt-2 text-[#5d675f]">A focused workspace for profile facts, fresh jobs, generated materials, and manual applications.</p>
+        <p className="mt-2 text-[var(--text-muted)]">A focused workspace for profile facts, fresh jobs, generated materials, and manual applications.</p>
       </header>
       <div className="grid gap-4 md:grid-cols-4">
         <Tile href="/profile" icon={<UserRound />} title="Complete profile" body="Add truthful career facts once." />
@@ -17,7 +17,7 @@ export default function DashboardPage() {
       </div>
       <section className="mt-6 rounded-lg border border-line bg-white p-5">
         <h2 className="font-semibold">Compliance boundaries</h2>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-[#5d675f]">
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-muted)]">
           JobPilot AI assists with profile management, document generation, and approved source ingestion. It does not scrape restricted job boards, bypass bot detection, pretend to be human, or submit third-party applications automatically.
         </p>
       </section>
@@ -30,7 +30,7 @@ function Tile({ href, icon, title, body }: { href: string; icon: React.ReactNode
     <Link href={href} className="focus-ring rounded-lg border border-line bg-white p-5 hover:bg-panel">
       <div className="mb-4 h-8 w-8 text-pine">{icon}</div>
       <h2 className="font-semibold">{title}</h2>
-      <p className="mt-2 text-sm leading-6 text-[#5d675f]">{body}</p>
+      <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">{body}</p>
     </Link>
   );
 }

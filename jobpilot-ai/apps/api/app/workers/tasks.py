@@ -22,7 +22,16 @@ logger = logging.getLogger("jobpilot.worker")
 celery_app = Celery("jobpilot", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.timezone = settings.job_ingestion_timezone
 celery_app.conf.task_default_retry_delay = 30
+# Keep the worker resilient (it reconnects on startup), but BOUND publish attempts
+# from the API request path so a broker outage falls back to inline scoring in a
+# few seconds. NOTE: in Celery, broker_connection_max_retries=0 means "retry
+# forever" — so we use a small positive bound plus short socket timeouts.
 celery_app.conf.broker_connection_retry_on_startup = True
+celery_app.conf.broker_transport_options = {
+    "socket_connect_timeout": 2,
+    "socket_timeout": 2,
+}
+celery_app.conf.broker_connection_max_retries = 2
 
 
 def _crontab_from_expr(expr: str) -> crontab:
@@ -63,7 +72,9 @@ def match_jobs_for_user_task(user_id: int) -> int:
     max_retries=3,
     acks_late=True,
 )
-def score_jobs_for_users_task(self, job_ids: list[int], exclude_user_ids: list[int] | None = None) -> dict:
+def score_jobs_for_users_task(
+    self, job_ids: list[int], exclude_user_ids: list[int] | None = None
+) -> dict:
     """Score a batch of newly ingested/changed jobs for all active users.
 
     Idempotent: the scoring service only writes when something changed, so a

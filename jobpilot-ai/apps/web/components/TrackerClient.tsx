@@ -38,7 +38,7 @@ export function TrackerClient() {
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[680px] text-left text-sm">
-          <thead className="border-b border-line text-[#5d675f]">
+          <thead className="border-b border-line text-[var(--text-muted)]">
             <tr>
               <th className="py-3">Job ID</th>
               <th>Status</th>
@@ -64,7 +64,7 @@ export function TrackerClient() {
           </tbody>
         </table>
       </div>
-      {applications.length === 0 && <p className="mt-4 text-sm text-[#5d675f]">Saved jobs will appear here.</p>}
+      {applications.length === 0 && <p className="mt-4 text-sm text-[var(--text-muted)]">Saved jobs will appear here.</p>}
     </section>
   );
 }

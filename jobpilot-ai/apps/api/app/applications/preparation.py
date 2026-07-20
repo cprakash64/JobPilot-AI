@@ -118,3 +118,13 @@ def database_unavailable() -> PreparationError:
         status_code=503,
         retryable=True,
     )
+
+
+def dev_fixture_identity_blocked() -> PreparationError:
+    return PreparationError(
+        code="DEV_FIXTURE_IDENTITY",
+        message="This account is a development seed/fixture and cannot submit a real application.",
+        stage=PreparationStage.load_candidate_profile,
+        status_code=422,
+        retryable=False,
+    )

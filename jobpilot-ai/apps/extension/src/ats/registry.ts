@@ -37,6 +37,16 @@ export function detectAdapter(context: PageContext): DetectionOutcome | null {
     return { adapter: GenericFormAdapter, result: { atsId: "workday", matched: true, confidence: 0.4 }, limited: true };
   }
 
+  const genericHosts: Array<[string, string]> = [
+    ["smartrecruiters.com", "smartrecruiters"], ["rippling.com", "rippling"],
+    ["bamboohr.com", "bamboohr"], ["applytojob.com", "jazzhr"],
+    ["jazz.co", "jazzhr"], ["teamtailor.com", "teamtailor"]
+  ];
+  const matchedHost = genericHosts.find(([host]) => hostMatches(context.url, host));
+  if (matchedHost) {
+    return { adapter: GenericFormAdapter, result: { atsId: matchedHost[1], matched: true, confidence: 0.7 }, limited: true };
+  }
+
   const generic = GenericFormAdapter.detect(context);
   if (generic.matched) {
     return { adapter: GenericFormAdapter, result: generic, limited: false };

@@ -20,11 +20,11 @@ const RULES: SensitiveRule[] = [
   { key: "religion", patterns: [/religio/i] },
   { key: "criminal_history", patterns: [/criminal/i, /felony|conviction|convicted/i, /background check consent/i] },
   { key: "security_clearance", patterns: [/security clearance/i, /clearance level/i] },
-  { key: "export_control", patterns: [/export control/i, /itar|ear\b/i] },
+  { key: "export_control", patterns: [/export control/i, /\bitar\b|\bear\b/i] },
   { key: "salary_history", patterns: [/salary history/i, /current salary/i, /previous (?:salary|compensation)/i] },
   {
     key: "legal_attestation",
-    patterns: [/i (?:certify|attest|acknowledge)/i, /under penalty of perjury/i, /electronic signature/i]
+    patterns: [/i (?:certify|attest|acknowledge)/i, /\battestation\b/i, /under penalty of perjury/i, /electronic signature/i]
   },
   {
     key: "government_demographic",

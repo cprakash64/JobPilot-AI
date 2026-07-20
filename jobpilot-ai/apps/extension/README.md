@@ -8,15 +8,30 @@ you always do the final review and click Submit yourself.
 ## What it does
 
 1. Detects the JobPilot web app (version + capability handshake).
-2. When you click **Open and autofill application**, JobPilot hands the
-   extension a one-time launch token (never in the URL).
-3. The extension exchanges that token for a short-lived, **session-scoped** token
-   (never your normal login token) and fetches the prepared package:
-   verified answers + the tailored resume/cover-letter documents.
-4. On the employer tab it detects the ATS, fills confidently-known fields, uploads
-   the documents into the correct inputs, and highlights unresolved/sensitive
-   items for you to answer.
-5. It reports a **PII-free** summary (counts + codes only) back to JobPilot.
+2. When you click **Open and autofill application**, a content script on the
+   JobPilot origin catches that exact click in the **capture phase** and forwards
+   a launch request to the background **synchronously within the user gesture**.
+   The background opens the side panel (gesture-valid), then creates the employer
+   tab itself (`chrome.tabs.create` — no website popup, exact tab id) and binds a
+   `PendingLaunch` to that tab id in `chrome.storage.session`. The one-time launch
+   token is staged into the extension's isolated content world, never the DOM/URL.
+3. The employer content script announces readiness (`CONTENT_READY`); the
+   background exchanges the single-use token **once**, caches the session package
+   per tab (so refresh/retry never re-consumes the token), and hands the content
+   script the verified answers.
+4. Autofill starts **automatically** — no “Fill application” click needed. It
+   detects the ATS, fills confidently-known fields, uploads the tailored documents
+   into the correct inputs (verifying the employer UI accepted them), and
+   highlights unresolved/sensitive items for you to answer.
+5. It reports a **PII-free** summary (counts + reason codes only) back to JobPilot.
+
+The launch flows through one canonical state machine
+(`idle → preparing → package_ready → opening_tab → waiting_for_tab →
+waiting_for_content_script → fetching_package → detecting_ats → discovering_fields
+→ filling → completed / completed_with_review / failed`). The side panel is a pure
+**observer** of the tab-scoped state in `chrome.storage.session`; both the
+automatic launch and the manual **Fill application** retry call the same runner
+(`startAutofillForTab` → content `runAutofill`).
 
 Nothing is ever submitted automatically. Sensitive/voluntary questions
 (demographics, veteran/disability status, legal attestations, salary, criminal
@@ -58,8 +73,16 @@ Other scripts: `npm run typecheck`, `npm test`.
 7. Open a job and start an assisted application. The modal should now show
    **“JobPilot extension connected.”**
 8. Click **Open and autofill application**.
-9. On the employer tab, JobPilot fills the form and opens its side panel with a
-   summary. Review, then submit the application yourself.
+9. The extension opens the employer tab **and** the side panel. Autofill runs
+   **automatically** (you should NOT need to click “Fill application”). The panel
+   shows the ATS, stage, and non-zero Filled/Review counts as it works.
+10. Refresh the employer page — the extension recovers the pending session and
+    continues without duplicating already-filled values or overwriting your edits.
+11. Review everything and **submit the application yourself** — JobPilot never submits.
+
+> After any code change you must **rebuild AND reload**: run `npm run build`, then
+> click the ↻ reload icon on the extension card in `chrome://extensions`. A rebuild
+> alone does not reload the running service worker.
 
 ### Configuring for a non-local backend / production origin
 

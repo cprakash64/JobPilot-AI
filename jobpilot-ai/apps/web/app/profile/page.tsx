@@ -6,7 +6,7 @@ export default function ProfilePage() {
     <AppShell>
       <header className="mb-6">
         <h1 className="text-3xl font-semibold">Profile manager</h1>
-        <p className="mt-2 text-[#5d675f]">Import, review, and maintain truthful career facts before generating job-specific materials.</p>
+        <p className="mt-2 text-[var(--text-muted)]">Import, review, and maintain truthful career facts before generating job-specific materials.</p>
       </header>
       <ProfileWizard />
     </AppShell>

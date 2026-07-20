@@ -120,8 +120,8 @@ def test_backfill_updates_existing_jobs(client: TestClient) -> None:
     summary = backfill_company_logos(db, force=False)
     db.close()
 
-    assert summary.updated == 1
-    assert summary.skipped_unknown == 1
+    assert summary.resolved == 1
+    assert summary.unresolved == 1
 
     db = next(app.dependency_overrides[get_db]())
     openai = db.scalar(select(E.JobPosting).where(E.JobPosting.company == "OpenAI"))
@@ -137,5 +137,7 @@ def test_backfill_skips_existing_without_force(client: TestClient) -> None:
     db = next(app.dependency_overrides[get_db]())
     summary = backfill_company_logos(db, force=False)
     db.close()
-    assert summary.skipped_existing == 1
-    assert summary.updated == 0
+    assert summary.already_present == 1
+    # The company-level resolution still runs (using the job's own logo as a
+    # catalog hint) — it's the per-job copy that's skipped without --force.
+    assert summary.resolved == 1

@@ -46,9 +46,9 @@ describe("Temporal (Ashby) application page", () => {
     expect(out?.adapter.id).toBe("ashby");
   });
 
-  it("fills contact + profile fields, classifies uploads, and never touches sensitive/legal fields", () => {
+  it("fills contact + profile fields, classifies uploads, and never touches sensitive/legal fields", async () => {
     mountFixture(TEMPORAL_ASHBY_FIXTURE);
-    const summary = runFill(document.querySelector("form")!, temporalSession());
+    const summary = await runFill(document.querySelector("form")!, temporalSession());
 
     // Contact + profile fields are filled with verified values.
     expect((document.getElementById("_systemfield_name") as HTMLInputElement).value).toBe("Chandra Prakash Pandey");
@@ -89,9 +89,9 @@ describe("Temporal (Ashby) application page", () => {
     expect(idFor(coverMap!.uid)).toBe("cover_letter");
   });
 
-  it("leaves the page pristine after clearing", () => {
+  it("leaves the page pristine after clearing", async () => {
     mountFixture(TEMPORAL_ASHBY_FIXTURE);
-    runFill(document.querySelector("form")!, temporalSession());
+    await runFill(document.querySelector("form")!, temporalSession());
     clearJobPilotFields(document);
     expect((document.getElementById("_systemfield_name") as HTMLInputElement).value).toBe("");
     expect(document.querySelectorAll("[data-jobpilot-filled]").length).toBe(0);

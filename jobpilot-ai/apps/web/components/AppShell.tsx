@@ -1,18 +1,17 @@
 import Link from "next/link";
-import { BriefcaseBusiness, FileText, Gauge, Settings, ShieldCheck, UserRound } from "lucide-react";
+import { BriefcaseBusiness, FileText, Gauge, Settings, UserRound } from "lucide-react";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: Gauge },
   { href: "/profile", label: "Profile", icon: UserRound },
   { href: "/jobs", label: "Jobs", icon: BriefcaseBusiness },
   { href: "/tracker", label: "Tracker", icon: FileText },
-  { href: "/demographics", label: "EEO", icon: ShieldCheck },
   { href: "/settings", label: "Settings", icon: Settings }
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-[#fbfbf8]">
+    <div className="min-h-screen bg-[var(--background)]">
       <aside className="fixed inset-y-0 left-0 hidden w-64 border-r border-line bg-white p-4 lg:block">
         <Link href="/" className="mb-8 flex items-center gap-2 font-semibold">
           <BriefcaseBusiness className="h-5 w-5 text-pine" />
@@ -37,4 +36,3 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-

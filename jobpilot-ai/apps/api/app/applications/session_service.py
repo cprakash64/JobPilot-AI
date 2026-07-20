@@ -19,7 +19,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.applications.answer_vault_service import build_safe_answers
+from app.applications.session_refresh import current_profile_revision
 from app.applications.ats import detect_ats_from_url
+from app.applications.fixture_guard import guard_against_dev_fixture
 from app.applications.preparation import (
     PreparationError,
     database_unavailable,
@@ -137,10 +139,34 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
 
     # --- load_candidate_profile: require the minimum to build a real application. ---
     _require_complete_profile(db, user)
+    # Fail closed: a known development/seed identity never reaches a real
+    # (production) application package. No-op outside app_env=="production".
+    guard_against_dev_fixture(user)
 
     # --- idempotency: reuse an existing usable session instead of duplicating. ---
     reused = _reuse_active_session(db, user, job)
     if reused is not None:
+        # A provider outage may have left an otherwise usable session without
+        # one or both optional artifacts. Reusing that session must repair the
+        # missing links instead of permanently returning "missing" until TTL.
+        resume_error: str | None = None
+        cover_error: str | None = None
+        repair_resume = reused.tailored_resume_id is None
+        repair_cover = reused.tailored_cover_letter_id is None
+        if repair_resume:
+            resume_doc, resume_error = await _safe_generate(db, user, job, DocumentType.resume)
+            reused.tailored_resume_id = resume_doc.id if resume_doc else None
+        if repair_cover:
+            cover_doc, cover_error = await _safe_generate(db, user, job, DocumentType.cover_letter)
+            reused.tailored_cover_letter_id = cover_doc.id if cover_doc else None
+        if repair_resume or repair_cover:
+            reused.warnings = _repaired_warnings(
+                reused.warnings or [],
+                resume_error=resume_error,
+                cover_error=cover_error,
+                repair_resume=repair_resume,
+                repair_cover=repair_cover,
+            )
         raw_launch_token = create_launch_token(reused.id, user.id)
         reused.launch_token_hash = hash_token(raw_launch_token)
         reused.launch_token_used = False
@@ -154,7 +180,7 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
     cover_doc, cover_error = await _safe_generate(db, user, job, DocumentType.cover_letter)
 
     # --- generate_application_answers. ---
-    safe_answers, unresolved = build_safe_answers(db, user)
+    safe_answers, unresolved = build_safe_answers(db, user, company=job.company)
     warnings = _warnings(resume_error, cover_error, unresolved)
 
     # --- persist_application_package: the only place we touch the DB for writes;
@@ -171,6 +197,9 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
         tailored_cover_letter_id=cover_doc.id if cover_doc else None,
         generated_answers=safe_answers,
         unresolved_questions=unresolved,
+        # Stamp the revision these answers were built from, so a later profile
+        # edit makes this session detectably stale instead of silently wrong.
+        profile_revision=current_profile_revision(db, user.id),
         warnings=warnings,
         launch_token_hash=None,
         expires_at=datetime.now(UTC) + timedelta(minutes=SESSION_TTL_MINUTES),
@@ -382,6 +411,12 @@ def _profile_snapshot(db: Session, user: User) -> dict[str, Any]:
     return {
         "email": user.email,
         "full_name": profile.full_name,
+        "first_name": profile.first_name,
+        "middle_name": profile.middle_name,
+        "last_name": profile.last_name,
+        "preferred_first_name": profile.preferred_first_name,
+        "preferred_last_name": profile.preferred_last_name,
+        "name_confirmed": profile.name_confirmed,
         "location": ", ".join(
             filter(None, [profile.location_city, profile.location_state, profile.location_country])
         ),
@@ -405,4 +440,26 @@ def _warnings(resume_error: str | None, cover_error: str | None, unresolved: lis
         warnings.append(
             f"{len(unresolved)} sensitive question(s) must be answered by you on the employer page."
         )
+    return warnings
+
+
+def _repaired_warnings(
+    existing: list[str],
+    *,
+    resume_error: str | None,
+    cover_error: str | None,
+    repair_resume: bool,
+    repair_cover: bool,
+) -> list[str]:
+    """Replace stale document warnings after retrying missing artifacts."""
+    warnings = [
+        warning
+        for warning in existing
+        if not (repair_resume and "tailored resume" in warning.lower())
+        and not (repair_cover and "tailored cover letter" in warning.lower())
+    ]
+    if resume_error:
+        warnings.append(resume_error)
+    if cover_error:
+        warnings.append(cover_error)
     return warnings

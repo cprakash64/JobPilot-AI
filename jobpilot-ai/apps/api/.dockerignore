@@ -1,14 +1,37 @@
+# Secrets — never bake an env file into an image layer.
 .env
+.env.*
+!.env.example
+
+# Virtualenvs and caches
 .venv/
+venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+
+# Coverage / reports
 .coverage
 coverage.xml
 coverage/
 htmlcov/
+
+# Tests do not belong in a runtime image (the Dockerfile also removes them).
+app/tests/
+
+# Runtime data written by the app — provided by volumes, never baked in.
 generated/
 uploads/
+
+# Local database dumps / snapshots must never enter a build context.
+*.sql
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+
+# Unrelated toolchains
 node_modules/
 .next/
