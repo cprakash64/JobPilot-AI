@@ -41,6 +41,9 @@ export type ProfileForm = {
   /** The address used ON APPLICATIONS. Editable, separate from login. */
   application_email: string;
   application_email_confirmed: boolean;
+  /** Write-only. It is sent only to the dedicated encrypted-credentials route. */
+  workday_password: string;
+  workday_password_configured: boolean;
   phone: string;
   phone_country_iso2: string;
   location_city: string;
@@ -83,6 +86,8 @@ export const emptyProfile: ProfileForm = {
   email: "",
   application_email: "",
   application_email_confirmed: false,
+  workday_password: "",
+  workday_password_configured: false,
   phone: "",
   phone_country_iso2: "US",
   location_city: "",
@@ -158,6 +163,9 @@ export function normalizeProfile(profile: ProfileWire | null | undefined, email 
     email: str(email),
     application_email: str(profile.application_email),
     application_email_confirmed: Boolean(profile.application_email_confirmed),
+    // The API intentionally never returns the secret itself.
+    workday_password: "",
+    workday_password_configured: Boolean(profile.workday_password_configured),
     phone: str(profile.phone),
     // Incomplete legacy phone rows have no ISO2; default to US rather than
     // rendering a select with a value none of its options match.

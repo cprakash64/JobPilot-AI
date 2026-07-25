@@ -6,15 +6,16 @@ import { API_URL } from "@/lib/api";
 /**
  * Company logo with a real fallback chain: try the primary (proxied,
  * cached, SSRF-safe) source first, then a secondary direct source if the
- * first fails, and only fall back to a neutral JobPilot placeholder — never
- * an initial-letter avatar, and never a broken-image icon — once every real
- * source has failed. The logo area is a fixed square so the layout never
- * shifts as sources are tried.
+ * first fails, and fall back to a deterministic generated company mark once
+ * every real source has failed. That guarantees every card has a recognizable
+ * visual identity without pretending an unverified domain belongs to a
+ * company. The logo area is fixed so the layout never shifts.
  */
 export function CompanyLogo({
   company,
   logoUrl,
   proxyPath,
+  companyDomain,
   size = 44
 }: {
   company: string;
@@ -22,14 +23,16 @@ export function CompanyLogo({
   /** Relative API path for the preferred (proxied) source, e.g.
    * "/jobs/companies/acme/logo". */
   proxyPath?: string | null;
+  companyDomain?: string | null;
   size?: number;
 }) {
   const sources = useMemo(() => {
     const list: string[] = [];
     if (proxyPath) list.push(`${API_URL}${proxyPath}`);
     if (logoUrl) list.push(logoUrl);
+    if (companyDomain) list.push(`https://${companyDomain}/favicon.ico`);
     return list;
-  }, [proxyPath, logoUrl]);
+  }, [proxyPath, logoUrl, companyDomain]);
 
   const [attempt, setAttempt] = useState(0);
   const src = sources[attempt];
@@ -37,7 +40,10 @@ export function CompanyLogo({
   return (
     <div
       className="flex shrink-0 items-center justify-center overflow-hidden rounded-xl border border-line bg-white"
-      style={{ width: size, height: size }}
+      // The app supports a dark theme and some company favicons (RTX is one)
+      // are black-on-transparent. Pin the logo canvas to real white so a valid
+      // image never looks like an empty dark square.
+      style={{ width: size, height: size, backgroundColor: "#ffffff" }}
     >
       {src ? (
         // eslint-disable-next-line @next/next/no-img-element -- external/proxied logo host; next/image would require per-domain config + CSP allowances
@@ -52,28 +58,44 @@ export function CompanyLogo({
           onError={() => setAttempt((a) => a + 1)}
         />
       ) : (
-        <PlaceholderMark size={size} />
+        <GeneratedCompanyMark company={company} size={size} />
       )}
     </div>
   );
 }
 
-/** Neutral JobPilot placeholder — deliberately not the company's initials, so
- * a real-but-unresolved logo is never confused with a verified one. */
-function PlaceholderMark({ size }: { size: number }) {
+const BRAND_PALETTE = [
+  ["#17324D", "#D9EAF7"],
+  ["#3B1D64", "#E9DDF8"],
+  ["#17453B", "#D8EFE7"],
+  ["#6A2E18", "#F7E2D7"],
+  ["#4E3B0D", "#F6ECC8"],
+  ["#3B2948", "#EADFF1"]
+] as const;
+
+function GeneratedCompanyMark({ company, size }: { company: string; size: number }) {
+  const words = company
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const initials = (words.length > 1 ? `${words[0][0]}${words[1][0]}` : words[0]?.slice(0, 2) || "JP").toUpperCase();
+  const hash = Array.from(company).reduce((value, character) => ((value * 31) + character.charCodeAt(0)) >>> 0, 7);
+  const [foreground, background] = BRAND_PALETTE[hash % BRAND_PALETTE.length];
+
   return (
-    <svg
-      data-testid="company-logo-placeholder"
-      width={Math.round(size * 0.55)}
-      height={Math.round(size * 0.55)}
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden
-      className="text-[var(--text-muted)]"
+    <span
+      data-testid="company-logo-generated"
+      role="img"
+      aria-label={`${company} generated company mark`}
+      className="flex h-full w-full items-center justify-center font-bold tracking-[-0.04em]"
+      style={{
+        color: foreground,
+        backgroundColor: background,
+        fontSize: Math.max(11, Math.round(size * 0.33))
+      }}
     >
-      <rect x="3" y="7" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.6" />
-      <path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="1.6" />
-      <path d="M3 12h18" stroke="currentColor" strokeWidth="1.6" />
-    </svg>
+      {initials}
+    </span>
   );
 }

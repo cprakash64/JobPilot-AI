@@ -167,17 +167,21 @@ export function startAssistedApply(
   requestId: string,
   launchToken: string,
   session: ApplicationSessionView,
-  timeoutMs = 5000
+  timeoutMs = 15000
 ): Promise<LaunchAcknowledgement> {
   if (typeof window === "undefined") {
     return Promise.resolve({ ok: false, code: "EXTENSION_UNAVAILABLE", message: "Extension bridge is unavailable." });
   }
   return new Promise((resolve) => {
     let settled = false;
+    let retryTimer: number | null = null;
+    let finalTimer: number | null = null;
     const finish = (result: LaunchAcknowledgement) => {
       if (settled) return;
       settled = true;
       window.removeEventListener("message", onMessage);
+      if (retryTimer) window.clearTimeout(retryTimer);
+      if (finalTimer) window.clearTimeout(finalTimer);
       resolve(result);
     };
     const onMessage = (event: MessageEvent) => {
@@ -185,13 +189,25 @@ export function startAssistedApply(
       if (event.source !== window || data?.source !== EXT_SOURCE || data.type !== MSG_START_ASSISTED_APPLY_RESULT || data.requestId !== requestId) return;
       finish(data.result as LaunchAcknowledgement);
     };
+    const send = () => window.postMessage({
+        source: WEB_SOURCE,
+        type: MSG_START_ASSISTED_APPLY,
+        payload: launchPayload(requestId, launchToken, session)
+      } satisfies ExtMessage, window.location.origin);
     window.addEventListener("message", onMessage);
-    window.postMessage({
-      source: WEB_SOURCE,
-      type: MSG_START_ASSISTED_APPLY,
-      payload: launchPayload(requestId, launchToken, session)
-    } satisfies ExtMessage, window.location.origin);
-    window.setTimeout(() => finish({ ok: false, code: "EXTENSION_NO_ACK", message: "The extension did not acknowledge the handoff. Reload it and try again." }), timeoutMs);
+    send();
+    // MV3 service workers may need a moment to wake. Re-send the same idempotent
+    // request once; the background deduplicates by application/session and
+    // focuses the existing tab rather than creating a duplicate.
+    retryTimer = window.setTimeout(send, Math.min(4000, Math.max(1000, timeoutMs / 3)));
+    finalTimer = window.setTimeout(
+      () => finish({
+        ok: false,
+        code: "EXTENSION_NO_ACK",
+        message: "The extension did not acknowledge the handoff after retrying. Reload the JobPilot page and extension, then try again."
+      }),
+      timeoutMs
+    );
   });
 }
 

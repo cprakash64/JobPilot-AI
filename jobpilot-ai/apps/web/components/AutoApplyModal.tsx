@@ -224,28 +224,39 @@ export function AutoApplyModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 p-4" onClick={onClose}>
+    <div
+      className="assisted-application-backdrop fixed inset-0 z-50 p-4 sm:p-6"
+      onClick={onClose}
+      data-testid="assisted-application-backdrop"
+    >
       <div
-        className="mx-auto mt-8 flex max-h-[88vh] w-full max-w-[560px] flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+        className="assisted-application-dialog flex max-h-[min(88vh,780px)] w-full max-w-[610px] flex-col overflow-hidden rounded-[28px]"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-label="Assisted application"
+        aria-modal="true"
       >
-        <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-4">
+        <div className="assisted-application-glass-bar flex items-start justify-between gap-5 border-b border-line px-6 py-5 sm:px-7">
           <div className="min-w-0">
-            <h3 className="text-lg font-semibold">Assisted application</h3>
-            <p className="mt-0.5 truncate text-sm text-[var(--text-muted)]">{jobTitle} · {company}</p>
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-pine">Ready to apply</p>
+            <h3 className="text-xl font-semibold tracking-[-0.025em] sm:text-2xl">Assisted application</h3>
+            <p className="mt-1 truncate text-sm text-[var(--text-muted)]">{jobTitle} · {company}</p>
           </div>
-          <button className="focus-ring rounded-md p-2" type="button" onClick={onClose} aria-label="Close">
-            <X className="h-5 w-5" />
+          <button
+            className="focus-ring grid h-10 w-10 shrink-0 place-items-center rounded-full border border-line bg-[var(--glass-surface)] text-[var(--text-secondary)] transition hover:bg-panel hover:text-ink"
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X className="h-[18px] w-[18px]" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto px-6 py-5">
+        <div className="flex-1 overflow-auto px-6 py-6 sm:px-7">
           {phase === "preparing" && <PreparingChecklist />}
 
           {phase === "error" && error && (
-            <div className="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-surface)] p-4 text-sm text-[var(--danger)]">
+            <div className="rounded-2xl border border-[var(--danger-border)] bg-[var(--danger-surface)] p-4 text-sm text-[var(--danger)]">
               <p className="font-semibold">We couldn’t prepare your application.</p>
               <p className="mt-1">{error.message}</p>
               {error.profileLink && (
@@ -265,8 +276,8 @@ export function AutoApplyModal({
           )}
 
           {session && phase !== "error" && (
-            <div className="grid gap-4">
-              <div className="grid gap-2">
+            <div className="grid gap-5">
+              <div className="grid gap-3 rounded-2xl border border-line bg-[var(--glass-surface)] p-4 shadow-sm">
                 <ReadyRow icon={<FileText className="h-4 w-4" />} label="Tailored resume"
                           ok={session.resume.status === "ready"} />
                 <ReadyRow icon={<Mail className="h-4 w-4" />} label="Tailored cover letter"
@@ -282,7 +293,7 @@ export function AutoApplyModal({
               </div>
 
               {session.warnings.length > 0 && (
-                <ul className="rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-3 text-xs text-[var(--warning)]">
+                <ul className="rounded-2xl border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-xs text-[var(--warning)]">
                   {session.warnings.map((w) => (
                     <li key={w} className="list-inside list-disc">{w}</li>
                   ))}
@@ -290,7 +301,7 @@ export function AutoApplyModal({
               )}
 
               {extConnected && (
-                <div className="rounded-lg border border-[var(--success-border)] bg-[var(--success-surface)] p-3 text-xs text-[var(--accent)]">
+                <div className="rounded-2xl border border-[var(--success-border)] bg-[var(--success-surface)] p-4 text-xs text-[var(--accent)]">
                   <p className="flex items-center gap-1.5 font-medium text-[var(--accent)]">
                     <ShieldCheck className="h-4 w-4" /> JobPilot extension connected
                   </p>
@@ -302,7 +313,7 @@ export function AutoApplyModal({
               )}
 
               {extOutdated && (
-                <div className="rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-3 text-xs text-[var(--warning)]">
+                <div className="rounded-2xl border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-xs text-[var(--warning)]">
                   <p className="font-medium">Your JobPilot extension needs an update.</p>
                   <p className="mt-1">
                     Reload JobPilot after installing or updating the extension — a JobPilot tab that was already
@@ -315,7 +326,7 @@ export function AutoApplyModal({
               )}
 
               {extState?.present === false && (
-                <div className="rounded-lg border border-line bg-panel p-3 text-xs text-[var(--text-muted)]">
+                <div className="rounded-2xl border border-line bg-[var(--glass-surface)] p-4 text-xs text-[var(--text-muted)]">
                   <p className="font-medium text-[var(--text-secondary)]">
                     Install the JobPilot browser extension to automatically fill employer applications.
                   </p>
@@ -329,7 +340,7 @@ export function AutoApplyModal({
               )}
 
               {popupBlocked && canOpen && (
-                <div className="rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-3 text-xs text-[var(--warning)]">
+                <div className="rounded-2xl border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-xs text-[var(--warning)]">
                   Your browser blocked the new tab.{" "}
                   <a className="font-medium text-pine underline" href={manualUrl}
                      target="_blank" rel="noopener noreferrer">Open the official application manually</a>.
@@ -337,14 +348,14 @@ export function AutoApplyModal({
               )}
 
               {launchError && (
-                <div className="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-surface)] p-3 text-xs text-[var(--danger)]" role="alert">
+                <div className="rounded-2xl border border-[var(--danger-border)] bg-[var(--danger-surface)] p-4 text-xs text-[var(--danger)]" role="alert">
                   <p className="font-medium">Could not open the application automatically.</p>
                   <p className="mt-1">{launchError.message}</p>
                   <p className="mt-1 font-mono text-[11px]">{launchError.code}</p>
                 </div>
               )}
 
-              <p className="rounded-lg bg-panel/60 p-3 text-xs text-[var(--text-muted)]">
+              <p className="border-t border-line px-1 pt-5 text-xs leading-relaxed text-[var(--text-muted)]">
                 Your application is prepared for review. JobPilot fills the form on the employer’s site but{" "}
                 <span className="font-semibold">never submits it</span> — you review everything and click Submit yourself.
               </p>
@@ -352,7 +363,7 @@ export function AutoApplyModal({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-line bg-white px-6 py-4">
+        <div className="assisted-application-glass-bar flex flex-wrap items-center gap-2.5 border-t border-line px-6 py-4 sm:px-7 sm:py-5">
           {phase === "error" ? (
             <>
               {error?.retryable && (
@@ -368,6 +379,7 @@ export function AutoApplyModal({
             </>
           ) : (
             <Button
+              className="h-11 rounded-xl px-5 shadow-[0_8px_20px_rgb(31_94_69_/_18%)]"
               type="button"
               onClick={openSite}
               disabled={phase === "preparing" || !canOpen || launching}
@@ -386,11 +398,7 @@ export function AutoApplyModal({
               <Download className="h-4 w-4" /> Install extension
             </a>
           )}
-          {canOpen && phase !== "error" && (
-            <a className="text-sm text-[var(--text-muted)] underline" href={manualUrl}
-               target="_blank" rel="noopener noreferrer">Open manually</a>
-          )}
-          <Button variant="secondary" type="button" onClick={onClose}>Close</Button>
+          <Button className="h-11 rounded-xl px-5" variant="secondary" type="button" onClick={onClose}>Close</Button>
         </div>
       </div>
     </div>
@@ -398,15 +406,57 @@ export function AutoApplyModal({
 }
 
 function PreparingChecklist() {
+  const [activeStep, setActiveStep] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setActiveStep((current) => Math.min(current + 1, PREP_STEPS.length - 1));
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, []);
+
   return (
-    <ul className="grid gap-2.5">
-      {PREP_STEPS.map((step) => (
-        <li key={step} className="flex items-center gap-3 text-sm text-[var(--text-secondary)]">
-          <Loader2 className="h-4 w-4 animate-spin text-pine" />
-          {step}…
-        </li>
-      ))}
-    </ul>
+    <div>
+      <div className="flex items-start gap-3">
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--success-surface)] text-pine">
+          <Loader2 className="h-5 w-5 animate-spin" />
+        </span>
+        <div>
+          <h4 className="font-semibold">Getting everything ready</h4>
+          <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
+            We’re tailoring your documents and packaging verified answers for the employer’s form.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-panel" aria-hidden="true">
+        <div
+          className="h-full rounded-full bg-pine transition-[width] duration-700"
+          style={{ width: `${Math.min(90, 12 + activeStep * 19)}%` }}
+        />
+      </div>
+
+      <ul className="mt-4 grid gap-1.5" aria-live="polite">
+        {PREP_STEPS.map((step, index) => {
+          const complete = index < activeStep;
+          const active = index === activeStep;
+          return (
+            <li
+              key={step}
+              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${
+                active ? "bg-[var(--success-surface)] text-[var(--text-primary)]" : "text-[var(--text-muted)]"
+              }`}
+            >
+              <span className={`grid h-5 w-5 place-items-center rounded-full ${complete ? "bg-pine text-white" : active ? "text-pine" : "border border-line"}`}>
+                {complete ? <Check className="h-3 w-3" /> : active ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              </span>
+              <span className={active ? "font-medium" : ""}>{step}{active ? "…" : ""}</span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-4 text-xs text-[var(--text-muted)]">This usually takes less than a minute.</p>
+    </div>
   );
 }
 

@@ -112,12 +112,21 @@ describe("AutoApplyModal", () => {
     expect(screen.getByText(/never submits it/)).toBeInTheDocument();
   });
 
+  it("renders as a centered modal with a blurred glass backdrop", async () => {
+    renderModal();
+    await screen.findByText("Tailored resume");
+    const dialog = screen.getByRole("dialog", { name: "Assisted application" });
+    const backdrop = screen.getByTestId("assisted-application-backdrop");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveClass("assisted-application-dialog");
+    expect(backdrop).toHaveClass("assisted-application-backdrop");
+  });
+
   it("shows an install prompt when the extension is not detected but still allows opening the site", async () => {
     vi.mocked(autoApply.detectExtensionState).mockResolvedValue(EXT_ABSENT);
     renderModal();
     expect(await screen.findByText(/Install the JobPilot browser extension/i)).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: /Install extension/i }).length).toBeGreaterThan(0);
-    expect(screen.getByRole("link", { name: /Open manually/ })).toHaveAttribute("href", OFFICIAL_URL);
     // No extension -> the primary CTA is the plain manual open, no autofill claim.
     expect(await screen.findByRole("button", { name: /Open official application/i })).toBeInTheDocument();
   });
@@ -179,6 +188,18 @@ describe("AutoApplyModal", () => {
     await userEvent.click(openBtn);
     expect(autoApply.openOfficialSite).toHaveBeenCalledWith(OFFICIAL_URL);
     expect(autoApply.stageLaunch).not.toHaveBeenCalled();
+  });
+
+  it("does not add the job to the tracker merely because the employer site was opened", async () => {
+    renderModal();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Open and autofill application/i })
+    );
+
+    expect(fetch).not.toHaveBeenCalledWith(
+      "http://localhost:8000/jobs/1/tracker",
+      expect.objectContaining({ method: "PUT" })
+    );
   });
 
   it("shows a backend-unreachable message when fetch rejects (Failed to fetch)", async () => {

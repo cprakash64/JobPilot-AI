@@ -13,21 +13,17 @@ describe("CompanyLogo", () => {
     expect(img).toHaveAttribute("src", "https://logo.clearbit.com/openai.com");
   });
 
-  it("falls back to the neutral placeholder (never an initial letter) when no logo URL is provided", () => {
+  it("renders a generated company mark when no real logo URL is available", () => {
     render(React.createElement(CompanyLogo, { company: "Cardinal Health", logoUrl: null }));
-    expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.getByTestId("company-logo-placeholder")).toBeInTheDocument();
-    expect(screen.queryByText("CH")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Cardinal Health generated company mark" })).toHaveTextContent("CH");
+    expect(screen.getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 
-  it("tries the secondary source before falling back to the neutral placeholder when the primary image errors", () => {
+  it("falls back to a generated mark when the only real image errors", () => {
     render(React.createElement(CompanyLogo, { company: "Deepgram", logoUrl: "https://logo.clearbit.com/deepgram.com" }));
     const img = screen.getByRole("img", { name: "Deepgram logo" });
     fireEvent.error(img);
-    // No secondary source was provided, so it falls straight through to the
-    // placeholder — never an initial, never a broken-image icon.
-    expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.getByTestId("company-logo-placeholder")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Deepgram generated company mark" })).toHaveTextContent("DE");
   });
 
   it("prefers the proxied source, and falls back to the direct logo URL if the proxy fails", () => {
@@ -45,7 +41,7 @@ describe("CompanyLogo", () => {
     expect(second).toHaveAttribute("src", "https://logo.clearbit.com/deepgram.com");
   });
 
-  it("never shows a broken-image icon: after every source fails, only the placeholder remains", () => {
+  it("never shows a broken-image icon: after every source fails, a generated mark remains", () => {
     render(
       React.createElement(CompanyLogo, {
         company: "Deepgram",
@@ -55,7 +51,7 @@ describe("CompanyLogo", () => {
     );
     fireEvent.error(screen.getByRole("img", { name: "Deepgram logo" }));
     fireEvent.error(screen.getByRole("img", { name: "Deepgram logo" }));
-    expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.getByTestId("company-logo-placeholder")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Deepgram generated company mark" })).toHaveTextContent("DE");
+    expect(screen.getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 });

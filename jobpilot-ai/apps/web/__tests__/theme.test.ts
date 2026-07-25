@@ -7,7 +7,7 @@
  * Playwright suite (e2e/theme.spec.ts).
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -28,11 +28,15 @@ const REQUIRED_TOKENS = [
 ];
 
 function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    if (entry === "node_modules" || entry === ".next" || entry.startsWith(".")) continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.(tsx|ts)$/.test(entry)) out.push(full);
+  // Dirent avoids a separate stat call for every file. That distinction is
+  // material on macOS workspaces backed by File Provider/iCloud, where statSync
+  // can block while metadata is hydrated and make this otherwise tiny test
+  // exceed Vitest's default timeout.
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".next" || entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, out);
+    else if (/\.(tsx|ts)$/.test(entry.name)) out.push(full);
   }
   return out;
 }
@@ -108,7 +112,7 @@ describe("no hard-coded colours in components", () => {
       }
     }
     expect(offenders).toEqual([]);
-  });
+  }, 120_000);
 });
 
 describe("fit-score colours", () => {

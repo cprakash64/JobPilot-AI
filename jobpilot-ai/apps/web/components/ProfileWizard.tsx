@@ -194,6 +194,7 @@ type EducationRecord = {
   start_date: string;
   end_date: string;
   gpa: string;
+  gpa_scale: string;
   honors: string[];
   coursework: string[];
 };
@@ -453,6 +454,17 @@ export function ProfileWizard() {
           awards: career.awards
         })
       });
+      if (form.workday_password.trim()) {
+        await api("/profile/workday-credentials", {
+          method: "PUT",
+          body: JSON.stringify({ password: form.workday_password })
+        });
+        setForm((current) => ({
+          ...current,
+          workday_password: "",
+          workday_password_configured: true
+        }));
+      }
       setMessage("Profile saved.");
     } catch (saveError) {
       // Field-level validation (422) is shown against the offending fields
@@ -467,6 +479,22 @@ export function ProfileWizard() {
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function removeWorkdayPassword() {
+    setError("");
+    setMessage("");
+    try {
+      await api("/profile/workday-credentials", { method: "DELETE" });
+      setForm((current) => ({
+        ...current,
+        workday_password: "",
+        workday_password_configured: false
+      }));
+      setMessage("Stored Workday password removed.");
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : "Could not remove the Workday password.");
     }
   }
 
@@ -631,6 +659,26 @@ export function ProfileWizard() {
                 error={fieldErrors.application_email ?? validateApplicationEmail(form.application_email) ?? undefined}
                 hint="This email will be used on job applications. It can be different from your JobPilot login email."
               />
+              <div>
+                <Field
+                  label="Workday account password (optional)"
+                  type="password"
+                  value={form.workday_password}
+                  onChange={(value) => update("workday_password", value)}
+                  hint={form.workday_password_configured
+                    ? "A password is stored encrypted. Enter a new value to replace it; JobPilot never displays it again."
+                    : "Used with your application email when a Workday employer requires account creation. Stored encrypted and never returned to the browser UI."}
+                />
+                {form.workday_password_configured && (
+                  <button
+                    type="button"
+                    className="focus-ring mt-2 text-xs font-medium text-[var(--danger)] underline"
+                    onClick={removeWorkdayPassword}
+                  >
+                    Remove stored Workday password
+                  </button>
+                )}
+              </div>
               <label>
                 <span className="text-sm font-medium">Phone country</span>
                 <select
@@ -1156,17 +1204,28 @@ function EducationEditor({ records, onChange }: { records: EducationRecord[]; on
       title="education"
       emptyLabel="Add your first education entry"
       records={records}
-      newRecord={() => ({ school: "", degree: "", major: "", minor: "", start_date: "", end_date: "", gpa: "", honors: [], coursework: [] })}
+      newRecord={() => ({ school: "", degree: "", major: "", minor: "", start_date: "", end_date: "", gpa: "", gpa_scale: "4.0", honors: [], coursework: [] })}
       onChange={onChange}
       render={(record, index, setRecord) => (
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="School" value={record.school} onChange={(value) => setRecord({ ...record, school: value })} />
-          <Field label="Degree" value={record.degree} onChange={(value) => setRecord({ ...record, degree: value })} />
+          <SelectField
+            label="Degree"
+            value={record.degree}
+            options={["High School Diploma", "Associate's Degree", "Bachelor's Degree", "Master's Degree", "Doctoral Degree", "Other"]}
+            onChange={(value) => setRecord({ ...record, degree: value })}
+          />
           <Field label="Major" value={record.major} onChange={(value) => setRecord({ ...record, major: value })} />
           <Field label="Minor" value={record.minor} onChange={(value) => setRecord({ ...record, minor: value })} />
           <Field label="Start date" type="date" value={record.start_date} onChange={(value) => setRecord({ ...record, start_date: value })} />
           <Field label="End date" type="date" value={record.end_date} onChange={(value) => setRecord({ ...record, end_date: value })} />
-          <Field label="GPA" value={record.gpa} onChange={(value) => setRecord({ ...record, gpa: value })} />
+          <Field label="GPA" value={record.gpa} placeholder="For example, 3.8" onChange={(value) => setRecord({ ...record, gpa: value })} />
+          <SelectField
+            label="GPA scale"
+            value={record.gpa_scale || "4.0"}
+            options={["4.0", "5.0", "10.0", "100"]}
+            onChange={(value) => setRecord({ ...record, gpa_scale: value })}
+          />
           <ChipInput label="Honors" values={record.honors} quickOptions={[]} placeholder="Add honors" onChange={(value) => setRecord({ ...record, honors: value })} />
           <div className="md:col-span-2">
             <ChipInput label="Relevant coursework" values={record.coursework} quickOptions={[]} placeholder="Add coursework" onChange={(value) => setRecord({ ...record, coursework: value })} />
@@ -1297,7 +1356,8 @@ function Field({
   required = false,
   readOnly = false,
   error,
-  hint
+  hint,
+  placeholder
 }: {
   label: string;
   value: string;
@@ -1307,6 +1367,7 @@ function Field({
   readOnly?: boolean;
   error?: string;
   hint?: string;
+  placeholder?: string;
 }) {
   // `value ?? ""` keeps the input CONTROLLED even if a caller ever hands it a
   // null: React warns (and the field silently stops accepting edits) when an
@@ -1325,6 +1386,7 @@ function Field({
         } ${readOnly ? "bg-[var(--disabled-background)] text-[var(--text-secondary)]" : ""}`}
         type={type}
         value={safeValue}
+        placeholder={placeholder}
         readOnly={readOnly}
         required={required}
         aria-invalid={error ? true : undefined}
@@ -1342,6 +1404,35 @@ function Field({
           {hint}
         </span>
       )}
+    </label>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  options,
+  onChange
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  const displayedOptions = value && !options.includes(value) ? [value, ...options] : options;
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-[var(--text-primary)]">{label}</span>
+      <select
+        className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] px-3 text-[var(--text-primary)]"
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">Select…</option>
+        {displayedOptions.map((option) => (
+          <option key={option} value={option}>{option}</option>
+        ))}
+      </select>
     </label>
   );
 }
@@ -1444,6 +1535,7 @@ function normalizeEducationList(records: unknown[]): EducationRecord[] {
       start_date: normalizeDate(item.start_date),
       end_date: normalizeDate(item.end_date),
       gpa: item.gpa ?? "",
+      gpa_scale: item.gpa_scale ?? "4.0",
       honors: item.honors ?? [],
       coursework: item.coursework ?? []
     };
