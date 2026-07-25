@@ -1,5 +1,6 @@
 import logging
 import os
+from hashlib import sha256
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,7 +12,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.jobs.company_logo_service import normalize_company_key, resolve_company_logo
+from app.jobs.company_logo_service import (
+    is_untrusted_simplify_logo_url,
+    normalize_company_key,
+    resolve_company_logo,
+)
 from app.jobs.job_eligibility_service import evaluate_eligibility
 from app.jobs.job_ingestion_service import build_profile_view, discover_jobs, rematch_user
 from app.jobs.job_ingestion_service import _job_view  # noqa: PLC2701 - internal shared mapper
@@ -43,7 +48,7 @@ from app.schemas.jobs import (
     DocumentUpdateIn,
     GenerateMaterialsIn,
 )
-from app.services.documents import export_document_file, generate_document
+from app.services.documents import generate_document
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -72,7 +77,7 @@ def company_logo_proxy(normalized_key: str, db: Session = Depends(get_db)) -> Re
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No logo resolved for this company")
 
     _LOGO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cached = _find_cached_logo(normalized_key)
+    cached = _find_cached_logo(normalized_key, branding.logo_url)
     if cached is not None:
         path, content_type = cached
         return Response(content=path.read_bytes(), media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
@@ -95,13 +100,19 @@ def company_logo_proxy(normalized_key: str, db: Session = Depends(get_db)) -> Re
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Logo could not be fetched") from exc
 
     ext = _EXT_FOR_CONTENT_TYPE.get(result.content_type, "img")
-    (_LOGO_CACHE_DIR / f"{normalized_key}.{ext}").write_bytes(result.content)
+    fingerprint = _logo_cache_fingerprint(branding.logo_url)
+    (_LOGO_CACHE_DIR / f"{normalized_key}-{fingerprint}.{ext}").write_bytes(result.content)
     return Response(content=result.content, media_type=result.content_type, headers={"Cache-Control": "public, max-age=86400"})
 
 
-def _find_cached_logo(normalized_key: str) -> tuple[Path, str] | None:
+def _logo_cache_fingerprint(logo_url: str) -> str:
+    return sha256(logo_url.encode("utf-8")).hexdigest()[:12]
+
+
+def _find_cached_logo(normalized_key: str, logo_url: str) -> tuple[Path, str] | None:
+    fingerprint = _logo_cache_fingerprint(logo_url)
     for content_type, ext in _EXT_FOR_CONTENT_TYPE.items():
-        path = _LOGO_CACHE_DIR / f"{normalized_key}.{ext}"
+        path = _LOGO_CACHE_DIR / f"{normalized_key}-{fingerprint}.{ext}"
         if path.exists():
             return path, content_type
     return None
@@ -213,14 +224,29 @@ def _list_payload(
 
     cutoff = datetime.now(UTC) - timedelta(days=posted_within_days)
     # Expired jobs (disappeared from the official source past the grace period)
-    # are hidden from discovery by default; saved/tracked jobs live in the tracker
-    # and are unaffected by this filter.
+    # are hidden from discovery by default. Saved jobs stay discoverable; jobs
+    # whose application has started or finished live only in the tracker.
     jobs = db.scalars(select(JobPosting).where(JobPosting.is_active.is_(True))).all()
     matches = {
         match.job_id: match
         for match in db.scalars(select(JobMatch).where(JobMatch.user_id == user.id)).all()
     }
     sources = {source.id: source for source in db.scalars(select(JobSource)).all()}
+    hidden_tracker_statuses = [
+        ApplicationStatus.applying,
+        ApplicationStatus.applied,
+        ApplicationStatus.interview,
+        ApplicationStatus.rejected,
+        ApplicationStatus.offer,
+    ]
+    tracked_job_ids = set(
+        db.scalars(
+            select(ApplicationTracker.job_id).where(
+                (ApplicationTracker.user_id == user.id)
+                & (ApplicationTracker.status.in_(hidden_tracker_statuses))
+            )
+        ).all()
+    )
 
     cards: list[dict] = []
     # Debug counts of why fresh jobs were excluded (shown only in dev on the UI).
@@ -228,6 +254,8 @@ def _list_payload(
     for job in jobs:
         if _is_demo_posting(job, sources.get(job.source_id)):
             continue  # never surface fake/demo/placeholder jobs, even if in the DB
+        if job.id in tracked_job_ids:
+            continue  # applying/applied jobs live only in the tracker
         if not _passes_freshness(job.posted_at, cutoff, include_unknown):
             continue
         counts["fresh"] += 1
@@ -338,9 +366,17 @@ def _serialize_card(
     # Prefer branding stored at ingestion; resolve on the fly for legacy rows
     # that predate the columns (so cards work before a backfill is run).
     company_domain = job.company_domain or ""
-    company_logo_url = job.company_logo_url or ""
+    company_logo_url = (
+        ""
+        if is_untrusted_simplify_logo_url(job.company_logo_url)
+        else (job.company_logo_url or "")
+    )
     if not company_logo_url:
-        resolved = resolve_company_logo(job.company or "", source_type=source.type if source else None)
+        resolved = resolve_company_logo(
+            job.company or "",
+            source_type=source.type if source else None,
+            application_url=job.application_url,
+        )
         company_domain = company_domain or resolved["company_domain"]
         company_logo_url = resolved["company_logo_url"]
     return {
@@ -427,18 +463,71 @@ def _profile_filter_payload(profile: UserProfile | None) -> dict:
 
 @router.get("/tracker/all")
 def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    rows = db.scalars(select(ApplicationTracker).where(ApplicationTracker.user_id == user.id)).all()
+    submitted_statuses = [
+        ApplicationStatus.applied,
+        ApplicationStatus.interview,
+        ApplicationStatus.offer,
+        ApplicationStatus.rejected,
+    ]
+    rows = db.execute(
+        select(ApplicationTracker, JobPosting)
+        .join(JobPosting, JobPosting.id == ApplicationTracker.job_id)
+        .where(
+            (ApplicationTracker.user_id == user.id)
+            & (ApplicationTracker.status.in_(submitted_statuses))
+        )
+        .order_by(ApplicationTracker.updated_at.desc(), ApplicationTracker.id.desc())
+    ).all()
+    matches = {
+        match.job_id: match
+        for match in db.scalars(select(JobMatch).where(JobMatch.user_id == user.id)).all()
+    }
+    sources = {source.id: source for source in db.scalars(select(JobSource)).all()}
     return {
         "applications": [
             {
-                "id": row.id,
-                "job_id": row.job_id,
-                "status": row.status.value,
-                "notes": row.notes,
-                "applied_at": row.applied_at,
+                "id": tracker.id,
+                "job_id": tracker.job_id,
+                "status": tracker.status.value,
+                "notes": tracker.notes,
+                "applied_at": tracker.applied_at,
+                "follow_up_date": tracker.follow_up_date,
+                "created_at": tracker.created_at,
+                "updated_at": tracker.updated_at,
+                "job": _tracker_job_payload(
+                    job,
+                    matches.get(job.id),
+                    sources.get(job.source_id),
+                ),
             }
-            for row in rows
+            for tracker, job in rows
         ]
+    }
+
+
+def _tracker_job_payload(
+    job: JobPosting,
+    match: JobMatch | None,
+    source: JobSource | None,
+) -> dict:
+    card = _serialize_card(job, match, source)
+    card.pop("_posted_key", None)
+    return {
+        key: card.get(key)
+        for key in (
+            "id",
+            "title",
+            "company",
+            "company_domain",
+            "company_logo_url",
+            "company_logo_proxy_path",
+            "location",
+            "workplace_type",
+            "employment_type",
+            "posted_at",
+            "application_url",
+            "match",
+        )
     }
 
 
@@ -682,7 +771,7 @@ def export_document(
     record = db.get(GeneratedDocument, document_id)
     if record is None or record.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    file_path = export_document_file(record, fmt)
+    file_path = render_document_file(record, fmt)
     record.format = fmt
     record.file_path = file_path
     db.commit()
@@ -709,8 +798,25 @@ def upsert_tracker(
         db.add(tracker)
     tracker.status = status_value
     tracker.notes = payload.notes
-    if status_value == ApplicationStatus.applied and tracker.applied_at is None:
-        tracker.applied_at = datetime.utcnow()
+    completed_application_statuses = {
+        ApplicationStatus.applied,
+        ApplicationStatus.interview,
+        ApplicationStatus.rejected,
+        ApplicationStatus.offer,
+    }
+    if status_value in completed_application_statuses and tracker.applied_at is None:
+        tracker.applied_at = datetime.now(UTC)
     db.commit()
     db.refresh(tracker)
-    return {"tracker": tracker}
+    return {
+        "tracker": {
+            "id": tracker.id,
+            "job_id": tracker.job_id,
+            "status": tracker.status.value,
+            "notes": tracker.notes,
+            "applied_at": tracker.applied_at,
+            "follow_up_date": tracker.follow_up_date,
+            "created_at": tracker.created_at,
+            "updated_at": tracker.updated_at,
+        }
+    }

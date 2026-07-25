@@ -48,9 +48,9 @@ def derive_profile_answers(
 ) -> list[dict]:
     """Non-sensitive facts derivable from the profile. Pure + unit-testable.
 
-    Consequential-but-fillable facts (work authorization, sponsorship) are
-    flagged ``requires_review`` so the extension fills-then-flags rather than
-    silently committing them.
+    Work authorization and sponsorship are emitted only when the user selected
+    a real profile value. They are normalized to the Yes/No shape employer
+    controls expect; the default "prefer not to say" state emits nothing.
 
     NOTE: first_name/last_name are deliberately NOT produced here — see
     ``_name_answers_and_unresolved``. Splitting ``full_name`` on whitespace is
@@ -66,6 +66,10 @@ def derive_profile_answers(
         national_number=profile.get("phone_national_number"),
         e164=profile.get("phone_e164"),
         legacy_phone=profile.get("phone"),
+    )
+    work_authorization = _work_authorization_us(profile.get("work_authorization"))
+    has_work_authorization = _has_explicit_work_authorization(
+        profile.get("work_authorization")
     )
 
     candidates: list[tuple[str, Any, bool]] = [
@@ -94,10 +98,24 @@ def derive_profile_answers(
         ("current_company", current.get("company"), False),
         ("current_title", current.get("title"), False),
         ("preferred_workplace", profile.get("remote_preference"), False),
-        ("work_authorization_us", profile.get("work_authorization"), True),
-        ("sponsorship_required_now", _bool_str(profile.get("requires_sponsorship")), True),
-        ("sponsorship_required_future", _bool_str(profile.get("requires_sponsorship")), True),
+        # These are explicit saved Profile selections, not inferred facts.
+        ("work_authorization_us", work_authorization, False),
+        (
+            "sponsorship_required_now",
+            _bool_str(profile.get("requires_sponsorship")) if has_work_authorization else "",
+            False,
+        ),
+        (
+            "sponsorship_required_future",
+            _bool_str(profile.get("requires_sponsorship")) if has_work_authorization else "",
+            False,
+        ),
         ("willing_to_relocate", _bool_str(profile.get("open_to_relocation")), False),
+        # Explicit global application preferences supplied by the user.
+        ("contact_current_employer", "Yes", False),
+        ("essential_functions_with_accommodation", "Yes", False),
+        ("employment_history_confirmation", "Yes", False),
+        ("electronic_signature", full_name, False),
     ]
 
     answers: list[dict] = []
@@ -114,7 +132,11 @@ def derive_profile_answers(
                 "confidence": 0.9 if requires_review else 0.97,
                 "sensitive": False,
                 "requires_review": requires_review,
-                "verified": False,
+                "verified": key in {
+                    "work_authorization_us",
+                    "sponsorship_required_now",
+                    "sponsorship_required_future",
+                },
             }
         )
     return answers
@@ -255,6 +277,9 @@ def build_safe_answers(
     name_answers, name_unresolved = _name_answers_and_unresolved(profile_dict)
     for a in name_answers:
         derived[a["canonical_key"]] = a
+    previous = _previously_employed_answer(company)
+    if previous:
+        derived[previous["canonical_key"]] = previous
     # Keys owned by the CONFIRMED structured profile name. A legacy answer-vault
     # row (e.g. an old automatic "Chandra" / "Prakash Pandey" split) must never
     # override them — that stale split was still appearing on live applications.
@@ -308,6 +333,8 @@ def build_safe_answers(
     # Consequential facts that were derived but never verified stay in safe (so
     # the extension fills-then-flags) — no extra unresolved entry needed.
     if _has_education(education):
+        for answer in _latest_education_answers(education):
+            safe.setdefault(answer["canonical_key"], answer)
         safe.setdefault(
             "education",
             {
@@ -660,10 +687,121 @@ def _education_summary(education: list[Education]) -> str:
     return "; ".join(parts)
 
 
+def _latest_education_answers(education: list[Education]) -> list[dict]:
+    """Expose the most recent education record as granular, reusable facts.
+
+    Employer forms almost always split education across controls. Publishing
+    only a prose summary made Degree, graduation year, and GPA impossible to
+    fill even though the user had already saved them in Profile.
+    """
+    candidates = [item for item in education if (item.school or "").strip()]
+    if not candidates:
+        return []
+    latest = max(
+        candidates,
+        key=lambda item: str(item.end_date or item.start_date or ""),
+    )
+    values: list[tuple[str, Any]] = [
+        ("education_school", latest.school),
+        ("education_degree", latest.degree),
+        ("education_major", latest.major),
+        ("education_end_year", latest.end_date.year if latest.end_date else None),
+        (
+            "education_gpa",
+            _gpa_on_four_point_scale(
+                latest.gpa,
+                getattr(latest, "gpa_scale", "4.0"),
+            ),
+        ),
+    ]
+    answers: list[dict] = []
+    for key, value in values:
+        text = _clean(value)
+        if not text:
+            continue
+        answers.append(
+            {
+                "canonical_key": key,
+                "value": text,
+                "display_value": text,
+                "source": "profile",
+                "confidence": 0.99,
+                "sensitive": False,
+                "requires_review": False,
+                "verified": True,
+            }
+        )
+    return answers
+
+
+def _gpa_on_four_point_scale(value: str | None, scale: str | None) -> str:
+    """Return a controlled 4.0-scale value, or blank when the data is invalid."""
+    try:
+        numeric = float((value or "").strip())
+        maximum = float((scale or "4.0").strip())
+    except (TypeError, ValueError):
+        return ""
+    if maximum <= 0 or numeric < 0 or numeric > maximum:
+        return ""
+    normalized = numeric * 4.0 / maximum
+    return f"{normalized:.2f}".rstrip("0").rstrip(".")
+
+
+def _previously_employed_answer(company: str | None) -> dict | None:
+    """Return the user's explicit default for prior-employment questions.
+
+    The preference is applied only while building a session for a known target
+    company. A verified company-scoped Answer Vault row is merged afterwards
+    and therefore remains the authoritative per-employer override.
+    """
+    if not normalize_company_key(company):
+        return None
+    value = "No"
+    return {
+        "canonical_key": "previously_employed",
+        "value": value,
+        "display_value": value,
+        "source": "user_default",
+        "confidence": 0.99,
+        "sensitive": False,
+        "requires_review": False,
+        "verified": True,
+    }
+
+
 def _bool_str(value: Any) -> str:
     if value is None:
         return ""
     return "Yes" if bool(value) else "No"
+
+
+def _has_explicit_work_authorization(value: Any) -> bool:
+    """Whether the profile contains a user choice rather than the UI default."""
+    return _clean(value).lower() not in {"", "prefer_not_to_say"}
+
+
+def _work_authorization_us(value: Any) -> str:
+    """Translate the Profile vocabulary to the binary U.S. employer question.
+
+    Ambiguous choices intentionally remain blank. In particular, ``other`` and
+    ``prefer_not_to_say`` must never be coerced to either side of a legal
+    authorization question.
+    """
+    status = _clean(value).lower()
+    if status in {
+        "authorized_us",
+        "need_sponsorship_future",
+        "student_visa",
+        "opt_cpt",
+    }:
+        return "Yes"
+    if status in {
+        "authorized_other_country",
+        "need_sponsorship_now",
+        "not_authorized",
+    }:
+        return "No"
+    return ""
 
 
 def _clean(value: Any) -> str:

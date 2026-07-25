@@ -161,6 +161,10 @@ class UserProfile(Base):
     application_email: Mapped[str | None] = mapped_column(String(320))
     application_email_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     application_email_updated_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    # Write-only employer-account secret. Never serialized by /profile; only a
+    # boolean "configured" flag is returned. Ciphertext is decrypted solely
+    # for a session-scoped Workday extension response.
+    workday_password_ciphertext: Mapped[str | None] = mapped_column(String(1000))
     # Raw user input, kept verbatim as the fallback if parsing was ever wrong.
     phone: Mapped[str | None] = mapped_column(String(50))
     # Structured phone — derived together by app.profile.phone.parse_phone so a
@@ -240,6 +244,9 @@ class Education(Base):
     start_date: Mapped[DateValue | None] = mapped_column(Date)
     end_date: Mapped[DateValue | None] = mapped_column(Date)
     gpa: Mapped[str | None] = mapped_column(String(20))
+    # The scale is required to interpret and safely convert a GPA for employer
+    # dropdowns. Existing profiles are the common US 4.0 scale by default.
+    gpa_scale: Mapped[str] = mapped_column(String(10), default="4.0")
     honors: Mapped[list] = mapped_column(JsonType, default=list)
     coursework: Mapped[list] = mapped_column(JsonType, default=list)
 

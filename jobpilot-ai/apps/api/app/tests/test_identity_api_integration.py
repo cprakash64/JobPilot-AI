@@ -282,5 +282,14 @@ def test_no_profile_response_field_contains_a_secret(client: TestClient) -> None
     save_profile(client, headers)
     body = client.get("/profile", headers=headers).text.lower()
 
-    for forbidden in ("password", "secret_key", "hashed_password", "api_key", "token"):
+    # A boolean `workday_password_configured` capability flag is safe and lets
+    # the UI avoid ever reading the credential. The ciphertext and all actual
+    # secret-bearing fields must remain absent.
+    for forbidden in (
+        "workday_password_ciphertext",
+        "secret_key",
+        "hashed_password",
+        "api_key",
+        "token",
+    ):
         assert forbidden not in body

@@ -18,6 +18,7 @@ deterministic so matching works without OpenAI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 
 from app.jobs.job_search_criteria_service import SENIORITY_ORDER, SearchCriteria
 
@@ -46,6 +47,8 @@ class ProfileView:
     target_levels: list[str] = field(default_factory=list)
     has_degree: bool = False
     requires_sponsorship: bool | None = None
+    open_to_relocation: bool = False
+    location_country: str = ""
 
 
 @dataclass
@@ -209,9 +212,45 @@ def _location_match(profile: ProfileView, job: JobView) -> tuple[float, str | No
     if profile.preferred_locations and job.location and workplace != "remote":
         if any(loc.lower() in job.location.lower() for loc in profile.preferred_locations):
             base = min(1.0, base + 0.0)
+        elif profile.open_to_relocation:
+            # "Open to relocation" means city/state differences are expected,
+            # not a risk. Only warn when both countries are confidently known
+            # and differ; an unknown country never becomes a negative guess.
+            home_country = _country_code(profile.location_country)
+            job_country = _country_code(job.location)
+            if home_country and job_country and home_country != job_country:
+                return min(base, 0.4), "Job is located in a different country"
         else:
             return min(base, 0.4), "Job location differs from your preferred locations"
     return base, None
+
+
+_US_STATE_CODES = frozenset(
+    "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT "
+    "NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split()
+)
+_COUNTRY_ALIASES = {
+    "united states": "US", "united states of america": "US", "usa": "US", "u.s.": "US",
+    "canada": "CA", "united kingdom": "GB", "uk": "GB", "great britain": "GB",
+    "india": "IN", "australia": "AU", "germany": "DE", "france": "FR",
+    "ireland": "IE", "singapore": "SG", "mexico": "MX", "netherlands": "NL",
+}
+
+
+def _country_code(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    for name, code in _COUNTRY_ALIASES.items():
+        if re.search(rf"(?:^|[,;\s]){re.escape(name)}(?:$|[,;\s])", text):
+            return code
+    # US feeds usually express location as "City, ST" without spelling out the
+    # country. Recognize the closed state-code set rather than treating every
+    # two-letter suffix as a country.
+    tokens = {token.upper() for token in re.findall(r"\b[A-Za-z]{2}\b", value or "")}
+    if tokens & _US_STATE_CODES:
+        return "US"
+    return ""
 
 
 def _education_match(profile: ProfileView, job: JobView) -> float:

@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Any
 
-from docx import Document
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -112,39 +111,17 @@ def build_truthful_resume(payload: dict[str, Any], job: JobPosting) -> dict[str,
 
 
 def write_docx(content: dict[str, Any], path: Path) -> None:
-    doc = Document()
-    header = content.get("header", {})
-    doc.add_heading(header.get("name") or "Resume", level=1)
-    doc.add_paragraph(content.get("summary", ""))
-    for heading in ["skills", "experience", "projects", "education", "certifications", "awards"]:
-        doc.add_heading(heading.replace("_", " ").title(), level=2)
-        value = content.get(heading, [])
-        if isinstance(value, list):
-            for item in value:
-                doc.add_paragraph(str(item), style="List Bullet")
-    doc.save(path)
+    """Compatibility helper for callers that still pass legacy resume content."""
+    from app.documents.store import _normalize_resume_content, _render_docx
+
+    _render_docx(_normalize_resume_content(content), True, path)
 
 
 def write_pdf(content: dict[str, Any], path: Path) -> None:
-    from reportlab.lib.pagesizes import letter
-    from reportlab.pdfgen import canvas
+    """Compatibility helper that preserves formatting instead of dumping dicts."""
+    from app.documents.store import _normalize_resume_content, _render_pdf
 
-    pdf = canvas.Canvas(str(path), pagesize=letter)
-    width, height = letter
-    y = height - 72
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(72, y, content.get("header", {}).get("name") or "Resume")
-    y -= 28
-    pdf.setFont("Helvetica", 10)
-    for line in [content.get("summary", "")] + [f"{k}: {v}" for k, v in content.items() if k != "header"]:
-        for chunk in str(line).split("\n"):
-            pdf.drawString(72, y, chunk[:110])
-            y -= 14
-            if y < 72:
-                pdf.showPage()
-                y = height - 72
-                pdf.setFont("Helvetica", 10)
-    pdf.save()
+    _render_pdf(_normalize_resume_content(content), True, path)
 
 
 async def generate_document(db: Session, user_id: int, job_id: int, doc_type: DocumentType) -> GeneratedDocument:
@@ -186,15 +163,13 @@ async def generate_document(db: Session, user_id: int, job_id: int, doc_type: Do
 
 
 def export_document_file(record: GeneratedDocument, fmt: DocumentFormat) -> str:
-    import os
+    """Compatibility wrapper around the canonical structured exporter.
 
-    out_dir = Path(os.getenv("UPLOAD_DIR", "uploads")).parent / "generated"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"document-{record.id}.{fmt.value}"
-    if fmt == DocumentFormat.docx:
-        write_docx(record.content, path)
-    elif fmt == DocumentFormat.pdf:
-        write_pdf(record.content, path)
-    else:
-        path.write_text(str(record.content), encoding="utf-8")
-    return str(path)
+    The old implementation here drew ``str(dict)`` values onto a canvas, which
+    is the raw-text PDF users saw. Keeping one renderer guarantees that manual
+    downloads, legacy API clients, and extension uploads receive the same
+    formatted, ATS-safe document.
+    """
+    from app.documents.store import export_document
+
+    return export_document(record, fmt)

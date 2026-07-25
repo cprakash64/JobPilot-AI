@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
 from app.jobs import scoring_service
+from app.jobs.job_matching_service import JobView, ProfileView, score_job
 from app.jobs.scoring_service import (
     SCORE_VERSION,
     compute_job_content_hash,
@@ -220,6 +221,27 @@ def test_nullable_job_fields_do_not_crash(db: Session) -> None:
     assert stats.failed == 0
     match = db.scalar(select(JobMatch).where(JobMatch.user_id == user_id))
     assert match.score_state == ScoreState.scored.value
+
+
+def test_open_to_relocation_suppresses_domestic_location_mismatch() -> None:
+    profile = ProfileView(
+        target_roles=["Software Engineer"],
+        preferred_locations=["Phoenix, AZ"],
+        open_to_relocation=True,
+        location_country="United States",
+    )
+    domestic = score_job(
+        profile,
+        JobView(title="Software Engineer", location="Cambridge, MA", workplace_type="onsite"),
+    )
+    assert "Job location differs from your preferred locations" not in domestic.risk_factors
+    assert "Job is located in a different country" not in domestic.risk_factors
+
+    international = score_job(
+        profile,
+        JobView(title="Software Engineer", location="Toronto, Canada", workplace_type="onsite"),
+    )
+    assert "Job is located in a different country" in international.risk_factors
 
 
 def test_scheduler_lock_is_single_holder(db: Session, monkeypatch) -> None:

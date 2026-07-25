@@ -172,6 +172,12 @@ class ProfileNameIn(BaseModel):
     preferred_last_name: str | None = Field(default=None, max_length=120)
 
 
+class WorkdayCredentialsIn(BaseModel):
+    """Write-only Workday password. Email comes from Application email."""
+
+    password: str = Field(min_length=8, max_length=128)
+
+
 class SensitiveDemographicsIn(BaseModel):
     """Voluntary EEO answers.
 
@@ -224,8 +230,17 @@ class EducationIn(BaseModel):
     start_date: Date | None = None
     end_date: Date | None = None
     gpa: str | None = None
+    gpa_scale: str = "4.0"
     honors: list[str] = Field(default_factory=list)
     coursework: list[str] = Field(default_factory=list)
+
+    @field_validator("gpa_scale")
+    @classmethod
+    def validate_gpa_scale(cls, value: str) -> str:
+        normalized = (value or "4.0").strip()
+        if normalized not in {"4.0", "5.0", "10.0", "100"}:
+            raise ValueError("GPA scale must be 4.0, 5.0, 10.0, or 100")
+        return normalized
 
 
 class ExperienceIn(BaseModel):

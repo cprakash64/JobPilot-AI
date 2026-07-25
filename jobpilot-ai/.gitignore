@@ -36,6 +36,7 @@ htmlcov/
 test-results/
 playwright-report/
 apps/extension/e2e/smoke.png
+output/
 
 # --- Caches ---------------------------------------------------------------- #
 __pycache__/

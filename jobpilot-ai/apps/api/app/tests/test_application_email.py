@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Generator
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -149,6 +149,34 @@ def test_a_complete_profile_produces_every_required_autofill_key(db: Session) ->
         "city", "linkedin_url", "work_authorization_us", "sponsorship_required_future",
     ]:
         assert required in keys, f"missing required autofill key: {required}"
+
+
+def test_profile_work_authorization_is_binary_verified_and_omitted_when_unset(
+    db: Session,
+) -> None:
+    user = _profile(
+        db,
+        account_email="candidate@mailbox.test-domain.co",
+        application_email="candidate@mailbox.test-domain.co",
+        application_email_confirmed=True,
+        work_authorization="authorized_us",
+        requires_sponsorship=False,
+    )
+    answers, _ = build_safe_answers(db, user)
+    by_key = {answer["canonical_key"]: answer for answer in answers}
+    assert by_key["work_authorization_us"]["value"] == "Yes"
+    assert by_key["work_authorization_us"]["verified"] is True
+    assert by_key["work_authorization_us"]["requires_review"] is False
+    assert by_key["sponsorship_required_future"]["value"] == "No"
+
+    profile = db.scalar(select(E.UserProfile).where(E.UserProfile.user_id == user.id))
+    profile.work_authorization = "prefer_not_to_say"
+    db.flush()
+    answers, _ = build_safe_answers(db, user)
+    keys = {answer["canonical_key"] for answer in answers}
+    assert "work_authorization_us" not in keys
+    assert "sponsorship_required_now" not in keys
+    assert "sponsorship_required_future" not in keys
 
 
 def test_preferred_first_name_is_never_the_middle_name(db: Session) -> None:

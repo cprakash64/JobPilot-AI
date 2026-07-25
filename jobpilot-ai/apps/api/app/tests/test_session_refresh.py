@@ -9,6 +9,7 @@ employer form still received nothing, and no layer could tell it had gone stale.
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import date
 
 import pytest
 from sqlalchemy import create_engine
@@ -165,6 +166,29 @@ def test_editing_the_profile_makes_the_session_stale(db: Session) -> None:
     assert is_stale(db, session) is True
 
 
+def test_adding_employment_or_education_makes_the_session_stale(db: Session) -> None:
+    user, _ = _user(db)
+    session = _session(db, user)
+
+    db.add(E.Experience(
+        user_id=user.id, company="VeoTrex", title="Engineer",
+        start_date=date(2024, 1, 1), currently_working=True,
+        bullets=[], technologies=[], measurable_impact=[],
+    ))
+    db.flush()
+    assert is_stale(db, session) is True
+
+    session.profile_revision = current_profile_revision(db, user.id)
+    db.add(E.Education(
+        user_id=user.id, school="Arizona State University",
+        degree="Bachelor of Science", major="Computer Science",
+        start_date=date(2019, 8, 1), end_date=date(2023, 5, 1),
+        honors=[], coursework=[],
+    ))
+    db.flush()
+    assert is_stale(db, session) is True
+
+
 def test_a_session_prepared_before_revisions_existed_is_stale(db: Session) -> None:
     user, _ = _user(db)
     assert is_stale(db, _session(db, user, profile_revision=None)) is True
@@ -206,6 +230,27 @@ def test_refresh_rebuilds_the_answers_from_the_current_profile(db: Session) -> N
     assert by_key["last_name"] == "Lovelace"
     # The stale snapshot is gone entirely.
     assert "STALE" not in by_key.values()
+
+
+def test_refresh_includes_structured_employment_and_education_snapshot(db: Session) -> None:
+    user, _ = _user(db)
+    session = _session(db, user, profile_revision=None)
+    db.add(E.Experience(
+        user_id=user.id, company="VeoTrex", title="Engineer", location="Tempe, Arizona",
+        start_date=date(2024, 1, 1), currently_working=True,
+        bullets=[], technologies=[], measurable_impact=[],
+    ))
+    db.add(E.Education(
+        user_id=user.id, school="Arizona State University",
+        degree="Bachelor of Science", major="Computer Science",
+        honors=[], coursework=[],
+    ))
+    db.flush()
+
+    refresh_if_stale(db, session, user)
+    assert session.profile_snapshot["experience"][0]["company"] == "VeoTrex"
+    assert session.profile_snapshot["experience"][0]["start_date"] == "2024-01-01"
+    assert session.profile_snapshot["education"][0]["school"] == "Arizona State University"
 
 
 def test_refresh_stamps_the_current_revision(db: Session) -> None:

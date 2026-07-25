@@ -36,6 +36,7 @@ from app.schemas.profile import (
     ProfileNameIn,
     SensitiveDemographicsIn,
     UserProfileIn,
+    WorkdayCredentialsIn,
     WORK_AUTHORIZATION_STATUSES,
     WORK_PREFERENCES,
 )
@@ -89,6 +90,7 @@ def serialize_profile(profile: UserProfile | None) -> dict[str, Any] | None:
         "phone_e164": profile.phone_e164,
         "application_email": profile.application_email,
         "application_email_confirmed": profile.application_email_confirmed,
+        "workday_password_configured": bool(profile.workday_password_ciphertext),
         "location_city": profile.location_city,
         "location_state": profile.location_state,
         "location_postal_code": profile.location_postal_code,
@@ -249,6 +251,38 @@ def upsert_profile(
     db.refresh(profile)
     _enqueue_profile_rescore(user.id)
     return {"profile": serialize_profile(profile)}
+
+
+@router.put("/workday-credentials")
+def set_workday_credentials(
+    payload: WorkdayCredentialsIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Store a Workday password encrypted at rest; never return the value."""
+    from app.profile.credentials import encrypt_workday_password
+
+    profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Save your basic profile before adding Workday credentials.",
+        )
+    profile.workday_password_ciphertext = encrypt_workday_password(payload.password)
+    db.commit()
+    return {"configured": True}
+
+
+@router.delete("/workday-credentials")
+def clear_workday_credentials(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
+    if profile is not None:
+        profile.workday_password_ciphertext = None
+        db.commit()
+    return {"configured": False}
 
 
 @router.put("/name")

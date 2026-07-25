@@ -1,4 +1,4 @@
-"""System-wide daily ingestion orchestration with run tracking.
+"""System-wide recurring ingestion orchestration with run tracking.
 
 Unlike ``discover_jobs`` (which is scoped to one logged-in user and used for the
 interactive "Find fresh jobs" action), this module ingests from *all* enabled

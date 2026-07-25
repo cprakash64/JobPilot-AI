@@ -47,7 +47,7 @@ logger = logging.getLogger("jobpilot.scoring")
 
 # Bump when the scoring algorithm changes so previously-scored rows are refreshed
 # by the backfill / next run instead of being treated as up to date.
-SCORE_VERSION = 1
+SCORE_VERSION = 2
 
 # Default page size for scanning jobs/users; overridable by callers/config.
 DEFAULT_BATCH_SIZE = 100
@@ -122,6 +122,8 @@ def compute_profile_version(view: ProfileView) -> str:
             "target_levels": sorted(lvl.lower() for lvl in view.target_levels),
             "has_degree": view.has_degree,
             "requires_sponsorship": view.requires_sponsorship,
+            "open_to_relocation": view.open_to_relocation,
+            "location_country": view.location_country.strip().lower(),
         }
     )
 
@@ -156,6 +158,8 @@ def build_profile_view(db: Session, user_id: int) -> tuple[ProfileView, SearchCr
         target_levels=profile.target_levels or [],
         has_degree=bool(education),
         requires_sponsorship=profile.requires_sponsorship,
+        open_to_relocation=profile.open_to_relocation,
+        location_country=profile.location_country or "",
     )
     return view, criteria
 

@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     openai_model_fast: str = "gpt-5.6-terra"
     openai_embedding_model: str = "text-embedding-3-small"
     demographics_encryption_key: str | None = None
+    # Separate key for encrypted employer-account credentials. Development may
+    # derive from SECRET_KEY; production validation requires this dedicated key.
+    workday_credentials_encryption_key: str | None = None
     upload_dir: str = "uploads"
     run_migrations_on_startup: bool = False
     # Public ATS boards to query during discovery, as "provider:slug:Display Name"
@@ -65,11 +68,14 @@ class Settings(BaseSettings):
     job_discovery_timeout_seconds: float = 12.0
     job_discovery_source_packs: list[str] = []
     job_discovery_include_unknown_dates: bool = False
-    job_discovery_cache_ttl_minutes: int = 60
+    # Keep back-to-back searches efficient without hiding newly opened roles for
+    # most of an hour after a user explicitly asks for fresh jobs.
+    job_discovery_cache_ttl_minutes: int = 15
 
     # --- Daily automated ingestion (scheduler) ---
     job_ingestion_enabled: bool = True
-    # Cron expression (m h dom mon dow). Default: once daily at 06:00.
+    # Cron expression (m h dom mon dow). The default performs one authoritative
+    # refresh every 24 hours; interactive discovery can still be run on demand.
     job_ingestion_schedule: str = "0 6 * * *"
     job_ingestion_timezone: str = "UTC"
     job_posted_within_days: int = 7

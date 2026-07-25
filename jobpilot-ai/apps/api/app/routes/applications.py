@@ -50,6 +50,7 @@ from app.models.entities import (
     GeneratedDocument,
     JobPosting,
     User,
+    UserProfile,
 )
 from app.schemas.applications import (
     MapOptionIn,
@@ -194,6 +195,16 @@ def token_exchange(payload: ExchangeTokenIn, db: Session = Depends(get_db)) -> d
 # --------------------------------------------------------------------------- #
 @router.get("/{session_id}")
 def get_session(session: ApplicationSession = Depends(session_access), db: Session = Depends(get_db)) -> dict:
+    # The structured profile snapshot (employment/education) and scalar answers
+    # are one application package. Refresh them before serializing either one;
+    # otherwise the extension can fetch an old profile snapshot immediately
+    # before /answers notices the revision change, leaving repeated sections
+    # stale for the entire browser run.
+    user = db.get(User, session.user_id)
+    meta = refresh_if_stale(db, session, user) if user else {"refreshed": False}
+    if meta.get("refreshed"):
+        db.commit()
+        db.refresh(session)
     return _serialize_session(db, session)
 
 
@@ -214,8 +225,33 @@ def get_session_answers(
     if meta.get("refreshed"):
         db.commit()
         db.refresh(session)
+    answers = list(session.generated_answers or [])
+    # Workday account credentials are intentionally NOT persisted in the
+    # session JSON or answer vault. Decrypt only for this authenticated,
+    # session-scoped response and only when this is actually a Workday launch.
+    if session.ats_type == "workday":
+        from app.profile.credentials import decrypt_workday_password
+
+        profile = db.scalar(select(UserProfile).where(UserProfile.user_id == session.user_id))
+        password = decrypt_workday_password(
+            profile.workday_password_ciphertext if profile else None
+        )
+        if password:
+            for key in ("application_account_password", "application_account_password_confirm"):
+                answers.append(
+                    {
+                        "canonical_key": key,
+                        "value": password,
+                        "display_value": "••••••••",
+                        "source": "encrypted_profile_credential",
+                        "confidence": 1.0,
+                        "sensitive": True,
+                        "requires_review": False,
+                        "verified": True,
+                    }
+                )
     return {
-        "answers": session.generated_answers or [],
+        "answers": answers,
         "unresolved_questions": session.unresolved_questions or [],
         "refreshed": bool(meta.get("refreshed")),
         "profile_revision": session.profile_revision,

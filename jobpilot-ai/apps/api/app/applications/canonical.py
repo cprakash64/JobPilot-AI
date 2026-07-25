@@ -45,8 +45,17 @@ CANONICAL_KEYS: tuple[str, ...] = (
     "available_start_date",
     "years_of_experience",
     "education",
+    "education_school",
+    "education_degree",
+    "education_major",
+    "education_end_year",
+    "education_gpa",
     "employment_history",
     "skills",
+    "contact_current_employer",
+    "essential_functions_with_accommodation",
+    "employment_history_confirmation",
+    "electronic_signature",
     # Company-scoped by default — never reused across employers (see
     # ``default_scope_for_key``).
     "referral_source",

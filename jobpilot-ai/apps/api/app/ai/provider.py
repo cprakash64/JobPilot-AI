@@ -173,12 +173,22 @@ class AIProvider:
                 )
             }
         if prompt_name == "application_answers.md":
-            profile = payload.get("profile", {})
+            candidate = payload.get("candidate") or payload.get("profile") or {}
+            job = payload.get("job") or {}
+            company = str(job.get("company") or "the company")
+            title = str(job.get("title") or "this role")
+            skills = [str(value) for value in candidate.get("skills") or [] if value]
+            skill_phrase = ", ".join(skills[:3]) or "building practical software"
             return {
                 "answers": {
-                    "tell_us_about_yourself": f"I am a candidate focused on {', '.join(profile.get('target_roles') or ['software roles'])}.",
-                    "sponsorship": "Please review my work authorization response in the profile.",
-                    "relocation": "I am open to relocation." if profile.get("open_to_relocation") else "I prefer roles aligned with my listed locations.",
+                    "custom_motivation": (
+                        f"I’m interested in the {title} opportunity at {company} because it "
+                        f"connects directly with the work I enjoy most: {skill_phrase}. "
+                        "I like roles where I can turn a real operational need into dependable "
+                        "software, learn from the people using it, and keep improving the result. "
+                        f"The scope of this position feels like a strong match for that approach, "
+                        f"and I’d be excited to bring my experience to the {company} team."
+                    ),
                 }
             }
         return {"summary": "Local deterministic output generated without sending data to an AI provider."}

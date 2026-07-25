@@ -90,6 +90,31 @@ def test_successful_fetch_is_served_with_caching_headers(
     assert response.content == png
 
 
+def test_cache_is_invalidated_when_resolved_logo_url_changes(
+    client: TestClient, db: Session, monkeypatch
+) -> None:
+    first_url = "https://cdn.example.com/old.png"
+    second_url = "https://cdn.example.com/new.png"
+    add_branding(db, logo_url=first_url)
+
+    calls: list[str] = []
+
+    def fetch(url: str):
+        calls.append(url)
+        marker = b"old" if url == first_url else b"new"
+        return _result(b"\x89PNG\r\n\x1a\n" + marker, url)
+
+    monkeypatch.setattr(jobs_routes, "safe_fetch_image", fetch)
+    assert client.get("/jobs/companies/acme/logo").content.endswith(b"old")
+
+    branding = db.query(CompanyBranding).filter_by(normalized_key="acme").one()
+    branding.logo_url = second_url
+    db.commit()
+
+    assert client.get("/jobs/companies/acme/logo").content.endswith(b"new")
+    assert calls == [first_url, second_url]
+
+
 def _result(content: bytes, url: str):
     from app.jobs.safe_fetch import SafeFetchResult
 

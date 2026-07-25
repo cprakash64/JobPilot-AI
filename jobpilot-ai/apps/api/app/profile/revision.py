@@ -23,7 +23,7 @@ from typing import Any
 
 # Bumped when the SHAPE of the revision changes, so every session is treated as
 # stale after a deploy that changes what autofill consumes.
-REVISION_SCHEMA_VERSION = "1"
+REVISION_SCHEMA_VERSION = "2"
 
 
 def _norm(value: Any) -> Any:

@@ -1,0 +1,26 @@
+# SmartRecruiters company identifiers with substantial US technology hiring.
+# Re-run app.jobs.discover_company_sources before adding any entry to the live
+# catalog; a seed is only a candidate and is never trusted automatically.
+servicenow
+paloaltonetworks2
+syngentagroup
+boschgroup
+nbcuniversal3
+ubisoft2
+sportradar
+ifs1
+nearmap
+publicisgroupe
+veeamsoftware
+experian
+nielseniq
+aecom2
+hmgroup
+boschrexroth
+redbull
+westerndigital
+guardanthealth
+dynatrace
+siapartners
+turnertownsend
+prosidianconsulting

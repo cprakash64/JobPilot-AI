@@ -114,6 +114,17 @@ def _check_demographics_key(key: str | None, *, required: bool) -> list[Finding]
     return []
 
 
+def _check_workday_credentials_key(key: str | None) -> list[Finding]:
+    if (key or "").strip():
+        return []
+    return [
+        Finding(
+            "WORKDAY_CREDENTIALS_ENCRYPTION_KEY",
+            "is missing; employer-account passwords require a dedicated encryption key",
+        )
+    ]
+
+
 def _check_cors(origins: list[str] | None, *, allow_credentials: bool) -> list[Finding]:
     values = [o.strip() for o in (origins or []) if o and o.strip()]
     if not values:
@@ -187,6 +198,9 @@ def collect_findings(settings) -> list[Finding]:
     findings += _check_demographics_key(
         getattr(settings, "demographics_encryption_key", None),
         required=bool(getattr(settings, "demographics_encryption_required", False)),
+    )
+    findings += _check_workday_credentials_key(
+        getattr(settings, "workday_credentials_encryption_key", None)
     )
     findings += _check_cors(
         getattr(settings, "cors_origins", None),

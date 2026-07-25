@@ -1,10 +1,12 @@
 """Assisted auto-apply: session lifecycle, security, vault, and audit tests."""
 
+import io
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from pypdf import PdfReader
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -125,7 +127,77 @@ def test_create_session_prepares_documents_and_answers(client: TestClient) -> No
     answers = client.get(f"/application-sessions/{session_id}/answers", headers=headers).json()["answers"]
     keys = {a["canonical_key"] for a in answers}
     assert "full_name" in keys and "email" in keys
+    assert "custom_motivation" in keys
+    motivation = next(a for a in answers if a["canonical_key"] == "custom_motivation")
+    assert "Acme" in motivation["value"]
+    assert motivation["requires_review"] is True
     assert all(not a["sensitive"] for a in answers)
+
+
+def test_workday_password_is_write_only_and_injected_only_into_workday_session(
+    client: TestClient,
+) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    secret = "A-Strong-Workday-Password-19!"
+    saved = client.put(
+        "/profile/workday-credentials", headers=headers, json={"password": secret}
+    )
+    assert saved.status_code == 200
+
+    profile_text = client.get("/profile", headers=headers).text
+    assert secret not in profile_text
+    assert "workday_password_ciphertext" not in profile_text
+    assert client.get("/profile", headers=headers).json()["profile"][
+        "workday_password_configured"
+    ] is True
+
+    job_id = seed_job(
+        client,
+        company="Globus Medical",
+        url="https://globusmedical.wd5.myworkdayjobs.com/en-US/GMED/job/1",
+    )
+    db = next(app.dependency_overrides[get_db]())
+    user = db.scalar(select(E.User).where(E.User.email == "apply@mailbox.test-domain.co"))
+    row = E.ApplicationSession(
+        user_id=user.id,
+        job_id=job_id,
+        status=E.ApplicationSessionStatus.ready,
+        source_url="https://globusmedical.wd5.myworkdayjobs.com/en-US/GMED/job/1",
+        ats_type="workday",
+        profile_snapshot={},
+        job_snapshot={},
+        generated_answers=[],
+        unresolved_questions=[],
+        warnings=[],
+    )
+    db.add(row)
+    db.commit()
+    session_id = row.id
+
+    # The stored application-session snapshot never contains the plaintext.
+    row = db.get(E.ApplicationSession, session_id)
+    assert secret not in str(row.generated_answers)
+    db.close()
+
+    answers = client.get(
+        f"/application-sessions/{session_id}/answers", headers=headers
+    ).json()["answers"]
+    credential_answers = {
+        item["canonical_key"]: item for item in answers
+        if item["canonical_key"].startswith("application_account_password")
+    }
+    assert set(credential_answers) == {
+        "application_account_password",
+        "application_account_password_confirm",
+    }
+    assert all(item["value"] == secret for item in credential_answers.values())
+    assert all(item["sensitive"] and item["verified"] for item in credential_answers.values())
+
+    assert client.delete("/profile/workday-credentials", headers=headers).status_code == 200
+    assert client.get("/profile", headers=headers).json()["profile"][
+        "workday_password_configured"
+    ] is False
 
 
 def test_profile_eeo_answers_are_included_in_the_application_package(client: TestClient) -> None:
@@ -178,6 +250,47 @@ def test_saving_profile_eeo_refreshes_an_existing_session(client: TestClient) ->
     assert {answer["canonical_key"] for answer in refreshed["answers"]} >= {"gender", "race"}
 
 
+def test_session_read_refreshes_structured_employment_and_education(client: TestClient) -> None:
+    """The extension reads /session before /answers. The first response must
+    therefore already contain the current repeater data, not a stale snapshot
+    that /answers refreshes one request too late."""
+    headers = auth(client)
+    complete_profile(client, headers)
+    job_id = seed_job(client, company="Lyft")
+    body = create_session(client, headers, job_id)
+
+    updated = client.put(
+        "/profile/career",
+        headers=headers,
+        json={
+            "education": [
+                {"school": "Arizona State University", "degree": "Bachelor of Science", "major": "Computer Science", "end_date": "2025-05-01"},
+                {"school": "Mesa Community College", "degree": "Associate of Science", "major": "Engineering", "end_date": "2021-05-01"},
+            ],
+            "experience": [
+                {"company": "VeoTrex", "title": "Software Engineer", "currently_working": True, "bullets": [], "technologies": []},
+                {"company": "Earlier Co", "title": "Developer", "currently_working": False, "bullets": [], "technologies": []},
+            ],
+            "projects": [],
+            "certifications": [],
+            "awards": [],
+        },
+    )
+    assert updated.status_code == 200, updated.text
+
+    session = client.get(
+        f"/application-sessions/{body['session_id']}", headers=headers
+    ).json()
+    assert [item["company"] for item in session["profile"]["experience"]] == [
+        "VeoTrex",
+        "Earlier Co",
+    ]
+    assert [item["school"] for item in session["profile"]["education"]] == [
+        "Arizona State University",
+        "Mesa Community College",
+    ]
+
+
 def test_session_not_accessible_to_other_user(client: TestClient) -> None:
     owner = auth(client, "owner@mailbox.test-domain.co")
     complete_profile(client, owner)
@@ -206,6 +319,11 @@ def test_resume_and_cover_letter_download(client: TestClient) -> None:
     r = client.get(f"/application-sessions/{session_id}/resume?fmt=pdf", headers=headers)
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/pdf"
+    resume = PdfReader(io.BytesIO(r.content))
+    text = "\n".join(page.extract_text() or "" for page in resume.pages)
+    assert "PROFESSIONAL EXPERIENCE" in text
+    assert "CORE SKILLS" in text
+    assert "{'company':" not in text
     c = client.get(f"/application-sessions/{session_id}/cover-letter?fmt=docx", headers=headers)
     assert c.status_code == 200
 
@@ -301,6 +419,10 @@ def test_complete_requires_confirmation_and_updates_tracker(client: TestClient) 
     complete_profile(client, headers)
     job_id = seed_job(client)
     session_id = create_session(client, headers, job_id)["session_id"]
+
+    # Preparing/opening is not an application. Nothing is tracked until the
+    # user explicitly confirms that they submitted it.
+    assert client.get("/jobs/tracker/all", headers=headers).json()["applications"] == []
 
     # Unconfirmed completion is rejected — JobPilot never assumes submission.
     assert client.post(f"/application-sessions/{session_id}/complete", headers=headers, json={"confirmed": False}).status_code == 422
@@ -571,7 +693,7 @@ def test_repeated_prepare_is_idempotent(client: TestClient) -> None:
     sessions = db.scalars(select(E.ApplicationSession).where(E.ApplicationSession.job_id == job_id)).all()
     trackers = db.scalars(select(E.ApplicationTracker).where(E.ApplicationTracker.job_id == job_id)).all()
     assert len(sessions) == 1
-    assert len(trackers) == 1
+    assert len(trackers) == 0
     db.close()
 
 
@@ -660,7 +782,7 @@ def test_database_persistence_failure_returns_structured_503(client: TestClient,
     def boom(*_args, **_kwargs):
         raise OperationalError("INSERT", {}, Exception("database is down"))
 
-    monkeypatch.setattr(svc, "_link_tracker", boom)
+    monkeypatch.setattr(svc, "log_action", boom)
     resp = client.post("/application-sessions", headers=headers, json={"job_id": job_id})
     assert resp.status_code == 503
     err = resp.json()["error"]

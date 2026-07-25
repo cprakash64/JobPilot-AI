@@ -23,13 +23,18 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
-from app.jobs.company_logo_service import get_or_create_company_branding
+from app.jobs.company_logo_service import (
+    get_or_create_company_branding,
+    is_untrusted_simplify_logo_url,
+)
+from app.jobs.sources.simplifyjobs import fetch_verified_company_domain
 from app.models.entities import JobPosting
 
 logger = logging.getLogger("jobpilot.logos")
@@ -39,6 +44,7 @@ logger = logging.getLogger("jobpilot.logos")
 # per NEW resolution is a reasonable trade for not hammering an external
 # endpoint across hundreds of companies in one run.
 RATE_LIMIT_SECONDS = 0.05
+PROFILE_FETCH_CONCURRENCY = 8
 
 
 @dataclass
@@ -60,6 +66,35 @@ class BackfillSummary:
 def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSummary:
     summary = BackfillSummary()
     companies = sorted({c for (c,) in db.execute(select(JobPosting.company)).all() if c})
+    simplify_urls: dict[str, object] = {}
+    for company, raw_json in db.execute(
+        select(JobPosting.company, JobPosting.raw_json).where(
+            JobPosting.raw_json.is_not(None)
+        )
+    ).all():
+        if (
+            company
+            and company not in simplify_urls
+            and isinstance(raw_json, dict)
+            and raw_json.get("company_url")
+        ):
+            simplify_urls[company] = raw_json["company_url"]
+
+    # Profile pages are independent fixed-host reads. Resolve them concurrently
+    # before touching ORM state; workers never share the SQLAlchemy session.
+    verified_domains: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=PROFILE_FETCH_CONCURRENCY) as pool:
+        pending = {
+            pool.submit(fetch_verified_company_domain, url, company): company
+            for company, url in simplify_urls.items()
+        }
+        for future in as_completed(pending):
+            company = pending[future]
+            try:
+                verified_domains[company] = future.result()
+            except Exception:  # noqa: BLE001 - one profile cannot abort the backfill
+                logger.info("Simplify profile enrichment failed for company=%s", company)
+                verified_domains[company] = ""
 
     resolved_by_company: dict[str, tuple[str | None, str | None]] = {}
     for company in companies:
@@ -71,11 +106,23 @@ def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSumma
                 (JobPosting.company == company) & (JobPosting.company_logo_url.is_not(None))
             )
         )
+        application_hint = db.scalar(
+            select(JobPosting.application_url).where(
+                (JobPosting.company == company) & (JobPosting.application_url.is_not(None))
+            )
+        )
+        simplify_company_url = simplify_urls.get(company)
+        verified_domain = verified_domains.get(company, "")
+        stored_logo = hint.company_logo_url if hint else None
+        if is_untrusted_simplify_logo_url(stored_logo):
+            stored_logo = None
         try:
             branding = get_or_create_company_branding(
                 db, company,
-                catalog_domain=hint.company_domain if hint else None,
-                catalog_logo_url=hint.company_logo_url if hint else None,
+                catalog_domain=verified_domain or (hint.company_domain if hint else None),
+                catalog_logo_url=stored_logo,
+                application_url=application_hint,
+                source_type="simplifyjobs" if simplify_company_url else None,
             )
         except Exception:  # noqa: BLE001 - never let one bad company abort the whole run
             logger.exception("logo backfill failed for company=%s", company)
@@ -94,10 +141,17 @@ def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSumma
     # same value) and safe to rerun.
     jobs = db.scalars(select(JobPosting)).all()
     for job in jobs:
+        domain, logo_url = resolved_by_company.get(job.company or "", (None, None))
+        if force:
+            # Force also clears a legacy bad mirror URL when no verified
+            # replacement exists. The UI's neutral fallback is preferable to
+            # confidently displaying another company's logo.
+            job.company_domain = domain
+            job.company_logo_url = logo_url
+            continue
         if job.company_logo_url and not force:
             summary.already_present += 1
             continue
-        domain, logo_url = resolved_by_company.get(job.company or "", (None, None))
         if logo_url:
             job.company_domain = domain
             job.company_logo_url = logo_url

@@ -385,6 +385,56 @@ def test_save_job_creates_tracker(client: TestClient, monkeypatch) -> None:
     assert any(row["job_id"] == job_id for row in tracker)
 
 
+def test_tracker_returns_job_details_and_hides_application_stage_jobs(
+    client: TestClient, monkeypatch
+) -> None:
+    headers = signup(client, "tracked-details@example.com")
+    client.put("/profile", headers=headers, json=ml_profile_payload())
+    _patch_sources(monkeypatch, default_jobs())
+    jobs = client.post("/jobs/discover", headers=headers, json={}).json()["jobs"]
+    job = jobs[0]
+
+    # Saving is a bookmark, so the job remains discoverable.
+    client.post(f"/jobs/{job['id']}/save", headers=headers)
+    saved_jobs = client.get("/jobs", headers=headers).json()["jobs"]
+    assert any(row["id"] == job["id"] for row in saved_jobs)
+
+    tracked = client.get("/jobs/tracker/all", headers=headers).json()["applications"]
+    tracked_row = next(row for row in tracked if row["job_id"] == job["id"])
+    assert tracked_row["job"]["title"] == job["title"]
+    assert tracked_row["job"]["company"] == job["company"]
+    assert tracked_row["job"]["application_url"] == job["application_url"]
+
+    # Starting an application moves it out of discovery to prevent reapplying.
+    response = client.put(
+        f"/jobs/{job['id']}/tracker",
+        headers=headers,
+        json={"status": "applying"},
+    )
+    assert response.status_code == 200
+    assert response.json()["tracker"]["job_id"] == job["id"]
+    assert response.json()["tracker"]["status"] == "applying"
+    remaining = client.get("/jobs", headers=headers).json()["jobs"]
+    assert all(row["id"] != job["id"] for row in remaining)
+
+
+def test_post_apply_status_sets_applied_date(client: TestClient, monkeypatch) -> None:
+    headers = signup(client, "interview-date@example.com")
+    client.put("/profile", headers=headers, json=ml_profile_payload())
+    _patch_sources(monkeypatch, default_jobs())
+    job_id = client.post("/jobs/discover", headers=headers, json={}).json()["jobs"][0]["id"]
+
+    response = client.put(
+        f"/jobs/{job_id}/tracker",
+        headers=headers,
+        json={"status": "interview"},
+    )
+    assert response.status_code == 200
+    tracked = client.get("/jobs/tracker/all", headers=headers).json()["applications"]
+    row = next(item for item in tracked if item["job_id"] == job_id)
+    assert row["applied_at"] is not None
+
+
 def test_empty_profile_discovery_does_not_crash(client: TestClient, monkeypatch) -> None:
     headers = signup(client, "empty@example.com")  # no profile saved
     _patch_sources(monkeypatch, default_jobs())

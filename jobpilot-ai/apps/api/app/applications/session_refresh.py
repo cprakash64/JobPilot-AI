@@ -25,6 +25,8 @@ from app.models.entities import (
     ApplicationAnswer,
     ApplicationSession,
     ApplicationSessionStatus,
+    Education,
+    Experience,
     SensitiveDemographics,
     User,
     UserProfile,
@@ -78,6 +80,44 @@ def current_profile_revision(db: Session, user_id: int) -> str:
                     "company_key": "",
                 }
             )
+    # Career records live in separate tables. Fold them into the revision so a
+    # newly added job or degree invalidates an already-prepared session too.
+    for item in db.scalars(select(Experience).where(Experience.user_id == user_id)).all():
+        revision_answers.append(
+            {
+                "canonical_key": f"experience:{item.id}",
+                "value": {
+                    "company": item.company,
+                    "title": item.title,
+                    "location": item.location,
+                    "start_date": item.start_date,
+                    "end_date": item.end_date,
+                    "currently_working": item.currently_working,
+                },
+                "is_user_verified": True,
+                "scope": "global",
+                "company_key": "",
+            }
+        )
+    for item in db.scalars(select(Education).where(Education.user_id == user_id)).all():
+        revision_answers.append(
+            {
+                "canonical_key": f"education:{item.id}",
+                "value": {
+                    "school": item.school,
+                    "degree": item.degree,
+                    "major": item.major,
+                    "minor": item.minor,
+                    "start_date": item.start_date,
+                    "end_date": item.end_date,
+                    "gpa": item.gpa,
+                    "gpa_scale": item.gpa_scale,
+                },
+                "is_user_verified": True,
+                "scope": "global",
+                "company_key": "",
+            }
+        )
     return compute_profile_revision(
         profile=_profile_columns(profile),
         vault_answers=revision_answers,
@@ -144,9 +184,28 @@ def refresh_session_answers(
 
     company = (session.job_snapshot or {}).get("company")
     safe_answers, unresolved = build_safe_answers(db, user, company=company)
+    # Profile refresh is synchronous, while prose generation uses the async GPT
+    # provider. Preserve the latest company-specific draft prepared for this
+    # session instead of silently deleting it during a scalar-answer refresh.
+    written_answers = [
+        answer
+        for answer in (session.generated_answers or [])
+        if answer.get("canonical_key") in {"custom_motivation", "custom_experience"}
+    ]
+    written_keys = {answer.get("canonical_key") for answer in written_answers}
+    safe_answers = [
+        answer
+        for answer in safe_answers
+        if answer.get("canonical_key") not in written_keys
+    ] + written_answers
 
     session.generated_answers = safe_answers
     session.unresolved_questions = unresolved
+    # Structured repeaters are consumed from the snapshot by the extension;
+    # refresh them atomically with scalar answers.
+    from app.applications.session_service import _profile_snapshot
+
+    session.profile_snapshot = _json_safe_snapshot(_profile_snapshot(db, user))
     session.profile_revision = revision
     session.answers_refreshed_at = datetime.now(UTC)
 
@@ -169,3 +228,9 @@ def refresh_if_stale(db: Session, session: ApplicationSession, user: User) -> di
             "answer_keys": _answer_keys(session),
         }
     return refresh_session_answers(db, session, user)
+
+
+def _json_safe_snapshot(value: dict) -> dict:
+    import json
+
+    return json.loads(json.dumps(value, default=str))

@@ -32,6 +32,7 @@ def make_settings(**overrides):
         secret_key=STRONG_KEY,
         demographics_encryption_key="k" * 32,
         demographics_encryption_required=False,
+        workday_credentials_encryption_key="w" * 32,
         cors_origins=["https://app.jobpilot.example"],
         cors_allow_credentials=True,
         database_url=SAFE_DB,
@@ -110,6 +111,11 @@ def test_encryption_key_is_required_only_when_encryption_is_enabled() -> None:
         make_settings(demographics_encryption_key=None, demographics_encryption_required=True)
     )
     assert any(f.setting == "DEMOGRAPHICS_ENCRYPTION_KEY" for f in on)
+
+
+def test_workday_credentials_use_a_dedicated_production_key() -> None:
+    findings = collect_findings(make_settings(workday_credentials_encryption_key=None))
+    assert any(f.setting == "WORKDAY_CREDENTIALS_ENCRYPTION_KEY" for f in findings)
 
 
 # --------------------------------------------------------------------------- #

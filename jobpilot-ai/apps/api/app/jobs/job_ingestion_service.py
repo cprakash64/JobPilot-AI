@@ -72,7 +72,9 @@ class DiscoveryResult:
 _SOURCE_CACHE: dict[tuple[str, str], tuple[datetime, list[NormalizedJob]]] = {}
 
 
-def _cache_get(adapter: JobSourceAdapter) -> list[NormalizedJob] | None:
+def _cache_get(
+    adapter: JobSourceAdapter, *, allow_expired: bool = False
+) -> list[NormalizedJob] | None:
     ttl = settings.job_discovery_cache_ttl_minutes
     if ttl <= 0:
         return None
@@ -80,7 +82,7 @@ def _cache_get(adapter: JobSourceAdapter) -> list[NormalizedJob] | None:
     if entry is None:
         return None
     stamp, jobs = entry
-    if datetime.now(UTC) - stamp > timedelta(minutes=ttl):
+    if not allow_expired and datetime.now(UTC) - stamp > timedelta(minutes=ttl):
         return None
     return jobs
 
@@ -272,6 +274,13 @@ async def _fetch_all(
             _cache_put(adapter, jobs)
             return jobs, None
         except Exception as exc:  # noqa: BLE001 - isolate per-source failures
+            # A transient timeout must not erase jobs from a source that worked
+            # on the preceding refresh. Return the last successful in-process
+            # snapshot and let the scheduled 24-hour ingestion retry it later.
+            if isinstance(exc, TimeoutError | asyncio.TimeoutError):
+                stale = _cache_get(adapter, allow_expired=True)
+                if stale is not None:
+                    return stale, None
             return [], f"Could not fetch from {label}: {type(exc).__name__}"
 
     results = await asyncio.gather(*[run(adapter) for adapter in adapters])
@@ -318,6 +327,8 @@ def _persist_job(db: Session, job: NormalizedJob) -> tuple[JobPosting, bool, boo
         job.company or "",
         catalog_domain=job.company_domain or None,
         catalog_logo_url=job.company_logo_url or None,
+        application_url=job.application_url or None,
+        source_type=job.source or None,
     )
     values = {
         "source_id": source.id,
@@ -372,13 +383,18 @@ def _upsert_source(db: Session, job: NormalizedJob) -> JobSource:
     name = job.company
     source = db.scalar(select(JobSource).where(JobSource.name == name))
     if source is None:
+        terms_notes = (
+            "Public SimplifyJobs GitHub listing with attribution and a direct employer application URL."
+            if (job.source or "").lower() == "simplifyjobs"
+            else "Public ATS endpoint; no restricted portal scraping."
+        )
         source = JobSource(
             name=name,
             type=job.source or "ats",
             base_url=job.source_url,
             enabled=True,
             supports_api=True,
-            terms_notes="Public ATS endpoint; no restricted portal scraping.",
+            terms_notes=terms_notes,
         )
         db.add(source)
         db.flush()

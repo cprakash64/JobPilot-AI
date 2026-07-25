@@ -70,7 +70,7 @@ services:
       start_period: 20s
     command: sh /app/scripts/start-api.sh
 
-  # Background worker: runs post-ingest fit scoring and daily-ingestion tasks.
+  # Background worker: runs post-ingest fit scoring and recurring-ingestion tasks.
   # Separate from the API so scoring never blocks request handling.
   worker:
     build:
@@ -100,7 +100,7 @@ services:
     stop_grace_period: 30s
     command: celery -A app.workers.tasks.celery_app worker --loglevel=info --concurrency=2
 
-  # Beat scheduler: a SINGLE service that triggers the daily ingestion on the
+  # Beat scheduler: a SINGLE service that triggers recurring ingestion on the
   # configured cron. Never run inside the API (multiple replicas would duplicate
   # runs); the ingestion itself is additionally guarded by a distributed lock.
   scheduler:
