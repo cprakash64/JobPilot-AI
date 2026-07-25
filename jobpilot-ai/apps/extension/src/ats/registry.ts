@@ -1,7 +1,6 @@
 /**
  * ATS adapter registry + deterministic detection. Specific adapters are tried
- * first; the generic HTML-form adapter is the fallback. Workday is detected only
- * to warn the user of limited support in this phase (no dedicated adapter yet).
+ * first; the generic HTML-form adapter is the fallback.
  */
 
 import type { ATSAdapter, DetectionResult, PageContext } from "../types";
@@ -10,8 +9,9 @@ import { hostMatches } from "./base";
 import { GenericFormAdapter } from "./generic";
 import { GreenhouseAdapter } from "./greenhouse";
 import { LeverAdapter } from "./lever";
+import { WorkdayAdapter } from "./workday";
 
-export const SPECIFIC_ADAPTERS: ATSAdapter[] = [GreenhouseAdapter, LeverAdapter, AshbyAdapter];
+export const SPECIFIC_ADAPTERS: ATSAdapter[] = [GreenhouseAdapter, LeverAdapter, AshbyAdapter, WorkdayAdapter];
 export const ADAPTERS: ATSAdapter[] = [...SPECIFIC_ADAPTERS, GenericFormAdapter];
 
 export interface DetectionOutcome {
@@ -32,9 +32,14 @@ export function detectAdapter(context: PageContext): DetectionOutcome | null {
     return { ...best, limited: false };
   }
 
-  // Workday: detect and fall back to the generic adapter with a "limited" flag.
-  if (hostMatches(context.url, "myworkdayjobs.com") || hostMatches(context.url, "workday.com")) {
-    return { adapter: GenericFormAdapter, result: { atsId: "workday", matched: true, confidence: 0.4 }, limited: true };
+  const genericHosts: Array<[string, string]> = [
+    ["smartrecruiters.com", "smartrecruiters"], ["rippling.com", "rippling"],
+    ["bamboohr.com", "bamboohr"], ["applytojob.com", "jazzhr"],
+    ["jazz.co", "jazzhr"], ["teamtailor.com", "teamtailor"]
+  ];
+  const matchedHost = genericHosts.find(([host]) => hostMatches(context.url, host));
+  if (matchedHost) {
+    return { adapter: GenericFormAdapter, result: { atsId: matchedHost[1], matched: true, confidence: 0.7 }, limited: true };
   }
 
   const generic = GenericFormAdapter.detect(context);

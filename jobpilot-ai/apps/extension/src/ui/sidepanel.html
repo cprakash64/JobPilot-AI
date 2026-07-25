@@ -28,7 +28,8 @@
   <body>
     <header>
       <h1>JobPilot — Assisted Apply</h1>
-      <p class="muted" id="job">Detecting application…</p>
+      <p class="muted" id="job">Waiting for an application…</p>
+      <p class="muted" id="stage">Idle</p>
     </header>
     <main>
       <div class="row">
@@ -36,6 +37,7 @@
         <span class="badge" id="ats">—</span>
       </div>
       <div id="limited" class="warn" hidden>Limited support for this ATS. Standard fields only — complete the rest manually.</div>
+      <div class="row"><span class="muted">Fields discovered</span><span id="discovered">0</span></div>
 
       <div class="stats">
         <div class="stat"><b id="filled">0</b><span class="muted">Filled</span></div>
@@ -58,6 +60,11 @@
       </div>
 
       <p class="note">Your application is ready for review. Verify the information, then submit directly on the employer’s website.</p>
+
+      <details id="diag" hidden>
+        <summary class="muted">Diagnostics</summary>
+        <pre id="diagBody" style="white-space: pre-wrap; font-size: 11px; margin: 6px 0 0;"></pre>
+      </details>
     </main>
     <script src="sidepanel.js"></script>
   </body>

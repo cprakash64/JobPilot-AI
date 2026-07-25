@@ -29,10 +29,11 @@ describe("ATS detection", () => {
     expect(out?.adapter.id).toBe("generic");
   });
 
-  it("flags Workday as limited support", () => {
+  it("uses the dedicated full-support Workday adapter", () => {
     const out = detectAdapter(ctx("https://acme.wd1.myworkdayjobs.com/careers", GENERIC_FIXTURE));
     expect(out?.result.atsId).toBe("workday");
-    expect(out?.limited).toBe(true);
+    expect(out?.adapter.id).toBe("workday");
+    expect(out?.limited).toBe(false);
   });
 
   it("returns null when there is no form", () => {

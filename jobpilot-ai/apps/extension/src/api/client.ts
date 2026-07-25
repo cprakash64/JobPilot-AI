@@ -5,6 +5,17 @@ import { getApiBase } from "../config";
 import type { AutofillResult } from "../messages";
 import type { ApplicationSessionData, SessionAnswer } from "../types";
 
+/** Carries the HTTP status so callers (background.ts) can classify a failure
+ * precisely — 401 vs. 404 vs. 410 vs. anything else — instead of guessing
+ * from a string. Never carries the response body (may contain PII). */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, path: string) {
+    super(`API ${status} for ${path}`);
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const base = await getApiBase();
   const res = await fetch(`${base}${path}`, {
@@ -12,7 +23,7 @@ async function request<T>(path: string, token: string, init: RequestInit = {}): 
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...init.headers }
   });
   if (!res.ok) {
-    throw new Error(`API ${res.status} for ${path}`);
+    throw new ApiError(res.status, path);
   }
   return (await res.json()) as T;
 }
@@ -27,7 +38,7 @@ export async function exchangeLaunchToken(
     body: JSON.stringify({ launch_token: launchToken })
   });
   if (!res.ok) {
-    throw new Error(`Token exchange failed (${res.status})`);
+    throw new ApiError(res.status, "/application-sessions/token");
   }
   return (await res.json()) as { session_token: string; session: RawSession };
 }
@@ -37,6 +48,9 @@ type RawSession = {
   ats_type: string | null;
   official_application_url: string;
   job?: { title: string | null; company: string | null };
+  resume?: { status: string; document_id: number | null; download_url: string | null };
+  cover_letter?: { status: string; document_id: number | null; download_url: string | null };
+  profile?: Record<string, unknown>;
 };
 
 export async function fetchSessionData(token: string, sessionId: number): Promise<ApplicationSessionData> {
@@ -51,8 +65,13 @@ export async function fetchSessionData(token: string, sessionId: number): Promis
     officialUrl: session.official_application_url,
     jobTitle: session.job?.title ?? null,
     company: session.job?.company ?? null,
+    profileData: session.profile ?? {},
     answers: answers.answers,
-    unresolvedQuestions: answers.unresolved_questions
+    unresolvedQuestions: answers.unresolved_questions,
+    documents: {
+      resume: { status: session.resume?.status ?? "missing", documentId: session.resume?.document_id ?? null, downloadPath: session.resume?.download_url ?? null },
+      coverLetter: { status: session.cover_letter?.status ?? "missing", documentId: session.cover_letter?.document_id ?? null, downloadPath: session.cover_letter?.download_url ?? null }
+    }
   };
 }
 
@@ -83,6 +102,52 @@ export async function reportAutofillResult(
   await request(`/application-sessions/${sessionId}/autofill-results`, token, {
     method: "POST",
     body: JSON.stringify(result)
+  });
+}
+
+/** "Save for future applications" — the ONLY answer-vault write the extension
+ * can make (it only ever holds a session-scoped token). Always the result of
+ * an explicit user confirmation in the review widget. */
+export async function saveSessionAnswer(
+  token: string,
+  sessionId: number,
+  canonicalKey: string,
+  body: { value: string; display_value?: string; scope?: string; company_key?: string }
+): Promise<{ ok: boolean }> {
+  return request(`/application-sessions/${sessionId}/answers/${encodeURIComponent(canonicalKey)}`, token, {
+    method: "PUT",
+    body: JSON.stringify(body)
+  });
+}
+
+export interface StructuredName {
+  firstName: string;
+  lastName: string;
+  middleName?: string;
+  preferredFirstName?: string;
+  preferredLastName?: string;
+}
+
+/** Explicit structured-name confirmation — never inferred.
+ *
+ * Sends the legacy given_name/family_name keys alongside the new ones so an
+ * extension update rolled out ahead of the API still works. */
+export async function confirmSessionName(
+  token: string,
+  sessionId: number,
+  name: StructuredName
+): Promise<{ ok: boolean }> {
+  return request(`/application-sessions/${sessionId}/profile/name`, token, {
+    method: "PUT",
+    body: JSON.stringify({
+      first_name: name.firstName,
+      middle_name: name.middleName || null,
+      last_name: name.lastName,
+      preferred_first_name: name.preferredFirstName || null,
+      preferred_last_name: name.preferredLastName || null,
+      given_name: name.firstName,
+      family_name: name.lastName
+    })
   });
 }
 
