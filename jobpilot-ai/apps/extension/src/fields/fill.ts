@@ -42,6 +42,7 @@ export interface FillOptions {
    * the full value used for exact option matching (e.g. search "Tempe" while
    * matching "Tempe, Arizona, United States"). */
   dropdownSearchValue?: string;
+  dropdownMatchMode?: "graduation_year" | "gpa";
 }
 
 /** A text input that is really a custom-combobox affordance. */
@@ -115,6 +116,7 @@ async function fillViaDropdown(field: DiscoveredField, values: string[], options
   const result = await fillDropdown(field, {
     values,
     searchValue: options.dropdownSearchValue,
+    matchMode: options.dropdownMatchMode,
     answerSource: options.answerSource,
     beforeInteract: options.beforeInteract,
     afterInteract: options.afterInteract
@@ -211,6 +213,7 @@ export function clearJobPilotFields(root: ParentNode = document): number {
     dispatch(el, ["input", "change"]);
     el.removeAttribute(FILLED_ATTR);
     el.removeAttribute(ORIGINAL_ATTR);
+    el.removeAttribute("data-jobpilot-repeater");
     removeHighlight(el);
   }
   return filled.length;

@@ -110,61 +110,101 @@ export function createWidget(actions: {
   root.innerHTML = `
     <style>
       :host{all:initial}
-      .box{position:fixed;right:18px;bottom:18px;z-index:2147483647;width:320px;max-height:80vh;display:flex;flex-direction:column;background:#fff;color:#18352a;border:1px solid #bcd3c3;border-radius:12px;box-shadow:0 8px 28px #0002;font:13px/1.35 system-ui,sans-serif}
-      header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#eef5f0;border-radius:12px 12px 0 0;font-weight:650;cursor:pointer}
-      .dot{width:8px;height:8px;border-radius:50%;background:#2f8f5b;flex-shrink:0}
-      .body{padding:10px 12px;overflow:auto}
-      .count{color:#52645b;margin-top:3px}
-      .counts-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:11px;color:#52645b}
-      .counts-row b{color:#18352a}
-      .actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
-      button{border:1px solid #bcd3c3;background:#fff;color:#24513e;border-radius:7px;padding:5px 7px;cursor:pointer;font:inherit}
-      button:hover{background:#eef5f0}
-      button:disabled{opacity:.5;cursor:default}
-      .collapse{margin-left:auto;border:0;background:transparent;padding:0 3px}
+      *,*::before,*::after{box-sizing:border-box}
+      .box{
+        --ink:#17211c;--muted:#657069;--line:rgba(66,84,73,.16);--accent:#176b46;
+        position:fixed;right:18px;bottom:18px;z-index:2147483647;
+        width:min(372px,calc(100vw - 24px));max-height:min(82vh,780px);
+        display:flex;flex-direction:column;overflow:hidden;
+        color:var(--ink);border:1px solid rgba(255,255,255,.72);border-radius:22px;
+        background:linear-gradient(150deg,rgba(255,255,255,.92),rgba(245,249,246,.78));
+        box-shadow:0 24px 70px rgba(22,35,27,.20),0 2px 10px rgba(22,35,27,.08),inset 0 1px 0 rgba(255,255,255,.9);
+        -webkit-backdrop-filter:blur(24px) saturate(150%);backdrop-filter:blur(24px) saturate(150%);
+        font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+        letter-spacing:-.006em
+      }
+      header{display:flex;align-items:center;gap:10px;min-height:58px;padding:11px 14px 11px 16px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.42);font-size:14px;font-weight:660;cursor:pointer}
+      .dot{width:9px;height:9px;border-radius:50%;background:#21a267;box-shadow:0 0 0 4px rgba(33,162,103,.11);flex-shrink:0}
+      .title{letter-spacing:-.01em}
+      .body{padding:14px 14px 12px;overflow:auto;scrollbar-width:thin;scrollbar-color:rgba(79,96,86,.28) transparent}
+      .message{font-size:13px;color:#354139}
+      .count{color:var(--muted);margin-top:3px;font-size:12px}
+      .counts-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:11px;font-size:11px;color:var(--muted)}
+      .counts-row span{padding:7px 9px;border:1px solid rgba(71,92,79,.10);border-radius:10px;background:rgba(255,255,255,.54)}
+      .counts-row b{display:block;margin-top:1px;color:var(--ink);font-size:13px;font-weight:660}
+      .actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
+      button{min-height:34px;border:1px solid rgba(60,86,70,.18);background:rgba(255,255,255,.68);color:#244334;border-radius:10px;padding:7px 10px;cursor:pointer;font:inherit;font-weight:560;transition:background .16s ease,border-color .16s ease,transform .16s ease,box-shadow .16s ease}
+      button:hover{background:rgba(255,255,255,.95);border-color:rgba(37,104,68,.34);box-shadow:0 3px 12px rgba(31,57,42,.08)}
+      button:active{transform:scale(.985)}
+      button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid rgba(30,116,76,.22);outline-offset:2px}
+      button:disabled{opacity:.42;cursor:default;box-shadow:none;transform:none}
+      .collapse{margin-left:auto;width:32px;min-height:32px;border:0;background:rgba(255,255,255,.48);padding:0;border-radius:50%;font-size:18px;font-weight:400;color:#53615a}
       .collapsed .body{display:none}
       .failed .dot{background:#c85a3e}
-      .review .dot{background:#e0a72f}
-      .review-toggle{width:100%;text-align:left;margin-top:9px;font-weight:600}
-      .review-panel{display:none;margin-top:8px;border-top:1px solid #e3ece6;padding-top:8px}
+      .review .dot{background:#d69416;box-shadow:0 0 0 4px rgba(214,148,22,.12)}
+      .review-toggle{position:relative;width:100%;text-align:left;margin-top:12px;padding:10px 34px 10px 12px;border-color:rgba(35,105,69,.20);background:rgba(235,246,239,.72);font-weight:650}
+      .review-toggle::after{content:"⌄";position:absolute;right:12px;top:8px;color:#647068;font-size:16px}
+      .review-toggle[aria-expanded="true"]::after{content:"⌃"}
+      .review-panel{display:none;margin-top:12px}
       .review-panel.open{display:block}
-      .group-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:#5d675f;margin:10px 0 4px}
-      .item{border:1px solid #e3ece6;border-radius:8px;padding:8px;margin-bottom:8px}
+      .group-title{font-size:10px;font-weight:720;text-transform:uppercase;letter-spacing:.095em;color:#748078;margin:17px 2px 7px}
+      .group-title:first-child{margin-top:2px}
+      .item{border:1px solid rgba(54,87,67,.13);border-radius:16px;padding:13px;margin-bottom:9px;background:rgba(255,255,255,.62);box-shadow:0 1px 0 rgba(255,255,255,.8),0 5px 18px rgba(32,54,41,.035)}
       .item.resolved{opacity:.55}
-      .item .q{font-weight:600}
-      .item .why{color:#5d675f;font-size:11px;margin-top:2px}
-      .item .req{color:#9f3d28;font-size:10px;font-weight:700;margin-left:4px}
-      .item select, .item input[type=text]{width:100%;margin-top:6px;padding:4px 6px;border:1px solid #bcd3c3;border-radius:6px;font:inherit}
-      .item label.save{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:#33403a}
-      .item .row{display:flex;gap:6px;margin-top:6px}
+      .item .q{font-size:14px;line-height:1.3;font-weight:670;letter-spacing:-.012em}
+      .item .why{color:var(--muted);font-size:12px;line-height:1.42;margin-top:5px}
+      .item .req{display:inline-flex;vertical-align:1px;margin-left:6px;padding:2px 6px;border-radius:999px;background:#fff0eb;color:#9b3f2a;font-size:9px;font-weight:740;letter-spacing:.03em;text-transform:uppercase}
+      .item select,.item input[type=text]{width:100%;min-height:42px;margin-top:11px;padding:8px 10px;border:1px solid rgba(57,93,70,.24);border-radius:11px;background:rgba(255,255,255,.82);color:var(--ink);font:inherit;font-size:13px;box-shadow:inset 0 1px 2px rgba(26,43,33,.035)}
+      .item input::placeholder{color:#8a938d}
+      .item label.save{display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:11px;line-height:1.35;color:#46534b}
+      .item label.save input{accent-color:var(--accent);margin-top:1px}
+      .item .row{display:flex;gap:7px;margin-top:10px}
       .item .row button{flex:1}
-      .empty{color:#5d675f;font-size:12px;padding:4px 0}
+      .item .row button:first-child{background:#1b704a;border-color:#1b704a;color:white;box-shadow:0 5px 14px rgba(27,112,74,.17)}
+      .item .row button:first-child:hover{background:#155f3e;border-color:#155f3e}
+      .item .row button+button{background:rgba(255,255,255,.58);border-color:rgba(60,86,70,.16);color:#53615a;box-shadow:none}
+      .empty{color:var(--muted);font-size:12px;padding:8px 2px}
       .teach-panel{margin-top:8px}
-      .teach-item{border:1px solid #d8c79a;background:#fdfaf1;border-radius:8px;padding:8px;margin-bottom:8px}
+      .teach-item{border:1px solid rgba(173,134,45,.22);background:rgba(255,249,231,.76);border-radius:14px;padding:12px;margin-bottom:8px}
       .teach-item .q{font-weight:600}
       .teach-item .scopes{display:flex;flex-direction:column;gap:4px;margin-top:6px}
       .teach-item .scopes label{display:flex;align-items:center;gap:6px;font-size:11px}
-      [data-a="teach"][aria-pressed="true"]{background:#eef5f0;border-color:#2f8f5b;font-weight:650}
+      [data-a="continue"],[data-a="next"]{background:rgba(235,246,239,.78);border-color:rgba(35,105,69,.20)}
+      [data-a="complete"]{grid-column:1/-1;background:#1b704a;border-color:#1b704a;color:#fff}
+      [data-a="teach"][aria-pressed="true"]{background:#e9f5ed;border-color:#2f8f5b;font-weight:650}
+      .more-actions{grid-column:1/-1}
+      .more-actions summary{list-style:none;text-align:center;color:#667169;font-size:11px;cursor:pointer;padding:6px;border-radius:8px}
+      .more-actions summary::-webkit-details-marker{display:none}
+      .more-actions summary:hover{background:rgba(255,255,255,.48)}
+      .more-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:7px}
+      .more-grid button:first-child{grid-column:1/-1}
       .interacting{opacity:.25}
       .interacting .body{display:none}
+      @media(max-width:520px){.box{right:12px;bottom:12px}.counts-row{grid-template-columns:1fr}}
+      @media(prefers-reduced-motion:reduce){button{transition:none}}
     </style>
     <section class="box" aria-live="polite">
-      <header><span class="dot"></span><span class="title">Preparing</span><button class="collapse" title="Collapse">−</button></header>
+      <header><span class="dot"></span><span class="title">Preparing</span><button class="collapse" type="button" aria-label="Collapse JobPilot" title="Collapse">−</button></header>
       <div class="body">
         <div class="message">Preparing your application…</div>
         <div class="count"></div>
         <div class="counts-row"></div>
-        <button class="review-toggle" type="button" style="display:none"></button>
+        <button class="review-toggle" type="button" aria-expanded="false" style="display:none"></button>
         <div class="review-panel"></div>
         <div class="teach-panel"></div>
         <div class="actions">
           <button data-a="retry">Retry autofill</button>
           <button data-a="continue">Continue filling</button>
           <button data-a="next">Jump to next issue</button>
-          <button data-a="clear">Clear JobPilot-filled fields</button>
           <button data-a="complete">Mark application complete</button>
-          <button data-a="teach" aria-pressed="false" title="Watch how you answer, and offer to remember it">Teach JobPilot</button>
-          <button data-a="diagnostics" title="Copy sanitized field diagnostics (no personal data)">Copy diagnostics</button>
+          <details class="more-actions">
+            <summary>More options</summary>
+            <div class="more-grid">
+              <button data-a="clear">Clear JobPilot-filled fields</button>
+              <button data-a="teach" aria-pressed="false" title="Watch how you answer, and offer to remember it">Teach JobPilot</button>
+              <button data-a="diagnostics" title="Copy sanitized field diagnostics (no personal data)">Copy diagnostics</button>
+            </div>
+          </details>
         </div>
       </div>
     </section>`;
@@ -174,7 +214,13 @@ export function createWidget(actions: {
   const reviewPanel = root.querySelector<HTMLElement>(".review-panel")!;
   const countsRow = root.querySelector<HTMLElement>(".counts-row")!;
 
-  root.querySelector(".collapse")?.addEventListener("click", () => box.classList.toggle("collapsed"));
+  const collapseBtn = root.querySelector<HTMLButtonElement>(".collapse")!;
+  collapseBtn.addEventListener("click", () => {
+    const collapsed = box.classList.toggle("collapsed");
+    collapseBtn.textContent = collapsed ? "+" : "−";
+    collapseBtn.setAttribute("aria-label", collapsed ? "Expand JobPilot" : "Collapse JobPilot");
+    collapseBtn.title = collapsed ? "Expand" : "Collapse";
+  });
   root.querySelector('[data-a="retry"]')?.addEventListener("click", actions.retry);
   root.querySelector('[data-a="continue"]')?.addEventListener("click", actions.retry);
   root.querySelector('[data-a="clear"]')?.addEventListener("click", actions.clear);
@@ -186,7 +232,10 @@ export function createWidget(actions: {
   const diagnosticsBtn = root.querySelector<HTMLButtonElement>('[data-a="diagnostics"]')!;
   if (actions.diagnostics) diagnosticsBtn.addEventListener("click", actions.diagnostics);
   else diagnosticsBtn.style.display = "none";
-  reviewToggle.addEventListener("click", () => reviewPanel.classList.toggle("open"));
+  reviewToggle.addEventListener("click", () => {
+    const open = reviewPanel.classList.toggle("open");
+    reviewToggle.setAttribute("aria-expanded", String(open));
+  });
   const teachPanel = root.querySelector<HTMLElement>(".teach-panel")!;
   const teachBtn = root.querySelector<HTMLButtonElement>('[data-a="teach"]')!;
   if (actions.teach) {
@@ -224,6 +273,7 @@ export function createWidget(actions: {
     }
     box.classList.remove("collapsed");
     reviewPanel.classList.add("open");
+    reviewToggle.setAttribute("aria-expanded", "true");
     handlers?.onJumpToField(next.id);
     root.querySelector<HTMLElement>(`[data-item="${cssId(next.id)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   });
@@ -259,7 +309,7 @@ export function createWidget(actions: {
     }
     const remaining = items.filter((i) => !i.resolved).length;
     reviewToggle.style.display = items.length ? "" : "none";
-    reviewToggle.textContent = remaining > 0 ? `${remaining} question${remaining === 1 ? "" : "s"} need your input ▾` : `All caught up ▾`;
+    reviewToggle.textContent = remaining > 0 ? `${remaining} question${remaining === 1 ? "" : "s"} need your input` : "All caught up";
     updateCompleteGate();
   }
 
@@ -334,6 +384,25 @@ export function createWidget(actions: {
 
     // How to read the chosen value back — a pipe-joined string for multi-select,
     // the single value otherwise.
+    if (item.control === "file") {
+      const row = document.createElement("div");
+      row.className = "row";
+      const attachBtn = document.createElement("button");
+      attachBtn.type = "button";
+      attachBtn.textContent = "Show attach field";
+      attachBtn.addEventListener("click", () => handlers?.onJumpToField(item.id));
+      row.appendChild(attachBtn);
+      if (!item.required) {
+        const skip = document.createElement("button");
+        skip.type = "button";
+        skip.textContent = "Skip";
+        skip.addEventListener("click", () => markResolved(item.id));
+        row.appendChild(skip);
+      }
+      el.appendChild(row);
+      return el;
+    }
+
     let readValue: () => string | string[];
     let displayValue: () => string;
     if (item.multiple && item.options && item.options.length > 0) {
@@ -363,7 +432,7 @@ export function createWidget(actions: {
     } else {
       const input = document.createElement("input");
       input.type = "text";
-      input.placeholder = "Type your answer";
+      input.placeholder = inputPlaceholder(item);
       el.appendChild(input);
       readValue = () => input.value.trim();
       displayValue = () => input.value.trim();
@@ -386,7 +455,7 @@ export function createWidget(actions: {
     row.className = "row";
     const fillBtn = document.createElement("button");
     fillBtn.type = "button";
-    fillBtn.textContent = item.reusable ? "Save and fill" : "Fill this application";
+    fillBtn.textContent = item.reusable ? "Save and fill" : "Use this answer";
     fillBtn.addEventListener("click", async () => {
       const value = readValue();
       if (Array.isArray(value) ? value.length === 0 : !value) return;
@@ -521,6 +590,17 @@ function textInput(placeholder: string, value: string): HTMLInputElement {
   input.placeholder = placeholder;
   input.value = value;
   return input;
+}
+
+function inputPlaceholder(item: ReviewItem): string {
+  const question = item.question.toLowerCase();
+  if (question.includes("school") || question.includes("university")) return "e.g. Arizona State University";
+  if (question.includes("degree")) return "e.g. Master's Degree";
+  if (question.includes("major") || question.includes("field of study")) return "e.g. Computer Science";
+  if (question.includes("calling code")) return "e.g. United States (+1)";
+  if (question.includes("country")) return "Enter a country";
+  if (question.includes("graduat")) return "YYYY";
+  return "Enter your answer";
 }
 
 function escapeHtml(text: string): string {

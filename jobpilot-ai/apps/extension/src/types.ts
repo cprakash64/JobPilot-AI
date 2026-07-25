@@ -148,4 +148,10 @@ export interface ATSAdapter {
   mapFields(fields: DiscoveredField[], session: ApplicationSessionData): FieldMappingResult;
   /** Locate the final submit control — for WARNING only; never clicked. */
   findSubmitControl(context: PageContext): HTMLElement | null;
+  /** Locate a non-final page transition. Implemented only by dedicated,
+   * conservative adapters; the content script still gates every click on a
+   * fully-complete current page. */
+  findNextControl?(context: PageContext): HTMLElement | null;
+  /** True only when the ATS explicitly identifies its final review/preview step. */
+  isReviewPage?(context: PageContext): boolean;
 }

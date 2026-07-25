@@ -15,6 +15,7 @@ import {
   companyCareersSourceMatches,
   dialCodeMatches,
   locationOptionMatches,
+  phoneCountryOptionMatches,
   singletonPrivacyAcknowledgementMatches,
   singletonRequiredAffirmationMatches
 } from "../fields/aliases";
@@ -237,6 +238,12 @@ describe("structured phone autofill", () => {
     }
   });
 
+  it("matches a phone country only when both country and calling code agree", () => {
+    expect(phoneCountryOptionMatches("🇺🇸 US (+1)", "United States (+1)")).toBe(true);
+    expect(phoneCountryOptionMatches("Canada (+1)", "United States (+1)")).toBe(false);
+    expect(phoneCountryOptionMatches("United States (+44)", "United States (+1)")).toBe(false);
+  });
+
   it("keeps dial-code matching narrow — it never fires on ordinary options", () => {
     // Wrong country.
     expect(dialCodeMatches("United Kingdom (+44)", "+1")).toBe(false);
@@ -376,6 +383,37 @@ describe("structured phone autofill", () => {
     expect(selected("authorization")).toMatch(/^Yes/);
     expect(selected("sponsorship")).toMatch(/^No/);
     expect(selected("ai")).toBe("I agree");
+    expect(result.filled).toBe(6);
+  });
+
+  it("fills the explicit Lyft defaults, work authorization, and full-name signature", async () => {
+    const root = mount(`
+      <label>May we contact your current employer? *<select id="contact" required><option value="">Select…</option><option>Yes</option><option>No</option></select></label>
+      <label>Can you perform these essential functions of the job with reasonable accommodation? *<select id="functions" required><option value="">Select…</option><option>Yes</option><option>No</option></select></label>
+      <label>Please enter your relevant employment and military service above using the + Add Another Employment link. *<select id="history" required><option value="">Select…</option><option>Yes</option><option>No</option></select></label>
+      <label>Work Authorization *<select id="authorization" required><option value="">Select…</option><option>Authorized to work</option><option>Not authorized</option></select></label>
+      <label>Have you been employed by Lyft, or any subsidiary, affiliate, or business unit of Lyft, in the past (whether on a full-time or part-time basis)? *<select id="previous" required><option value="">Select…</option><option>Yes</option><option>No</option></select></label>
+      <label>I certify that the facts set forth in this Application for Employment are true and complete to the best of my knowledge. *<input id="signature"><small>Please enter your full name and today's date to signify your electronic signature for this statement.</small></label>
+    `);
+    const data = session([
+      answer("contact_current_employer", "Yes"),
+      answer("essential_functions_with_accommodation", "Yes"),
+      answer("employment_history_confirmation", "Yes"),
+      answer("work_authorization_us", "authorized_us"),
+      answer("previously_employed", "No"),
+      answer("electronic_signature", "Chandra Prakash Pandey")
+    ]);
+
+    const { fields, mappings } = scan(root, data);
+    const result = await applyFill(fields, mappings, data);
+
+    expect((document.getElementById("contact") as HTMLSelectElement).value).toBe("Yes");
+    expect((document.getElementById("functions") as HTMLSelectElement).value).toBe("Yes");
+    expect((document.getElementById("history") as HTMLSelectElement).value).toBe("Yes");
+    expect((document.getElementById("authorization") as HTMLSelectElement).value).toBe("Authorized to work");
+    expect((document.getElementById("previous") as HTMLSelectElement).value).toBe("No");
+    expect((document.getElementById("signature") as HTMLInputElement).value).toBe("Chandra Prakash Pandey");
+    expect(result.errors).toEqual([]);
     expect(result.filled).toBe(6);
   });
 });

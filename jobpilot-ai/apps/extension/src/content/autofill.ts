@@ -221,8 +221,15 @@ function buildFieldResults(
     const field = byUid.get(mapping.uid);
     if (!field) continue;
     if (UPLOAD_FIELDS.has(mapping.canonicalKey)) continue; // handled by upload path
-    const question = field.label || field.ariaLabel || field.placeholder || field.name || mapping.canonicalKey;
-    const reusable = mapping.canonicalKey !== "unknown" && !isCustomResponseField(mapping.canonicalKey);
+    const question = attachmentQuestion(mapping.canonicalKey)
+      ?? field.label
+      ?? field.ariaLabel
+      ?? field.placeholder
+      ?? field.name
+      ?? mapping.canonicalKey;
+    const reusable = mapping.canonicalKey !== "unknown"
+      && !isCustomResponseField(mapping.canonicalKey)
+      && !isManualAttachment(mapping.canonicalKey);
     const base = {
       uid: field.uid,
       fieldKey: mapping.canonicalKey,
@@ -302,6 +309,16 @@ function dropdownReason(code: string | undefined): ReasonCode {
 
 function isCustomResponseField(key: string): boolean {
   return key === "custom_motivation" || key === "custom_experience";
+}
+
+function isManualAttachment(key: string): boolean {
+  return key === "undergraduate_transcript_upload" || key === "graduate_transcript_upload";
+}
+
+function attachmentQuestion(key: string): string | null {
+  if (key === "undergraduate_transcript_upload") return "Undergraduate transcript";
+  if (key === "graduate_transcript_upload") return "Graduate transcript";
+  return null;
 }
 
 function defaultScope(key: CanonicalField): "global" | "company" {

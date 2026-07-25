@@ -15,7 +15,8 @@ function session(): ApplicationSessionData {
     answers: [
       { canonical_key: "first_name", value: "Chandra", display_value: "Chandra", source: "profile", confidence: 0.97, sensitive: false, requires_review: false, verified: true },
       { canonical_key: "last_name", value: "Pandey", display_value: "Pandey", source: "profile", confidence: 0.97, sensitive: false, requires_review: false, verified: true },
-      { canonical_key: "email", value: "cp@example.com", display_value: "cp@example.com", source: "profile", confidence: 0.97, sensitive: false, requires_review: false, verified: true }
+      { canonical_key: "email", value: "cp@example.com", display_value: "cp@example.com", source: "profile", confidence: 0.97, sensitive: false, requires_review: false, verified: true },
+      { canonical_key: "custom_motivation", value: "Acme’s backend role fits the reliable API work I enjoy.", display_value: "Acme’s backend role fits the reliable API work I enjoy.", source: "openai:gpt", confidence: 0.9, sensitive: false, requires_review: true, verified: false }
     ]
   };
 }
@@ -33,7 +34,8 @@ describe("fill runner (end-to-end on a fixture)", () => {
     expect((document.getElementById("gender") as HTMLSelectElement).value).toBe("");
     // Resume/cover file inputs become upload targets, not text fills.
     expect(summary.uploadTargets.map((u) => u.kind).sort()).toEqual(["cover-letter", "resume"]);
-    // The "why do you want to work here" written response is left for review.
+    // The GPT draft is inserted in context and remains a review item.
+    expect((document.getElementById("why") as HTMLTextAreaElement).value).toContain("Acme");
     expect(summary.reviewRequired).toBeGreaterThanOrEqual(1);
     expect(summary.errors).toEqual([]);
   });

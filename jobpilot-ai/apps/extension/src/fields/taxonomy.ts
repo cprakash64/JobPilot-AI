@@ -21,6 +21,7 @@ export type CanonicalField =
   | "phone"
   | "phone_country"
   | "phone_national"
+  | "phone_extension"
   | "address"
   | "city"
   | "state"
@@ -40,11 +41,24 @@ export type CanonicalField =
   | "current_title"
   | "employment_history"
   | "education"
+  | "education_school"
+  | "education_degree"
+  | "education_major"
+  | "education_end_year"
+  | "education_gpa"
   | "skills"
+  | "contact_current_employer"
+  | "essential_functions_with_accommodation"
+  | "employment_history_confirmation"
+  | "electronic_signature"
   // work authorization (consequential)
   | "work_authorization_us"
   | "sponsorship_required_now"
   | "sponsorship_required_future"
+  // Workday account creation. These answers exist only in the live session;
+  // the extension never persists or logs them.
+  | "application_account_password"
+  | "application_account_password_confirm"
   // A narrow, non-factual consent: the employer's candidate/data privacy
   // policy acknowledgement. This is intentionally separate from
   // `legal_attestation`, which may assert facts and always needs an explicit
@@ -59,6 +73,8 @@ export type CanonicalField =
   // documents
   | "resume_upload"
   | "cover_letter_upload"
+  | "undergraduate_transcript_upload"
+  | "graduate_transcript_upload"
   // generated written responses
   | "custom_motivation"
   | "custom_experience"

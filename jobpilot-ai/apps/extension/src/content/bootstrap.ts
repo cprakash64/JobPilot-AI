@@ -49,6 +49,7 @@ import { selectActivationControl } from "../ats/applicationSurface";
 import { BUILD_INFO } from "../buildInfo";
 import { createWidget, type ReviewHandlers, type ReviewItem } from "./widget";
 import { claimContentInstance, makeContentInstanceId } from "./instance";
+import { fillStructuredRepeaters } from "../fields/repeaters";
 
 // Declarative injection and the background's readiness fallback can both run.
 // The newest instance owns the frame; older current-build instances check this
@@ -170,6 +171,10 @@ let outcome: DetectionOutcome | null = null;
 let running = false;
 let started = false;
 let matched = false;
+// Once a launch reaches a terminal ready/review/failure state, DOM changes
+// (including the user's own answers) must not silently start autofill again.
+// Only the explicit Retry action clears this latch.
+let automaticRunSettled = false;
 // Live element refs from the most recent scan, keyed by DiscoveredField.uid —
 // how the review widget applies a manually-chosen answer to the right node.
 let lastFields: Map<string, DiscoveredField> = new Map();
@@ -221,6 +226,7 @@ async function initAtsPage(): Promise<void> {
       return false;
     }
     if (message.type === MSG.AUTOFILL_START) {
+      if (message.reason === "manual_retry") automaticRunSettled = false;
       void (matched ? fill(message.reason) : checkHandoffAndStart(message.reason)).then(() => sendResponse({ ok: true }));
       return true;
     }
@@ -335,7 +341,10 @@ function ensureWidget(): ReturnType<typeof createWidget> {
   return (
     widget ??
     createWidget({
-      retry: () => void (matched && session ? fill("manual_retry") : checkHandoffAndStart("manual_retry")),
+      retry: () => {
+        automaticRunSettled = false;
+        void (matched && session ? fill("manual_retry") : checkHandoffAndStart("manual_retry"));
+      },
       clear: () => { if (matched) clearJobPilotFields(document); },
       complete: () => { if (session) void sendRuntime({ type: MSG.COMPLETE_SESSION, sessionId: session.sessionId }); },
       diagnostics: copyDiagnostics,
@@ -444,6 +453,7 @@ function waitForApplicationToAppear(timeoutMs = 15000): Promise<void> {
 
 async function fill(reason: AutofillReason): Promise<void> {
   if (!isCurrentInstance() || !session || running) return;
+  if (automaticRunSettled && reason !== "manual_retry") return;
   if (!outcome) outcome = detectAdapter({ url: location.href, document });
   if (!outcome) {
     void sendRuntime({ type: MSG.AUTOFILL_FAILED, reasonCode: "ADAPTER_NOT_DETECTED" });
@@ -485,6 +495,28 @@ async function fill(reason: AutofillReason): Promise<void> {
     return;
   }
 
+  // Employment and education are collections, not scalar answers. Expand and
+  // fill those rows first so the generic scanner sees the final DOM shape and
+  // cannot overwrite every repeated row with the current employer/school.
+  const repeaterResults = await fillStructuredRepeaters(formRoot.root as ParentNode, session).catch((error) => {
+    // A third-party form can replace a section while it is being expanded.
+    // Keep the scalar fill usable and make the structured failure diagnosable
+    // instead of leaving the content runner permanently stuck in `running`.
+    log.warn("structured profile sections failed", {
+      error: error instanceof Error ? error.name : "unknown"
+    });
+    return [];
+  });
+  if (repeaterResults.length) {
+    log.info("structured profile sections processed", {
+      sections: repeaterResults.length,
+      requested: repeaterResults.reduce((sum, item) => sum + item.recordsRequested, 0),
+      found: repeaterResults.reduce((sum, item) => sum + item.recordsFound, 0),
+      filled: repeaterResults.reduce((sum, item) => sum + item.fieldsFilled, 0),
+      failures: repeaterResults.reduce((sum, item) => sum + item.failures.length, 0)
+    });
+  }
+
   const total = (formRoot.root as ParentNode).querySelectorAll("input:not([type=hidden]),textarea,select,[contenteditable=true]").length;
   widget?.update({ stage: "filling", filled: 0, total, message: "Filling verified fields…" });
   try {
@@ -504,19 +536,34 @@ async function fill(reason: AutofillReason): Promise<void> {
       result: res.result,
       progress: res.progress
     });
-    if (ledgerCounts.discovered === 0) {
+    if (await advanceWorkdayWhenSafe()) {
+      // Workday replaces the page inside the same SPA. The mutation observer
+      // will detect the next step and run the same verified fill pipeline.
+      widget?.update({
+        stage: "filling",
+        filled: ledgerCounts.filled,
+        total: ledgerCounts.discovered,
+        message: "Current page complete. Moving to the next application step…"
+      });
+      return;
+    } else if (ledgerCounts.discovered === 0) {
+      automaticRunSettled = true;
       widget?.update({ stage: "failed", message: "No fillable fields were found on this page." });
       void sendRuntime({ type: MSG.AUTOFILL_FAILED, reasonCode: "NO_FIELDS_DISCOVERED" });
     } else {
+      automaticRunSettled = true;
       const pending = ledgerCounts.pending;
+      const atReview = Boolean(outcome.adapter.isReviewPage?.({ url: location.href, document }));
       assertReadyStateConsistent(ledgerCounts, pending === 0);
       widget?.update({
         stage: pending > 0 ? "review" : "ready",
         filled: ledgerCounts.filled,
         total: ledgerCounts.discovered,
         message: pending > 0
-          ? `${pending} item${pending === 1 ? "" : "s"} need your review${ledgerCounts.requiredBlank > 0 ? ` (${ledgerCounts.requiredBlank} required)` : ""}.`
-          : "Every required field is filled. Review everything before you submit."
+          ? `${atReview ? "At the final review: " : ""}${pending} item${pending === 1 ? "" : "s"} need your review${ledgerCounts.requiredBlank > 0 ? ` (${ledgerCounts.requiredBlank} required)` : ""}.`
+          : atReview
+            ? "Application complete. Nothing needs attention — review it and submit when ready."
+            : "Every required field is filled. Review everything before you submit."
       });
     }
     if (isTopFrame) widget?.showReview(buildReviewItems(ledger, session), reviewHandlers, ledgerCounts);
@@ -532,11 +579,35 @@ async function fill(reason: AutofillReason): Promise<void> {
       count: res.result.fields_filled
     });
   } catch (err) {
+    automaticRunSettled = true;
     widget?.update({ stage: "failed", message: "Autofill failed. Retry or continue manually." });
     void sendRuntime({ type: MSG.AUTOFILL_FAILED, reasonCode: "VALUE_DID_NOT_STICK", message: String(err).slice(0, 80) });
   } finally {
     running = false;
   }
+}
+
+// A repeated DOM mutation must never click the same navigation control twice.
+// The signature contains no entered values or other PII.
+const workdayNavigationKeys = new Set<string>();
+
+async function advanceWorkdayWhenSafe(): Promise<boolean> {
+  if (!outcome || !ledgerCounts || outcome.result.atsId !== "workday") return false;
+  const context = { url: location.href, document };
+  if (outcome.adapter.isReviewPage?.(context)) return false;
+  // No navigation while anything on this or an earlier page remains unresolved.
+  if (ledgerCounts.pending > 0 || ledgerCounts.requiredBlank > 0 || ledgerCounts.technical > 0) return false;
+  const next = outcome.adapter.findNextControl?.(context);
+  if (!next) return false;
+  const label = (next.textContent || (next as HTMLInputElement).value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const key = `${scanSignature()}|${label}`;
+  if (workdayNavigationKeys.has(key)) return false;
+  workdayNavigationKeys.add(key);
+  lastScanSignature = scanSignature();
+  next.scrollIntoView({ block: "center" });
+  next.click();
+  await delay(250);
+  return true;
 }
 
 // --------------------------------------------------------------------------- //
@@ -603,15 +674,37 @@ const reviewHandlers: ReviewHandlers = {
     }
     const field = lastFields.get(id);
     if (!field) return false;
+    const canonicalKey = lastCanonicalKeyByUid.get(id);
+    let valueToFill: string | string[] = value;
+    let searchValue: string | undefined;
+    if (canonicalKey === "city" && typeof value === "string") {
+      const savedLocation = session?.profileData?.location;
+      if (
+        typeof savedLocation === "string"
+        && savedLocation.includes(",")
+        && savedLocation.toLowerCase().startsWith(`${value.trim().toLowerCase()},`)
+      ) {
+        valueToFill = savedLocation;
+      }
+      searchValue = value.trim();
+    } else if (canonicalKey === "phone_country" && typeof value === "string") {
+      searchValue = value.replace(/\s*\(\s*\+\d{1,4}\s*\)\s*$/, "").trim();
+    }
     // The user's own choice goes through the SAME dropdown adapter as automatic
     // fill — open, select, and verify against the real DOM. There is no
     // simplified widget path, so "it worked in the widget" always means the
     // employer control actually changed. The widget steps aside first so its
     // Shadow-DOM overlay can never intercept an option click (section L).
-    const outcome = await fillField(field, value, {
+    const outcome = await fillField(field, valueToFill, {
       status: "verified",
       force: true,
       answerSource: "user_confirmed_saved",
+      dropdownSearchValue: searchValue,
+      dropdownMatchMode: canonicalKey === "education_end_year"
+        ? "graduation_year"
+        : canonicalKey === "education_gpa"
+          ? "gpa"
+          : undefined,
       beforeInteract: () => widget?.setInteractionMode(true),
       afterInteract: () => widget?.setInteractionMode(false)
     });
@@ -775,7 +868,9 @@ async function fetchDocument(kind: "resume" | "cover-letter"): Promise<File | nu
 // --------------------------------------------------------------------------- //
 let debounce: ReturnType<typeof setTimeout> | null = null;
 function observeMutations(): void {
-  const stopAt = Date.now() + 45_000;
+  // A Workday application can legitimately take several minutes across its
+  // account, profile, experience, disclosures, and review pages.
+  const stopAt = Date.now() + 5 * 60_000;
   const observer = new MutationObserver(() => {
     if (!isCurrentInstance()) { observer.disconnect(); return; }
     if (Date.now() > stopAt) { observer.disconnect(); return; }
@@ -783,12 +878,14 @@ function observeMutations(): void {
     debounce = setTimeout(() => {
       // Continue filling any newly rendered fields. The fill engine skips fields
       // already filled or edited by the user, so this never duplicates values.
-      if (session && !running && started && scanSignature() !== lastScanSignature) void discoverAndFill("continue_after_navigation");
+      if (session && !running && started && !automaticRunSettled && scanSignature() !== lastScanSignature) {
+        void discoverAndFill("continue_after_navigation");
+      }
       else emitProgressOnly();
     }, 500);
   });
   observer.observe(document.body, { childList: true, subtree: true });
-  window.setTimeout(() => observer.disconnect(), 45_000);
+  window.setTimeout(() => observer.disconnect(), 5 * 60_000);
 }
 
 function emitProgressOnly(): void {
@@ -832,5 +929,15 @@ function sendRuntime(message: object): Promise<unknown> {
 function delay(ms: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
 function scanSignature(): string {
   const controls = document.querySelectorAll("input:not([type=hidden]),textarea,select,[contenteditable=true]");
-  return `${location.href.split("#")[0]}|${controls.length}`;
+  const step = document.querySelector('[aria-current="step"], [data-automation-id*="progressBarActive" i]')?.textContent || "";
+  const heading = Array.from(document.querySelectorAll("h1,h2,[role=heading]"))
+    .map((item) => (item.textContent || "").trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("|");
+  const identities = Array.from(controls)
+    .slice(0, 40)
+    .map((item) => [item.getAttribute("name"), item.id, item.getAttribute("aria-label")].filter(Boolean).join(":"))
+    .join("|");
+  return `${location.href.split("#")[0]}|${controls.length}|${step.trim()}|${heading}|${identities}`;
 }

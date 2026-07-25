@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JobPilot widget preview</title>
+    <style>
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: #18211c;
+        background:
+          radial-gradient(circle at 12% 16%, #e7f1eb 0, transparent 32%),
+          radial-gradient(circle at 85% 18%, #eef0fa 0, transparent 30%),
+          #f7f8f7;
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      main { max-width: 780px; padding: 64px 7vw; }
+      h1 { font-size: 38px; letter-spacing: -.035em; }
+      .field { height: 70px; margin: 18px 0; border: 1px solid #d8ded9; border-radius: 14px; background: rgba(255,255,255,.72); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>Application</p>
+      <h1>Software Engineer</h1>
+      <div class="field"></div>
+      <div class="field"></div>
+      <div class="field"></div>
+      <div class="field"></div>
+    </main>
+    <script src="../bundle/harness.js"></script>
+    <script>window.JobPilotHarness.showWidgetPreview()</script>
+  </body>
+</html>

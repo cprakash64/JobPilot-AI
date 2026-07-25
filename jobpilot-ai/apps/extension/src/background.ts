@@ -37,6 +37,7 @@ import {
 import {
   clearTab,
   cleanupExpired,
+  findPackageBySession,
   findPendingByApplication,
   getActive,
   getPackage,
@@ -656,9 +657,7 @@ async function recordResult(
 
 async function completeActive(sessionId: number): Promise<void> {
   // Find the package holding this session across tabs.
-  const store = await chrome.storage.local.get("sessionPackages");
-  const map = (store.sessionPackages as Record<string, SessionPackage>) || {};
-  const entry = Object.values(map).find((p) => p.session.sessionId === sessionId);
+  const entry = await findPackageBySession(sessionId);
   if (!entry) throw new Error("No active session token");
   await completeSession(entry.sessionToken, sessionId);
 }

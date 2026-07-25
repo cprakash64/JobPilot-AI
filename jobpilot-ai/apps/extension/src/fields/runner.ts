@@ -90,6 +90,13 @@ function resolvePhoneAnswer(
   key: string,
   splitsPhoneCountry: boolean
 ): SessionAnswer | undefined {
+  if (key === "phone_country") {
+    const iso2 = answers.get("phone_country_iso2")?.value.toUpperCase();
+    const code = answers.get("phone_country")?.value;
+    const country = PHONE_COUNTRY_LABELS[iso2 ?? ""];
+    if (country && code) return syntheticAnswer(key, `${country} (${code})`);
+    return answers.get("phone_country") ?? answers.get("phone_country_iso2");
+  }
   if (key === "phone" && splitsPhoneCountry) {
     // The country lives in its own control; this input takes the national part.
     return answers.get("phone_national") ?? answers.get("phone");
@@ -99,6 +106,17 @@ function resolvePhoneAnswer(
   }
   return answers.get(key);
 }
+
+const PHONE_COUNTRY_LABELS: Record<string, string> = {
+  US: "United States",
+  CA: "Canada",
+  GB: "United Kingdom",
+  IN: "India",
+  AU: "Australia",
+  DE: "Germany",
+  FR: "France",
+  SG: "Singapore"
+};
 
 /** Fill every mapped field. Async and strictly sequential — one dropdown is
  * fully resolved (including its bounded option-render wait) before the next
@@ -116,6 +134,15 @@ export async function applyFill(fields: DiscoveredField[], mappings: FieldMappin
   for (const mapping of cascadeSort(mappings)) {
     const field = fieldByUid.get(mapping.uid);
     if (!field?.element) {
+      continue;
+    }
+    if (field.element.hasAttribute("data-jobpilot-repeater")) {
+      summary.skipped += 1;
+      summary.outcomes.set(mapping.uid, {
+        uid: mapping.uid,
+        status: "skipped",
+        reason: "structured repeater value present"
+      });
       continue;
     }
     if (UPLOAD_FIELDS.has(mapping.canonicalKey)) {
@@ -153,7 +180,18 @@ export async function applyFill(fields: DiscoveredField[], mappings: FieldMappin
       status: mapping.requiresReview ? "review" : "verified",
       dropdownSearchValue: mapping.canonicalKey === "city"
         ? String(answer.value).split(",")[0]?.trim()
-        : undefined,
+        : mapping.canonicalKey === "phone_country"
+          ? String(answer.value).replace(/\s*\(\s*\+\d{1,4}\s*\)\s*$/, "").trim()
+        : mapping.canonicalKey === "referral_source"
+          ? "Career Website"
+          : mapping.canonicalKey === "privacy_policy_acknowledgement"
+            ? "I acknowledge"
+            : undefined,
+      dropdownMatchMode: mapping.canonicalKey === "education_end_year"
+        ? "graduation_year"
+        : mapping.canonicalKey === "education_gpa"
+          ? "gpa"
+          : undefined,
       // Phone inputs re-format themselves on blur; verify by digits so a
       // cosmetic reformat counts as success but a dropped digit does not.
       verify: isPhoneNumber ? (final) => sameDigits(final, String(answer.value)) : undefined
@@ -215,7 +253,7 @@ function resolveApplicationAnswer(
 }
 
 function isLocationChoice(field: DiscoveredField): boolean {
-  if (field.control === "combobox" || field.control === "listbox") return true;
+  if (field.control === "select" || field.control === "combobox" || field.control === "listbox") return true;
   const el = field.element;
   if (!el) return false;
   return (

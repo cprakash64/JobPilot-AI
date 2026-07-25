@@ -16,6 +16,11 @@ const ALIAS_GROUPS: string[][] = [
   ["woman", "female"],
   ["self describe", "self-describe", "prefer to self describe", "other"],
   ["american indian or alaska native", "american indian or alaskan native"],
+  ["bachelors degree", "bachelor degree", "bachelor of science", "bachelor of arts", "bs", "ba", "bsc"],
+  ["masters degree", "master degree", "master of science", "master of arts", "ms", "ma", "msc"],
+  ["doctoral degree", "doctorate", "doctor of philosophy", "phd"],
+  ["associates degree", "associate degree", "associate of science", "associate of arts", "as", "aa"],
+  ["high school diploma", "high school", "secondary school"],
   // US state name <-> postal abbreviation.
   ["alabama", "al"], ["alaska", "ak"], ["arizona", "az"], ["arkansas", "ar"],
   ["california", "ca"], ["colorado", "co"], ["connecticut", "ct"], ["delaware", "de"],
@@ -65,6 +70,72 @@ export function dialCodeMatches(optionLabel: string, value: string): boolean {
   return found.some((token) => token.replace(/\D/g, "") === wanted[1]);
 }
 
+/** Match the structured country+calling-code value used by split phone fields.
+ *
+ * A country selector may render the same choice as "United States (+1)",
+ * "US +1", or with a flag prefix. Requiring both the controlled country alias
+ * and the exact calling-code token avoids the ambiguity of matching bare +1
+ * (which is shared by multiple North American countries).
+ */
+export function phoneCountryOptionMatches(optionLabel: string, value: string): boolean {
+  const wanted = /^(.*?)\s*\(\s*(\+\s?\d{1,4})\s*\)\s*$/.exec(value.trim());
+  if (!wanted) return false;
+  const wantedCountry = wanted[1].trim();
+  const wantedCode = wanted[2].replace(/\s+/g, "");
+  const code = optionLabel.match(/\+\s?\d{1,4}/)?.[0]?.replace(/\s+/g, "");
+  if (!code || code !== wantedCode) return false;
+  const withoutFlagOrCode = optionLabel
+    .replace(/\+\s?\d{1,4}/g, "")
+    .replace(/[()]/g, " ")
+    // Emoji flags are pairs of regional-indicator symbols. Removing all
+    // non-word symbols here affects comparison only, never the value written.
+    .replace(/[^\p{L}\p{N}.\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return aliasMatches(withoutFlagOrCode, wantedCountry);
+}
+
+/** Match a saved graduation year to a range offered by the employer.
+ * Example: 2025 safely selects "2023–2026" because the endpoints are explicit
+ * and inclusive. It also handles "Before 2020" without guessing. */
+export function graduationYearOptionMatches(optionLabel: string, value: string): boolean {
+  const year = Number(value.trim());
+  if (!/^\d{4}$/.test(value.trim()) || year < 1900 || year > 2200) return false;
+  const label = optionLabel.replace(/[–—]/g, "-").trim();
+  const range = /(?:^|\D)(\d{4})\s*-\s*(\d{4})(?:\D|$)/.exec(label);
+  if (range) return year >= Number(range[1]) && year <= Number(range[2]);
+  const before = /\bbefore\s+(\d{4})\b/i.exec(label);
+  if (before) return year < Number(before[1]);
+  const after = /\b(?:after|from)\s+(\d{4})\b/i.exec(label);
+  if (after) return year >= Number(after[1]);
+  return false;
+}
+
+/** Match GPA dropdown ranges, or choose the employer's closest numeric
+ * conversion when every offered option is a numeric GPA value. */
+export function gpaOptionMatches(optionLabel: string, value: string): boolean {
+  const gpa = Number(value.trim());
+  if (!Number.isFinite(gpa) || gpa < 0 || gpa > 4) return false;
+  const label = optionLabel.replace(/[–—]/g, "-").trim();
+  const range = /(\d(?:\.\d+)?)\s*-\s*(\d(?:\.\d+)?)/.exec(label);
+  return Boolean(range && gpa >= Number(range[1]) && gpa <= Number(range[2]));
+}
+
+export function closestGpaOption<T extends { label: string }>(options: T[], value: string): T | null {
+  const gpa = Number(value.trim());
+  if (!Number.isFinite(gpa) || gpa < 0 || gpa > 4) return null;
+  const candidates = options
+    .map((option) => {
+      const label = option.label.trim();
+      const exact = /^(\d(?:\.\d+)?)$/.exec(label);
+      return exact ? { option, numeric: Number(exact[1]) } : null;
+    })
+    .filter((item): item is { option: T; numeric: number } => Boolean(item && item.numeric >= 0 && item.numeric <= 4));
+  if (candidates.length < 2) return null;
+  candidates.sort((a, b) => Math.abs(a.numeric - gpa) - Math.abs(b.numeric - gpa));
+  return candidates[0].option;
+}
+
 /** Match a structured location against an autocomplete result without fuzzy
  * city guessing. At least city + one disambiguator are required, and every
  * comma-delimited component must be exactly equal or a controlled alias
@@ -111,6 +182,8 @@ export function binaryAnswerMatches(optionLabel: string, answer: string): boolea
   const option = normalizeForMatch(optionLabel);
   if (/^yes\b/.test(option)) return wanted;
   if (/^no\b/.test(option)) return !wanted;
+  if (/^(?:i am |currently )?(?:legally )?authorized to work\b/.test(option)) return wanted;
+  if (/^(?:i am )?not (?:currently )?(?:legally )?authorized to work\b/.test(option)) return !wanted;
   return false;
 }
 

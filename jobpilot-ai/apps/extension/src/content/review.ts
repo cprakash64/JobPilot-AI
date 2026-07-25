@@ -28,6 +28,42 @@ const REASON_TEXT: Partial<Record<string, string>> = {
   DROPDOWN_VERIFICATION_FAILED: "JobPilot selected an option but the page didn't keep it — please choose it yourself."
 };
 
+const CLEAR_QUESTION: Partial<Record<string, string>> = {
+  country: "Which country do you currently live in?",
+  phone_country: "Which country calling code should be used for your phone number?",
+  education_school: "Which school, college, or university did you attend?",
+  education_degree: "What type of degree did you earn?",
+  education_major: "What was your major or field of study?",
+  education_end_year: "In what year did you graduate?",
+  education_gpa: "What was your GPA?",
+  city: "Which city do you currently live in?",
+  state: "Which state or province do you currently live in?",
+  postal_code: "What is your current ZIP or postal code?"
+};
+
+const CLEAR_HELP: Partial<Record<string, string>> = {
+  country: "Choose the employer's country option that matches your saved location.",
+  phone_country: "Choose the calling-code option for your saved phone number (for example, United States +1).",
+  education_school: "Enter the institution name exactly as you want it shown on this application.",
+  education_degree: "Choose the closest degree level offered by the employer (for example, Master's Degree for a Master of Science).",
+  education_major: "Enter the subject you studied, sometimes called your discipline or field of study.",
+  education_end_year: "Use the four-digit graduation year for this education entry.",
+  education_gpa: "Use the scale requested by the employer; do not convert it unless the form asks you to.",
+  city: "Choose your current city from the employer's available options.",
+  state: "Choose your current state, province, or region.",
+  postal_code: "Enter the postal code for your current address."
+};
+
+function manualAttachmentReason(e: LedgerEntry): string | null {
+  if (e.canonicalKey === "undergraduate_transcript_upload") {
+    return "Use the employer's Attach button to upload the undergraduate transcript requested for this application.";
+  }
+  if (e.canonicalKey === "graduate_transcript_upload") {
+    return "Use the employer's Attach button to upload your graduate transcript. Skip it when you do not have a graduate degree and the field is optional.";
+  }
+  return null;
+}
+
 export function categoryForEntry(e: LedgerEntry): ReviewCategory {
   if (e.sensitive) return "sensitive";
   if (e.status === "technical_failure" || e.status === "unsupported_control") return "technical";
@@ -36,6 +72,9 @@ export function categoryForEntry(e: LedgerEntry): ReviewCategory {
 }
 
 export function reasonForEntry(e: LedgerEntry): string {
+  const attachmentReason = manualAttachmentReason(e);
+  if (attachmentReason) return attachmentReason;
+  if (e.canonicalKey && CLEAR_HELP[e.canonicalKey]) return CLEAR_HELP[e.canonicalKey] as string;
   if (e.reasonCode && REASON_TEXT[e.reasonCode]) return REASON_TEXT[e.reasonCode] as string;
   switch (e.status) {
     case "needs_confirmation":
@@ -109,7 +148,7 @@ export function buildReviewModel(entries: LedgerEntry[], session: ApplicationSes
       id: e.uid,
       kind: "field",
       category: categoryForEntry(e),
-      question: e.question,
+      question: (e.canonicalKey && CLEAR_QUESTION[e.canonicalKey]) || e.question,
       required: e.required,
       reasonText: reasonByKey.get(e.canonicalKey ?? "") ?? reasonForEntry(e),
       options: e.options.length > 0 ? e.options : undefined,

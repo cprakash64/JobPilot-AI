@@ -111,6 +111,22 @@ describe("review widget", () => {
     widget.destroy();
   });
 
+  it("uses a specific placeholder instead of a generic answer prompt", () => {
+    const widget = mountWidget();
+    const items: ReviewItem[] = [
+      {
+        id: "uid-degree", kind: "field", category: "required",
+        question: "What type of degree did you earn?", required: true,
+        reasonText: "Choose the closest degree level offered by the employer.",
+        control: "text", reusable: true
+      }
+    ];
+    widget.showReview(items, { onFill: vi.fn(async () => true), onSave: vi.fn(async () => true), onJumpToField: vi.fn() });
+    expect((shadowRoot().querySelector('input[type="text"]') as HTMLInputElement).placeholder).toBe("e.g. Master's Degree");
+    expect(shadowRoot().textContent).not.toContain("Fill this application");
+    widget.destroy();
+  });
+
   it("a name-confirmation item shows first/middle/last separately and never offers a save checkbox", async () => {
     const widget = mountWidget();
     const items: ReviewItem[] = [

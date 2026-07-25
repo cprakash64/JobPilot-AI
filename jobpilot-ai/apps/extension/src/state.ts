@@ -1,5 +1,7 @@
 /**
- * Durable launch state, persisted in chrome.storage.local. MV3 service
+ * Durable launch metadata is persisted in chrome.storage.local. Session
+ * packages (tokens and sensitive answers) use chrome.storage.session so they
+ * survive MV3 worker suspension without being written to disk.
  * workers can stop/restart, so nothing important lives only in worker memory.
  *
  * Everything is keyed by the exact employer tab id, so a launch is never
@@ -33,6 +35,27 @@ async function getMap<T>(key: string): Promise<Map<T>> {
 
 async function setMap<T>(key: string, map: Map<T>): Promise<void> {
   await chrome.storage.local.set({ [key]: map });
+}
+
+function packageStorage(): chrome.storage.StorageArea {
+  // storage.session is present on supported MV3 Chrome. The fallback keeps the
+  // test harness and older development browsers usable; production Chrome uses
+  // session-only memory for password-bearing packages.
+  return chrome.storage.session ?? chrome.storage.local;
+}
+
+async function getPackageMap(): Promise<Map<SessionPackage>> {
+  try {
+    const store = await packageStorage().get(PACKAGE_KEY);
+    const value = store[PACKAGE_KEY];
+    return value && typeof value === "object" ? value as Map<SessionPackage> : {};
+  } catch {
+    return {};
+  }
+}
+
+async function setPackageMap(map: Map<SessionPackage>): Promise<void> {
+  await packageStorage().set({ [PACKAGE_KEY]: map });
 }
 
 const ACTIVE_KEY = "activeAssistedApplyHandoffV1";
@@ -108,14 +131,19 @@ export async function updatePending(tabId: number, patch: Partial<PendingLaunch>
 
 // --- SessionPackage (cached to survive the single-use launch token) --------- //
 export async function putPackage(tabId: number, pkg: SessionPackage): Promise<void> {
-  const map = await getMap<SessionPackage>(PACKAGE_KEY);
+  const map = await getPackageMap();
   map[String(tabId)] = pkg;
-  await setMap(PACKAGE_KEY, map);
+  await setPackageMap(map);
 }
 
 export async function getPackage(tabId: number): Promise<SessionPackage | null> {
-  const map = await getMap<SessionPackage>(PACKAGE_KEY);
+  const map = await getPackageMap();
   return map[String(tabId)] ?? null;
+}
+
+export async function findPackageBySession(sessionId: number): Promise<SessionPackage | null> {
+  const map = await getPackageMap();
+  return Object.values(map).find((pkg) => pkg.session.sessionId === sessionId) ?? null;
 }
 
 // --- View state (what the side panel renders) ------------------------------- //
@@ -170,12 +198,17 @@ export function initialView(tabId: number, launch: PendingLaunch, company: strin
 
 // --- Cleanup ---------------------------------------------------------------- //
 export async function clearTab(tabId: number): Promise<void> {
-  for (const key of [PENDING_KEY, PACKAGE_KEY, VIEW_KEY]) {
+  for (const key of [PENDING_KEY, VIEW_KEY]) {
     const map = await getMap<unknown>(key);
     if (String(tabId) in map) {
       delete map[String(tabId)];
       await setMap(key, map);
     }
+  }
+  const packages = await getPackageMap();
+  if (String(tabId) in packages) {
+    delete packages[String(tabId)];
+    await setPackageMap(packages);
   }
 }
 
@@ -185,11 +218,12 @@ export async function cleanupExpired(now = Date.now()): Promise<void> {
   for (const tabId of expiredTabs) delete pending[tabId];
   if (expiredTabs.length) {
     await setMap(PENDING_KEY, pending);
-    for (const key of [PACKAGE_KEY, VIEW_KEY]) {
-      const map = await getMap<unknown>(key);
-      for (const tabId of expiredTabs) delete map[tabId];
-      await setMap(key, map);
-    }
+    const views = await getMap<unknown>(VIEW_KEY);
+    for (const tabId of expiredTabs) delete views[tabId];
+    await setMap(VIEW_KEY, views);
+    const packages = await getPackageMap();
+    for (const tabId of expiredTabs) delete packages[tabId];
+    await setPackageMap(packages);
   }
   const active = await getActive();
   if (active && active.expiresAt <= now) await chrome.storage.local.remove(ACTIVE_KEY);

@@ -80,10 +80,22 @@ const KEYWORD_RULES: { key: CanonicalField; pattern: RegExp; confidence: number 
   { key: "address", pattern: /\b(street address|address line|mailing address|\baddress\b)\b/i, confidence: 0.85 },
   { key: "current_company", pattern: /\b(current (?:employer|company)|company name)\b/i, confidence: 0.85 },
   { key: "current_title", pattern: /\b(current (?:title|role|position)|job title)\b/i, confidence: 0.83 },
+  { key: "education_school", pattern: /^(?:school|school name|institution|university|college)\s*\*?$/i, confidence: 0.97 },
+  { key: "contact_current_employer", pattern: /\bmay we contact your current employer\b/i, confidence: 0.98 },
+  { key: "essential_functions_with_accommodation", pattern: /\bperform (?:these|the) essential functions\b.*\breasonable accommodation\b/i, confidence: 0.98 },
+  { key: "employment_history_confirmation", pattern: /\benter your relevant employment\b.*\badd another employment\b/i, confidence: 0.98 },
   { key: "salary_expectation", pattern: /\b(salary expectation|desired (?:salary|compensation)|expected (?:salary|pay))\b/i, confidence: 0.85 },
   { key: "available_start_date", pattern: /\b(start date|available (?:start|to start)|availability|earliest start)\b/i, confidence: 0.83 },
   { key: "years_of_experience", pattern: /\byears? (?:of )?experience\b/i, confidence: 0.85 },
-  { key: "willing_to_relocate", pattern: /\brelocat/i, confidence: 0.82 },
+  { key: "willing_to_relocate", pattern: /\b(?:local or willing to relocate|willing to relocate|open to relocation|relocat(?:e|ion))\b/i, confidence: 0.97 },
+  { key: "education_degree", pattern: /\b(?:highest )?degree(?: type)?\b/i, confidence: 0.97 },
+  { key: "education_major", pattern: /\b(?:discipline|major|field of study)\b/i, confidence: 0.97 },
+  {
+    key: "education_end_year",
+    pattern: /\b(?:end|graduation|graduate(?:d)?)\s*(?:date\s*)?year\b|\bwhat year did you graduate\b/i,
+    confidence: 0.98
+  },
+  { key: "education_gpa", pattern: /\b(?:major |cumulative )?gpa\b|grade point average/i, confidence: 0.98 },
   { key: "preferred_workplace", pattern: /\b(remote|on-?site|hybrid|work location preference|workplace preference)\b/i, confidence: 0.7 },
   // Sponsorship "now" vs "future" are logically different questions and are
   // NEVER collapsed into one answer (see canonical.py VERIFICATION_REQUIRED_KEYS
@@ -109,7 +121,7 @@ const KEYWORD_RULES: { key: CanonicalField; pattern: RegExp; confidence: number 
   },
   { key: "work_authorization_us", pattern: /\b(authori[sz]ed to work|work authori[sz]ation|legally authori[sz]ed|right to work)\b/i, confidence: 0.85 },
   { key: "referral_source", pattern: /\b(how did you (?:hear|find out)|where did you hear|referral source|how did you learn)\b/i, confidence: 0.87 },
-  { key: "previously_employed", pattern: /\b(previously (?:worked|(?:been )?employed)|former(?:ly)? employee|worked (?:here|at this company) before)\b/i, confidence: 0.87 },
+  { key: "previously_employed", pattern: /\b(previously (?:worked|(?:been )?employed)|have you been employed by|former(?:ly)? employee|worked (?:here|at this company) before)\b/i, confidence: 0.93 },
   { key: "relatives_employed", pattern: /\b(relatives?|family member).{0,20}(?:work|employed)|(?:work|employed).{0,20}relatives?\b/i, confidence: 0.83 },
   { key: "previously_interviewed", pattern: /\b(previously interviewed|interviewed (?:here|with us) before|prior interview)\b/i, confidence: 0.83 },
   { key: "custom_motivation", pattern: /\b(why (?:do you )?want|why (?:are you )?interested|why (?:this|our) (?:role|company)|what interests you)\b/i, confidence: 0.8 },
@@ -122,6 +134,19 @@ export function classifyField(field: DiscoveredField): Classification {
   const primaryText = [field.name, field.id, field.ariaLabel, field.label, field.placeholder]
     .filter(Boolean)
     .join(" ");
+  const accessiblePrompt = (field.label || field.ariaLabel || field.placeholder || "").trim();
+
+  // Employers commonly shorten the standard motivation question to just
+  // “Why Anthropic?” / “Why OpenAI?”. Keep this deliberately narrow so
+  // behavioural prompts such as “Why did you leave?” remain unresolved.
+  if (
+    /^\s*why\s+(?!did\b|were\b|was\b|have\b|do\b|are\b|would\b|should\b|is\b|has\b|does\b|will\b|can\b|could\b)[a-z0-9][a-z0-9&.'’+\- ]{1,80}\??\s*\*?\s*$/i.test(accessiblePrompt)
+  ) {
+    return {
+      canonicalKey: "custom_motivation", confidence: 0.96, source: "label", sensitive: false,
+      explanation: "Short company-specific motivation question."
+    };
+  }
 
   // Greenhouse labels its phone-prefix dropdown simply "Country". Identify it
   // from the small shared row that also contains the Phone control; a standalone
@@ -133,12 +158,25 @@ export function classifyField(field: DiscoveredField): Classification {
     };
   }
 
+  // Many custom career portals label the single legal-name control only
+  // "Name". The broader keyword rule intentionally avoids that word because
+  // nearby text can contain "company name"; an exact accessible label is safe
+  // and maps to the already-saved full_name profile fact.
+  if (/^\s*name\s*\*?\s*$/i.test(field.label || field.ariaLabel || field.placeholder)) {
+    return {
+      canonicalKey: "full_name", confidence: 0.99, source: "label", sensitive: false,
+      explanation: "Exact standalone full-name field."
+    };
+  }
+
   // Exact high-consequence questions must be classified from the control's own
   // accessible name, before nearby/help text can introduce overlapping words.
   // Greenhouse's sponsorship prompt itself contains "work authorization", so a
   // generic combined-text pass alone can otherwise map the adjacent controls to
   // the same key.
-  if (/\bare you (?:currently )?legally authori[sz]ed to work\b|\blegally authori[sz]ed to work in (?:the )?country\b/i.test(primaryText)) {
+  if (
+    /\bare you (?:currently )?(?:legally )?authori[sz]ed to work(?: in (?:the )?united states)?\b|\blegally authori[sz]ed to work in (?:the )?country\b/i.test(primaryText)
+  ) {
     return {
       canonicalKey: "work_authorization_us", confidence: 0.98, source: "label", sensitive: false,
       explanation: "Exact legal work-authorization question."
@@ -156,13 +194,49 @@ export function classifyField(field: DiscoveredField): Classification {
       explanation: "Exact city/location field."
     };
   }
+  if (/^\s*(?:phone\s+)?extension\s*\*?\s*$/i.test(field.label || field.ariaLabel || field.placeholder)) {
+    return {
+      canonicalKey: "phone_extension", confidence: 0.99, source: "label", sensitive: false,
+      explanation: "Exact phone-extension field; never receives the phone number."
+    };
+  }
+  if (/^\s*work authori[sz]ation\s*\*?\s*$/i.test(field.label || field.ariaLabel || field.placeholder)) {
+    return {
+      canonicalKey: "work_authorization_us", confidence: 0.98, source: "label", sensitive: false,
+      explanation: "Exact work-authorization field."
+    };
+  }
+  if (
+    /\bi certify that the facts set forth in (?:this|the) application for employment\b/i.test(primaryText) &&
+    /\b(?:full name|electronic signature|signify your electronic signature)\b/i.test(text)
+  ) {
+    return {
+      canonicalKey: "electronic_signature", confidence: 0.99, source: "deterministic", sensitive: false,
+      explanation: "Electronic-signature field explicitly authorized with the user's confirmed full name."
+    };
+  }
+  if (
+    field.inputType === "password" &&
+    /\b(?:verify|confirm|re-?type|repeat)\b.*\bpassword\b|\bpassword\b.*\b(?:verify|confirm|again)\b/i.test(primaryText)
+  ) {
+    return {
+      canonicalKey: "application_account_password_confirm", confidence: 0.99, source: "label", sensitive: true,
+      explanation: "Password confirmation field for ATS account creation."
+    };
+  }
+  if (field.inputType === "password" && /\bpassword\b/i.test(primaryText)) {
+    return {
+      canonicalKey: "application_account_password", confidence: 0.99, source: "label", sensitive: true,
+      explanation: "Password field for ATS account creation."
+    };
+  }
 
   // A candidate/data-privacy acknowledgement is a narrow consent the user has
   // explicitly asked JobPilot to accept while applying. Recognize it before
   // the generic `acknowledge` legal-attestation detector, but do not broaden
   // this to employment, conflict, originality, or AI-use attestations.
   if (
-    /\b(?:candidate|applicant|data)?\s*privacy\s+(?:policy|notice|statement)\b/i.test(text) &&
+    /\b(?:candidate|applicant|data)?\s*privacy\s+(?:policy|notice|statement)\b|\bterms (?:and conditions|of (?:use|service))\b/i.test(text) &&
     !/\b(?:artificial intelligence|\bai\b|original work|non-?compete|non-?solicitation|previously employed|worked for)\b/i.test(text)
   ) {
     return {
@@ -185,6 +259,14 @@ export function classifyField(field: DiscoveredField): Classification {
 
   // 2. File inputs → resume / cover letter.
   if (field.control === "file") {
+    if (/\bundergraduate\b.*\btranscript\b|\btranscript\b.*\bundergraduate\b/i.test(text)) {
+      return { canonicalKey: "undergraduate_transcript_upload", confidence: 0.99, source: "deterministic", sensitive: false,
+        explanation: "File input for an undergraduate transcript." };
+    }
+    if (/\bgraduate\b.*\btranscript\b|\btranscript\b.*\bgraduate\b/i.test(text)) {
+      return { canonicalKey: "graduate_transcript_upload", confidence: 0.99, source: "deterministic", sensitive: false,
+        explanation: "File input for a graduate transcript." };
+    }
     if (/cover.?letter/i.test(text)) {
       return { canonicalKey: "cover_letter_upload", confidence: 0.95, source: "deterministic", sensitive: false,
         explanation: "File input labeled cover letter." };
@@ -259,6 +341,12 @@ export function buildMappings(fields: DiscoveredField[], session: ApplicationSes
       mappings.push(mapping(field, c, { safeToAutoFill: true, requiresReview: false }));
       continue;
     }
+    if (c.canonicalKey === "undergraduate_transcript_upload" || c.canonicalKey === "graduate_transcript_upload") {
+      // Academic records are not generated documents. Keep the upload under
+      // the user's control and clearly identify which file the employer wants.
+      mappings.push(mapping(field, c, { safeToAutoFill: false, requiresReview: field.required }));
+      continue;
+    }
     if (c.canonicalKey === "privacy_policy_acknowledgement") {
       // The dropdown adapter still verifies that the control exposes exactly
       // one substantive acknowledgement option before selecting it.
@@ -266,12 +354,24 @@ export function buildMappings(fields: DiscoveredField[], session: ApplicationSes
       continue;
     }
     if (CUSTOM_RESPONSE_FIELDS.has(c.canonicalKey)) {
-      // Written responses are suggested (AI-drafted) and always reviewed.
-      mappings.push(mapping(field, c, { safeToAutoFill: false, requiresReview: true }));
+      // A company/job/profile-grounded draft is prepared by the backend. Put
+      // it into the form so the user can edit it in context, but always keep it
+      // in review and never treat it as a reusable profile fact.
+      const answer = answers.get(c.canonicalKey);
+      mappings.push(mapping(field, c, {
+        safeToAutoFill: Boolean(answer?.value),
+        requiresReview: true
+      }));
       continue;
     }
     const answer = answers.get(c.canonicalKey);
     if (!answer || !answer.value) {
+      if (c.canonicalKey === "phone_extension") {
+        // An extension is not the phone number. Leave an unanswered optional
+        // extension blank instead of flagging it or copying the full number.
+        mappings.push(mapping(field, c, { safeToAutoFill: false, requiresReview: field.required }));
+        continue;
+      }
       if (c.canonicalKey === "referral_source") {
         // User-approved default. A saved company-scoped answer (including a
         // referral) always wins above; this sentinel only matches an employer

@@ -15,9 +15,13 @@ import {
   aliasMatches,
   binaryAnswerMatches,
   companyCareersSourceMatches,
+  closestGpaOption,
   dialCodeMatches,
+  gpaOptionMatches,
+  graduationYearOptionMatches,
   locationOptionMatches,
   normalizeForMatch,
+  phoneCountryOptionMatches,
   singletonPrivacyAcknowledgementMatches,
   singletonRequiredAffirmationMatches
 } from "../aliases";
@@ -81,6 +85,7 @@ export interface DropdownFillOptions {
   values: string[];
   /** Optional query that reveals remote/search-only options. */
   searchValue?: string;
+  matchMode?: "graduation_year" | "gpa";
   /** Open the control purely to READ its options — an explicit user action in
    * the review widget. Never set during an autofill run: opening a menu we
    * cannot answer leaves the employer page visibly disturbed, which is exactly
@@ -214,13 +219,13 @@ async function attemptFill(
         available = await adapter.getOptions(field, reopened.listbox);
       }
 
-      let option = matchOption(available, value);
+      let option = matchOption(available, value, opts.matchMode);
 
       // Searchable control: type the exact label to reveal a filtered option.
       if (!option && useKeyboard) {
         typeSearch(field, adapter, opts.searchValue ?? value);
         available = await adapter.getOptions(field, null);
-        option = matchOption(available, value);
+        option = matchOption(available, value, opts.matchMode);
       }
       if (!option) {
         lastFailure = "OPTION_NOT_AVAILABLE";
@@ -241,6 +246,30 @@ async function attemptFill(
       if (await adapter.verify(field, option)) {
         rec.add("SELECTION_VERIFIED");
         verified.push(option.label);
+      } else if (value === "__jobpilot_company_careers_page__") {
+        // Workday source pickers are hierarchical. Clicking "Career Website"
+        // can open a second menu rather than commit a value. Only continue when
+        // that submenu exposes an explicit company/careers-site leaf — never a
+        // first-item fallback.
+        await delay(80);
+        const nested = await adapter.getOptions(field, null);
+        const leaf = nested.find((candidate) =>
+          candidate.element !== option.element &&
+          !candidate.disabled &&
+          isElementVisible(candidate.element) &&
+          /^(?:company (?:website|careers?(?: page| site)?)|career website|company career site)$/i.test(candidate.label.trim())
+        );
+        if (leaf) {
+          const leafSelected = await adapter.select(field, leaf);
+          if (leafSelected.ok && await adapter.verify(field, leaf)) {
+            rec.add("SELECTION_VERIFIED");
+            verified.push(leaf.label);
+          } else {
+            lastFailure = "DROPDOWN_VERIFICATION_FAILED";
+          }
+        } else {
+          lastFailure = "DROPDOWN_VERIFICATION_FAILED";
+        }
       } else {
         lastFailure = "DROPDOWN_VERIFICATION_FAILED";
       }
@@ -322,12 +351,22 @@ function typeSearch(field: DiscoveredField, adapter: DropdownAdapter, text: stri
 
 /** Exact normalized match first, then the CONTROLLED alias table. Never a broad
  * fuzzy match, and never "just take the first option". */
-function matchOption(options: DropdownOption[], value: string): DropdownOption | null {
+function matchOption(
+  options: DropdownOption[],
+  value: string,
+  matchMode?: "graduation_year" | "gpa"
+): DropdownOption | null {
   const usable = options.filter((o) => !o.disabled && isElementVisible(o.element));
   const substantive = usable.filter((o) => !/^(?:select|choose|please select)(?:\s+an?\s+option)?(?:\.{3}|…)?$/i.test(o.label.trim()));
   const target = normalizeForMatch(value);
   return (
     usable.find((o) => o.normalizedLabel === target) ??
+    (matchMode === "graduation_year"
+      ? substantive.find((o) => graduationYearOptionMatches(o.label, value))
+      : undefined) ??
+    (matchMode === "gpa"
+      ? substantive.find((o) => gpaOptionMatches(o.label, value)) ?? closestGpaOption(substantive, value)
+      : undefined) ??
     substantive.find((o) => companyCareersSourceMatches(o.label, value)) ??
     substantive.find((o) => singletonPrivacyAcknowledgementMatches(o.label, value, substantive.map((item) => item.label))) ??
     substantive.find((o) => singletonRequiredAffirmationMatches(o.label, value, substantive.map((item) => item.label))) ??
@@ -336,6 +375,7 @@ function matchOption(options: DropdownOption[], value: string): DropdownOption |
     // (`authorized_us` -> "Yes, I am currently legally authorized…").
     usable.find((o) => binaryAnswerMatches(o.label, value)) ??
     usable.find((o) => locationOptionMatches(o.label, value)) ??
+    usable.find((o) => phoneCountryOptionMatches(o.label, value)) ??
     // Dial codes only ("+1" -> "United States (+1)"); see dialCodeMatches.
     usable.find((o) => dialCodeMatches(o.label, value)) ??
     null

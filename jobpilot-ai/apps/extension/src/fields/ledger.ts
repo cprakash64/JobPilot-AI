@@ -168,6 +168,8 @@ export function buildLedger(
     seen.add(field.uid);
     const result = resultByUid.get(field.uid);
     const m = meta(field);
+    const question = attachmentQuestion(m.canonicalKey)
+      || field.label || field.ariaLabel || field.placeholder || field.name || m.canonicalKey || "This question";
     const { status, reasonCode, verified } = statusFromResult(field, result);
     entries.push({
       uid: field.uid,
@@ -187,12 +189,18 @@ export function buildLedger(
       reasonCode,
       fillSource: verified ? m.fillSource : null,
       verified,
-      question: field.label || field.ariaLabel || field.placeholder || field.name || m.canonicalKey || "This question",
+      question,
       reusable: m.reusable,
       defaultScope: m.defaultScope
     });
   }
   return entries;
+}
+
+function attachmentQuestion(key: string | null): string {
+  if (key === "undergraduate_transcript_upload") return "Undergraduate transcript";
+  if (key === "graduate_transcript_upload") return "Graduate transcript";
+  return "";
 }
 
 /** Merge a fresh scan's entries into the durable ledger. A re-render only
@@ -259,4 +267,3 @@ export function ledgerInvariantHolds(entries: LedgerEntry[]): boolean {
   const sum = Object.values(counts).reduce((a, b) => a + b, 0);
   return sum === entries.length;
 }
-
