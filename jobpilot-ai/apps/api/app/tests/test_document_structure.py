@@ -3,10 +3,12 @@
 import io
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from docx import Document
 from fastapi.testclient import TestClient
+from pypdf import PdfReader
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -131,7 +133,74 @@ def test_resume_docx_export_is_clean(client: TestClient) -> None:
     assert "Chandra Pandey" in text
     assert "#" not in text and "**" not in text
     # Standard ATS section headings present.
-    assert "Professional Experience" in text
+    assert "PROFESSIONAL EXPERIENCE" in text
+    section_indexes = [
+        index
+        for index, paragraph in enumerate(document.paragraphs)
+        if paragraph.text in {
+            "PROFESSIONAL SUMMARY",
+            "CORE SKILLS",
+            "PROFESSIONAL EXPERIENCE",
+            "SELECTED PROJECTS",
+            "EDUCATION",
+            "AWARDS & CERTIFICATIONS",
+        }
+    ]
+    assert len(section_indexes) >= 4
+    # Every section boundary uses real paragraph spacing rather than blank
+    # lines, and every heading has the same understated rule as the PDF.
+    for index in section_indexes:
+        assert document.paragraphs[index]._p.xpath("./w:pPr/w:pBdr/w:bottom")
+    for index in section_indexes[1:]:
+        after = document.paragraphs[index - 1].paragraph_format.space_after
+        assert after is not None and after.pt >= 6
+
+
+def test_resume_pdf_export_is_structured_selectable_and_ats_safe(client: TestClient) -> None:
+    headers, job_id = setup(client)
+    doc_id = client.post(f"/jobs/{job_id}/generate-resume", headers=headers).json()["document_id"]
+    response = client.get(f"/jobs/documents/{doc_id}/download/pdf", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    reader = PdfReader(io.BytesIO(response.content))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    assert len(reader.pages) == 1
+    assert "CHANDRA PANDEY" in text
+    assert "PROFESSIONAL EXPERIENCE" in text
+    assert "CORE SKILLS" in text
+    assert "#" not in text and "**" not in text
+
+
+def test_legacy_resume_export_uses_the_same_formatted_pdf(client: TestClient) -> None:
+    """Regression: the compatibility endpoint must never dump Python dicts."""
+    headers, job_id = setup(client)
+    generated = client.post(f"/jobs/{job_id}/generate-resume", headers=headers)
+    assert generated.status_code == 200
+    doc_id = generated.json()["document_id"]
+
+    # Reproduce the shape stored by the former generator: header.name and flat
+    # skills. The compatibility exporter still has to render it professionally.
+    db = next(app.dependency_overrides[get_db]())
+    record = db.get(E.GeneratedDocument, doc_id)
+    legacy = dict(record.content)
+    legacy["header"] = {**legacy["header"], "name": legacy["header"]["full_name"]}
+    legacy["header"].pop("full_name")
+    legacy["skills"] = [item for group in legacy["skills"] for item in group["items"]]
+    record.content = legacy
+    db.commit()
+    db.close()
+
+    exported = client.post(f"/jobs/documents/{doc_id}/export/pdf", headers=headers)
+    assert exported.status_code == 200
+    path = Path(exported.json()["file_path"])
+    reader = PdfReader(str(path))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    assert reader.metadata.title == "Chandra Pandey"
+    assert "PROFESSIONAL SUMMARY" in text
+    assert "CORE SKILLS" in text
+    assert "{'category':" not in text
+    assert "{'company':" not in text
 
 
 # --------------------------------------------------------------------------- #

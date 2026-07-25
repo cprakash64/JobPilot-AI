@@ -34,6 +34,13 @@ class ImportProfileTextRequest(BaseModel):
 
 
 class BasicInfoDraft(BaseModel):
+    # Structured name parts as CONFIRMED by the user in the import review UI.
+    # The parser only ever produces ``full_name``; the split is proposed to the
+    # user there and comes back here as their answer, which is why applying it
+    # is allowed to set ``name_confirmed``.
+    first_name: str = ""
+    middle_name: str = ""
+    last_name: str = ""
     full_name: str = ""
     headline: str = ""
     phone: str = ""

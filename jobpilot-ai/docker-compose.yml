@@ -1,3 +1,14 @@
+# Local development stack.
+#
+# Production differences that are deliberate here (see docs/DEPLOYMENT.md):
+#   * RUN_MIGRATIONS_ON_STARTUP is true for convenience. In production it is
+#     false and `alembic upgrade head` runs as one explicit release step, so N
+#     replicas do not each race to migrate the same database.
+#   * APP_ENV=development keeps the development defaults usable. Setting
+#     APP_ENV=production activates app.core.config_validation, which refuses to
+#     start with the default SECRET_KEY or the database password below.
+#   * The credentials below are development-only defaults and are intentionally
+#     public. Never reuse them anywhere real.
 services:
   postgres:
     image: postgres:16-alpine
@@ -31,6 +42,7 @@ services:
     env_file:
       - .env
     environment:
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://jobpilot:jobpilot_dev_password@postgres:5432/jobpilot}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
@@ -45,9 +57,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Liveness, NOT readiness. Docker restarts a container that fails its
+    # healthcheck, so gating this on the database would restart healthy API
+    # containers during a database blip. Readiness (/readyz) is for a load
+    # balancer, not a restart policy — in Kubernetes use /healthz for
+    # livenessProbe and /readyz for readinessProbe.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     command: sh /app/scripts/start-api.sh
 
-  # Background worker: runs post-ingest fit scoring and daily-ingestion tasks.
+  # Background worker: runs post-ingest fit scoring and recurring-ingestion tasks.
   # Separate from the API so scoring never blocks request handling.
   worker:
     build:
@@ -55,16 +78,29 @@ services:
     env_file:
       - .env
     environment:
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://jobpilot:jobpilot_dev_password@postgres:5432/jobpilot}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Explicit: only the API image's start script may migrate, and only in
+      # development. A worker that migrates races the API and every other worker.
+      RUN_MIGRATIONS_ON_STARTUP: "false"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.tasks.celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # SIGTERM lets Celery finish the in-flight task before exiting; the default
+    # 10s grace is too short for a scoring batch.
+    stop_grace_period: 30s
     command: celery -A app.workers.tasks.celery_app worker --loglevel=info --concurrency=2
 
-  # Beat scheduler: a SINGLE service that triggers the daily ingestion on the
+  # Beat scheduler: a SINGLE service that triggers recurring ingestion on the
   # configured cron. Never run inside the API (multiple replicas would duplicate
   # runs); the ingestion itself is additionally guarded by a distributed lock.
   scheduler:
@@ -73,8 +109,10 @@ services:
     env_file:
       - .env
     environment:
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://jobpilot:jobpilot_dev_password@postgres:5432/jobpilot}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RUN_MIGRATIONS_ON_STARTUP: "false"
       JOB_INGESTION_ENABLED: ${JOB_INGESTION_ENABLED:-true}
       JOB_INGESTION_SCHEDULE: ${JOB_INGESTION_SCHEDULE:-0 6 * * *}
       JOB_INGESTION_TIMEZONE: ${JOB_INGESTION_TIMEZONE:-UTC}
@@ -83,6 +121,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # The image's HEALTHCHECK curls /healthz, which only the API serves — beat
+    # would be permanently "unhealthy". Beat has no useful liveness endpoint and
+    # nothing depends on it being healthy, so the inherited check is disabled
+    # rather than faked.
+    healthcheck:
+      disable: true
+    stop_grace_period: 15s
     command: celery -A app.workers.tasks.celery_app beat --loglevel=info
 
   web:
@@ -92,8 +137,11 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8000
     ports:
       - "3000:3000"
+    # Wait for the API to be serving before starting. No cycle: web -> api ->
+    # {postgres, redis}, and nothing depends on web.
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   postgres_data:

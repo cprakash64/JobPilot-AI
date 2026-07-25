@@ -2141,10 +2141,156 @@
       "priority": 6,
       "verified_at": "2026-07-09",
       "enabled": true
+    },
+    {
+      "company": "ServiceNow",
+      "company_id": "ServiceNow",
+      "tags": ["ai", "ml", "new_grad_possible", "software", "us"],
+      "priority": 8,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Syngenta Group",
+      "company_id": "SyngentaGroup",
+      "tags": ["ai", "ml", "new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Bosch",
+      "company_id": "BoschGroup",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "NBCUniversal",
+      "company_id": "NBCUniversal3",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Ubisoft",
+      "company_id": "Ubisoft2",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Sportradar",
+      "company_id": "Sportradar",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "IFS",
+      "company_id": "IFS1",
+      "tags": ["ai", "ml", "new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Nearmap",
+      "company_id": "Nearmap",
+      "tags": ["ai", "ml", "new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Experian",
+      "company_id": "Experian",
+      "tags": ["fintech", "new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "NielsenIQ",
+      "company_id": "NielsenIQ",
+      "tags": ["ai", "new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "AECOM",
+      "company_id": "AECOM2",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 5,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "H&M Group",
+      "company_id": "HMGroup",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 5,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Red Bull",
+      "company_id": "RedBull",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 5,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Western Digital",
+      "company_id": "WesternDigital",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 6,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "Turner & Townsend",
+      "company_id": "TurnerTownsend",
+      "tags": ["new_grad_possible", "software", "us"],
+      "priority": 5,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "ProSidian Consulting",
+      "company_id": "prosidianconsulting",
+      "tags": ["ai", "new_grad_possible", "software", "us"],
+      "priority": 5,
+      "verified_at": "2026-07-20",
+      "enabled": true
     }
   ],
   "recruitee": [],
   "workable": [],
   "teamtailor": [],
-  "breezy": []
+  "breezy": [],
+  "simplifyjobs": [
+    {
+      "company": "SimplifyJobs New Grad",
+      "repository": "New-Grad-Positions",
+      "tags": ["ai", "ml", "new_grad_possible", "remote", "software", "us"],
+      "priority": 4,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    },
+    {
+      "company": "SimplifyJobs Internships",
+      "repository": "Summer2026-Internships",
+      "tags": ["ai", "ml", "new_grad_possible", "remote", "software", "us"],
+      "priority": 4,
+      "verified_at": "2026-07-20",
+      "enabled": true
+    }
+  ]
 }

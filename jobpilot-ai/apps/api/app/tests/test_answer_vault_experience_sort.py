@@ -20,9 +20,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.applications.answer_vault_service import (
+    _latest_education_answers,
     _normalize_experience_date,
+    _previously_employed_answer,
     _recent_experiences,
     build_safe_answers,
+    derive_profile_answers,
 )
 from app.db.base import Base
 from app.models import entities as E
@@ -42,7 +45,7 @@ def db() -> Generator[Session, None, None]:
         engine.dispose()
 
 
-def _user(db: Session, email: str = "sortbug@example.com") -> E.User:
+def _user(db: Session, email: str = "sortbug@mailbox.test-domain.co") -> E.User:
     user = E.User(email=email, hashed_password="x")
     db.add(user)
     db.flush()
@@ -56,6 +59,42 @@ def _exp(db: Session, user_id: int, *, company: str, title: str = "Engineer",
         start_date=start, end_date=end, currently_working=current,
         bullets=[], technologies=[], measurable_impact=[],
     ))
+
+
+def test_latest_education_exposes_granular_autofill_answers():
+    rows = [
+        E.Education(
+            user_id=1,
+            school="Older University",
+            degree="Bachelor of Science",
+            major="Computer Science",
+            end_date=date(2022, 5, 1),
+            gpa="8.5",
+            gpa_scale="10.0",
+            honors=[],
+            coursework=[],
+        ),
+        E.Education(
+            user_id=1,
+            school="Arizona State University",
+            degree="Master of Science",
+            major="Computer Science",
+            end_date=date(2025, 5, 1),
+            gpa="3.82",
+            gpa_scale="4.0",
+            honors=[],
+            coursework=[],
+        ),
+    ]
+
+    answers = {item["canonical_key"]: item for item in _latest_education_answers(rows)}
+
+    assert answers["education_school"]["value"] == "Arizona State University"
+    assert answers["education_degree"]["value"] == "Master of Science"
+    assert answers["education_major"]["value"] == "Computer Science"
+    assert answers["education_end_year"]["value"] == "2025"
+    assert answers["education_gpa"]["value"] == "3.82"
+    assert all(item["verified"] and not item["requires_review"] for item in answers.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -143,3 +182,25 @@ def test_build_safe_answers_completes_with_mixed_dates(db: Session):
     assert isinstance(unresolved, list)
     keys = {a["canonical_key"] for a in safe}
     assert "email" in keys
+
+
+def test_explicit_global_application_preferences_are_derived_from_profile():
+    answers = {
+        answer["canonical_key"]: answer["value"]
+        for answer in derive_profile_answers(
+            "candidate@mailbox.test-domain.co",
+            {"full_name": "Chandra Prakash Pandey"},
+            [],
+        )
+    }
+    assert answers["contact_current_employer"] == "Yes"
+    assert answers["essential_functions_with_accommodation"] == "Yes"
+    assert answers["employment_history_confirmation"] == "Yes"
+    assert answers["electronic_signature"] == "Chandra Prakash Pandey"
+
+
+def test_prior_employment_question_uses_the_explicit_no_default():
+    answer = _previously_employed_answer("Lyft")
+    assert answer["value"] == "No"
+    assert answer["source"] == "user_default"
+    assert _previously_employed_answer(None) is None

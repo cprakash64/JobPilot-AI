@@ -51,6 +51,44 @@ async def get_json(
     return None
 
 
+async def get_text(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float | None = None,
+    retries: int = 1,
+    max_bytes: int = 1024 * 1024,
+) -> str:
+    """GET a bounded public text resource with the connector retry policy.
+
+    This helper is only for connector-owned, fixed public hosts. URLs derived
+    from user input must use ``app.jobs.safe_fetch`` instead.
+    """
+    timeout = timeout or settings.job_discovery_timeout_seconds
+    last_exc: Exception | None = None
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for attempt in range(retries + 1):
+            try:
+                response = await client.get(url, headers=headers)
+                if response.status_code in _TRANSIENT_STATUS and attempt < retries:
+                    await asyncio.sleep(_backoff(attempt))
+                    continue
+                response.raise_for_status()
+                content = response.content
+                if len(content) > max_bytes:
+                    raise ValueError("response exceeds connector text size limit")
+                return content.decode(response.encoding or "utf-8", errors="replace")
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                last_exc = exc
+                if attempt < retries and _is_transient(exc):
+                    await asyncio.sleep(_backoff(attempt))
+                    continue
+                raise
+    if last_exc:  # pragma: no cover - defensive
+        raise last_exc
+    return ""
+
+
 def _is_transient(exc: Exception) -> bool:
     if isinstance(exc, httpx.TransportError):
         return True

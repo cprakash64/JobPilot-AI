@@ -1,16 +1,67 @@
+# --- Secrets -------------------------------------------------------------- #
+# .env.example is the only env file that may ever be committed.
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+!**/public*.key
+secrets.json
+.secrets/
+
+# --- Local tooling state --------------------------------------------------- #
+# Machine-specific command allowlist; not portable between developers.
+.claude/settings.local.json
+
+# --- Dependencies / virtualenvs -------------------------------------------- #
 node_modules/
+.venv/
+venv/
+env/
+
+# --- Build output ---------------------------------------------------------- #
 .next/
 dist/
+build/
+*.tsbuildinfo
+apps/extension/jobpilot-extension.zip
+apps/extension/e2e/bundle/
+
+# --- Test / coverage artifacts --------------------------------------------- #
 coverage/
+coverage.xml
+htmlcov/
+.coverage
 .pytest_cache/
+test-results/
+playwright-report/
+apps/extension/e2e/smoke.png
+output/
+
+# --- Caches ---------------------------------------------------------------- #
 __pycache__/
 *.pyc
-*.tsbuildinfo
 .mypy_cache/
 .ruff_cache/
+
+# --- Runtime data ---------------------------------------------------------- #
 uploads/
 generated/
+
+# --- Database dumps and local databases ------------------------------------ #
+# A dump contains real user data; it must never be committed.
+*.sql
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+!apps/api/alembic/**/*.sql
+
+# --- OS noise -------------------------------------------------------------- #
 .DS_Store
+*.log
+
+# --- Accidental editor/finder duplicates ----------------------------------- #
+# Finder's "file 2.py" copies caused a stale duplicate module to linger.
+* 2.*
+* copy.*

@@ -163,9 +163,9 @@ def _award_entry(item: Any) -> dict[str, Any]:
 def _dates(start: Any, end: Any) -> str:
     start_s, end_s = _date_str(start), _date_str(end)
     if start_s and end_s:
-        return f"{start_s} – {end_s}"
+        return f"{start_s} - {end_s}"
     if start_s and not end_s:
-        return f"{start_s} – Present"
+        return f"{start_s} - Present"
     return end_s or start_s or ""
 
 

@@ -3,23 +3,31 @@
 We never guess an unrelated domain from an ATS slug (that would show the wrong
 brand). A logo is only returned when we can tie the company to a known domain:
 
-  1. a logo URL the ATS itself provided
-  2. an explicit ``logo_url`` in the source catalog entry
-  3. an explicit ``domain`` in the source catalog entry -> derived logo URL
-  4. a curated company -> domain map (well-known employers) -> derived logo URL
-  5. otherwise nothing (the frontend renders an initial-letter avatar)
+  1. a curated official logo override where a site's favicon is not its brand
+  2. a logo URL the ATS itself provided
+  3. an explicit ``logo_url`` in the source catalog entry
+  4. an explicit/verified official domain -> derived logo URL
+  5. a curated company -> domain map (well-known employers) -> derived logo URL
+  6. otherwise nothing (the frontend renders a neutral placeholder)
 
 The derived logo URL uses Google's free, key-less favicon endpoint (Clearbit's
 logo API was sunset, which is why previously-resolved logos silently 404'd and
-every card fell back to an initial). If the favicon 404s the frontend's
-<img onError> falls back to the initial avatar, so a missing or broken logo
-never breaks a card.
+every card fell back to an initial). If the favicon 404s, the frontend's
+<img onError> falls back to the neutral placeholder, so a missing or broken
+logo never breaks a card.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Literal, TypedDict
+from urllib.parse import urlparse
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.entities import CompanyBranding
 
 Confidence = Literal["high", "medium", "low"]
 
@@ -31,7 +39,16 @@ class LogoResolution(TypedDict):
 
 
 # Curated, verified employer -> primary domain map. Only companies we are
-# confident about belong here; an unknown company falls back to an initial.
+# confident about belong here; an unknown company falls through to (a) safe
+# website-metadata discovery when a domain can be verified, or (b) the neutral
+# placeholder — never a guessed domain, never an initial-letter avatar.
+#
+# This list is deliberately broad (not "the five companies from the bug
+# report") — it was built by cross-referencing every company name in
+# sources_config.json against their real, well-known primary domain. New
+# catalog entries should prefer an explicit "domain" field in
+# sources_config.json (see CatalogEntry) over adding here; this dict remains
+# for companies the catalog doesn't carry a domain for yet.
 COMPANY_DOMAINS: dict[str, str] = {
     "openai": "openai.com",
     "deepgram": "deepgram.com",
@@ -52,7 +69,6 @@ COMPANY_DOMAINS: dict[str, str] = {
     "discord": "discord.com",
     "cloudflare": "cloudflare.com",
     "airbnb": "airbnb.com",
-    # Additional well-known employers commonly surfaced by the catalog.
     "affirm": "affirm.com",
     "airtable": "airtable.com",
     "amplitude": "amplitude.com",
@@ -69,29 +85,232 @@ COMPANY_DOMAINS: dict[str, str] = {
     "reddit": "reddit.com",
     "snowflake": "snowflake.com",
     "twilio": "twilio.com",
+    # Expanded to cover the full source catalog (apps/api/app/jobs/sources_config.json).
+    "abnormal security": "abnormalsecurity.com",
+    "airops": "airops.com",
+    "airbyte": "airbyte.com",
+    "angellist": "angellist.com",
+    "angi": "angi.com",
+    "anyscale": "anyscale.com",
+    "assemblyai": "assemblyai.com",
+    "benchling": "benchling.com",
+    "betterment": "betterment.com",
+    "blend": "blend.com",
+    "braze": "braze.com",
+    "builder": "builder.io",
+    "builder.io": "builder.io",
+    "calendly": "calendly.com",
+    "carta": "carta.com",
+    "cerebras": "cerebras.ai",
+    "chainguard": "chainguard.dev",
+    "checkr": "checkr.com",
+    "circleci": "circleci.com",
+    "clickhouse": "clickhouse.com",
+    "clickup": "clickup.com",
+    "cockroachdb": "cockroachlabs.com",
+    "column": "column.com",
+    "confluent": "confluent.io",
+    "contentful": "contentful.com",
+    "coursera": "coursera.org",
+    "customer.io": "customer.io",
+    "cybereason": "cybereason.com",
+    "descript": "descript.com",
+    "drata": "drata.com",
+    "dremio": "dremio.com",
+    "duolingo": "duolingo.com",
+    "elastic": "elastic.co",
+    "elevenlabs": "elevenlabs.io",
+    "faire": "faire.com",
+    "fastly": "fastly.com",
+    "fivetran": "fivetran.com",
+    "flexport": "flexport.com",
+    "greenhouse": "greenhouse.io",
+    "gusto": "gusto.com",
+    "handshake": "joinhandshake.com",
+    "highnote": "highnote.com",
+    "hightouch": "hightouch.com",
+    "huntress": "huntress.com",
+    "imply": "imply.io",
+    "iterable": "iterable.com",
+    "jumpcloud": "jumpcloud.com",
+    "khan academy": "khanacademy.org",
+    "kong": "konghq.com",
+    "lambda": "lambdalabs.com",
+    "langchain": "langchain.com",
+    "launchdarkly": "launchdarkly.com",
+    "lithic": "lithic.com",
+    "llamaindex": "llamaindex.ai",
+    "make": "make.com",
+    "marqeta": "marqeta.com",
+    "mercari": "mercari.com",
+    "mercury": "mercury.com",
+    "miro": "miro.com",
+    "mistral": "mistral.ai",
+    "mixpanel": "mixpanel.com",
+    "modal": "modal.com",
+    "modern treasury": "moderntreasury.com",
+    "monzo": "monzo.com",
+    "neon": "neon.tech",
+    "nerdwallet": "nerdwallet.com",
+    "netlify": "netlify.com",
+    "nuro": "nuro.ai",
+    "offerup": "offerup.com",
+    "okta": "okta.com",
+    "orca": "orca.security",
+    "otter": "otter.ai",
+    "outreach": "outreach.io",
+    "oyster": "oysterhr.com",
+    "pandadoc": "pandadoc.com",
+    "pinecone": "pinecone.io",
+    "pinterest": "pinterest.com",
+    "planetscale": "planetscale.com",
+    "poshmark": "poshmark.com",
+    "postman": "postman.com",
+    "railway": "railway.app",
+    "remote": "remote.com",
+    "render": "render.com",
+    "runway": "runwayml.com",
+    "samsara": "samsara.com",
+    "sanity": "sanity.io",
+    "secureframe": "secureframe.com",
+    "semgrep": "semgrep.dev",
+    "sentry": "sentry.io",
+    "sofi": "sofi.com",
+    "squarespace": "squarespace.com",
+    "starburst": "starburstdata.com",
+    "stockx": "stockx.com",
+    "storyblok": "storyblok.com",
+    "supabase": "supabase.com",
+    "synthesia": "synthesia.io",
+    "sysdig": "sysdig.com",
+    "tailscale": "tailscale.com",
+    "taskrabbit": "taskrabbit.com",
+    "thumbtack": "thumbtack.com",
+    "together ai": "together.ai",
+    "twitch": "twitch.tv",
+    "typeface": "typeface.ai",
+    "udemy": "udemy.com",
+    "unit": "unit.co",
+    "upstart": "upstart.com",
+    "vanta": "vanta.com",
+    "vercel": "vercel.com",
+    "verkada": "verkada.com",
+    "visa": "visa.com",
+    "waymo": "waymo.com",
+    "wealthfront": "wealthfront.com",
+    "weaviate": "weaviate.io",
+    "webflow": "webflow.com",
+    "workato": "workato.com",
+    "writer": "writer.com",
+    "zapier": "zapier.com",
+    "zoox": "zoox.com",
+    "n8n": "n8n.io",
+    # Employers commonly present in the SimplifyJobs new-grad feed. These are
+    # explicit, verified domains rather than guesses from company names.
+    "kayak": "kayak.com",
+    "l3harris": "l3harris.com",
+    "l3harris technologies": "l3harris.com",
+    "globus medical": "globusmedical.com",
+    "the boeing company": "boeing.com",
+    "boeing": "boeing.com",
+    "rtx": "rtx.com",
+    "t rowe price": "troweprice.com",
+    "medtronic": "medtronic.com",
+    "northrop grumman": "northropgrumman.com",
+    "appian": "appian.com",
+    "zello": "zello.com",
+    "moog": "moog.com",
+    "spacex": "spacex.com",
+    "grail": "grail.com",
+    "digicert": "digicert.com",
+    "deloitte": "deloitte.com",
+    "northwell health": "northwell.edu",
+    "general dynamics mission systems": "gdmissionsystems.com",
+    "copart": "copart.com",
+    "schweitzer engineering laboratories": "selinc.com",
+    "virtu financial": "virtu.com",
+    "southwest airlines": "southwest.com",
+    "crackajack digital solutions": "crackajackllc.com",
+    # Public SmartRecruiters catalog employers. Their application URLs share
+    # the SmartRecruiters host, so the employer domain cannot be recovered
+    # from the job URL and must come from verified catalog data.
+    "servicenow": "servicenow.com",
+    "syngenta group": "syngenta.com",
+    "bosch": "bosch.com",
+    "nbcuniversal": "nbcuniversal.com",
+    "ubisoft": "ubisoft.com",
+    "sportradar": "sportradar.com",
+    "ifs": "ifs.com",
+    "nearmap": "nearmap.com",
+    "experian": "experian.com",
+    "nielseniq": "nielseniq.com",
+    "aecom": "aecom.com",
+    "h&m group": "hmgroup.com",
+    "red bull": "redbull.com",
+    "western digital": "westerndigital.com",
+    "turner & townsend": "turnerandtownsend.com",
+    "prosidian consulting": "prosidian.com",
+    # Simplify identifies this employer as "Pogo Technologies, Inc."; suffix
+    # normalization reduces that name to "pogo".
+    "pogo": "joinpogo.com",
 }
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
+
+# Some sites publish no useful favicon. These are verified first-party raster
+# assets from the employer's own domain, not third-party mirrors.
+COMPANY_LOGO_URLS: dict[str, str] = {
+    "crackajack digital solutions": (
+        "https://www.crackajackllc.com/wp-content/uploads/2026/02/logo-3.png"
+    ),
+}
+
+
+def is_untrusted_simplify_logo_url(value: str | None) -> bool:
+    """True for Simplify's mutable third-party image mirror.
+
+    Old code constructed these URLs from UUIDs without checking the profile.
+    That produced visibly wrong logos and left bad bytes in the local cache.
+    """
+    try:
+        parsed = urlparse(value or "")
+    except ValueError:
+        return False
+    return (
+        (parsed.hostname or "").lower() == "storage.googleapis.com"
+        and parsed.path.startswith("/simplify-imgs/")
+    )
 
 
 def resolve_company_logo(
     company_name: str,
     *,
     source_type: str | None = None,  # noqa: ARG001 - reserved for ATS-specific rules
-    application_url: str | None = None,  # noqa: ARG001 - reserved; never slug-guessed
+    application_url: str | None = None,
     catalog_domain: str | None = None,
     catalog_logo_url: str | None = None,
     ats_logo_url: str | None = None,
 ) -> LogoResolution:
     """Best-effort logo/domain for ``company_name``. Never guesses a domain from
     an ATS slug or application URL — only explicit/curated sources are trusted."""
+    known = _known_domain(company_name)
+    official_logo = COMPANY_LOGO_URLS.get(_normalize_company(company_name), "")
+    if official_logo:
+        return {
+            "company_domain": _clean_domain(catalog_domain) or known,
+            "company_logo_url": official_logo,
+            "confidence": "high",
+        }
     if ats_logo_url:
         return {
             "company_domain": _clean_domain(catalog_domain) or _known_domain(company_name),
             "company_logo_url": ats_logo_url,
             "confidence": "high",
         }
-    if catalog_logo_url:
+    if catalog_logo_url and not (
+        source_type == "simplifyjobs"
+        and is_untrusted_simplify_logo_url(catalog_logo_url)
+    ):
         return {
             "company_domain": _clean_domain(catalog_domain) or _known_domain(company_name),
             "company_logo_url": catalog_logo_url,
@@ -99,10 +318,27 @@ def resolve_company_logo(
         }
     catalog = _clean_domain(catalog_domain)
     if catalog:
-        return {"company_domain": catalog, "company_logo_url": logo_url_for_domain(catalog), "confidence": "high"}
-    known = _known_domain(company_name)
+        return {
+            "company_domain": catalog,
+            "company_logo_url": logo_url_for_domain(catalog),
+            "confidence": "high",
+        }
     if known:
-        return {"company_domain": known, "company_logo_url": logo_url_for_domain(known), "confidence": "medium"}
+        return {
+            "company_domain": known,
+            "company_logo_url": logo_url_for_domain(known),
+            "confidence": "medium",
+        }
+    # A direct employer-owned application URL is useful evidence, but shared ATS
+    # hosts (Workday, Greenhouse, Lever, etc.) are deliberately excluded: using
+    # their favicon would show the ATS logo as though it were the employer.
+    direct = _employer_domain_from_application_url(application_url)
+    if direct:
+        return {
+            "company_domain": direct,
+            "company_logo_url": logo_url_for_domain(direct),
+            "confidence": "medium",
+        }
     return {"company_domain": "", "company_logo_url": "", "confidence": "low"}
 
 
@@ -135,3 +371,142 @@ def _clean_domain(domain: str | None) -> str:
     value = re.sub(r"^www\.", "", value)
     value = value.split("/")[0].strip()
     return value if _DOMAIN_RE.match(value) else ""
+
+
+clean_company_domain = _clean_domain
+
+
+_SHARED_JOB_HOSTS = (
+    # Documentation/test placeholders are never evidence of an employer-owned
+    # application host. Treating them as a real company domain made a synthetic
+    # fixture look like successfully resolved production branding.
+    "example.com",
+    "example.org",
+    "example.net",
+    "myworkdayjobs.com",
+    "workday.com",
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "smartrecruiters.com",
+    "workable.com",
+    "breezy.hr",
+    "recruitee.com",
+    "teamtailor.com",
+    "applytojob.com",
+    "simplify.jobs",
+)
+
+
+def _employer_domain_from_application_url(application_url: str | None) -> str:
+    """Return a domain only when the application is hosted by the employer.
+
+    This is intentionally conservative. It improves branding for direct links
+    such as ``jobs.boeing.com`` while refusing shared ATS/aggregator domains.
+    """
+    if not application_url:
+        return ""
+    try:
+        host = (urlparse(application_url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return ""
+    if not host or not _DOMAIN_RE.match(host):
+        return ""
+    if any(host == shared or host.endswith(f".{shared}") for shared in _SHARED_JOB_HOSTS):
+        return ""
+    parts = host.split(".")
+    if len(parts) > 2 and parts[-2:] not in (["co", "uk"], ["com", "au"]):
+        return ".".join(parts[-2:])
+    return host
+
+
+# Public alias — the backfill command and job-ingestion service both need the
+# same normalization the resolver uses internally, so a branding row saved by
+# one is found by the other.
+normalize_company_key = _normalize_company
+
+
+# --------------------------------------------------------------------------- #
+# Persisted resolution: one CompanyBranding row per employer, reused across
+# every job posting from that employer instead of re-resolving per job.
+# --------------------------------------------------------------------------- #
+def get_or_create_company_branding(
+    db: Session,
+    company_name: str,
+    *,
+    catalog_domain: str | None = None,
+    catalog_logo_url: str | None = None,
+    ats_logo_url: str | None = None,
+    application_url: str | None = None,
+    source_type: str | None = None,
+) -> CompanyBranding:
+    """Resolve-once-per-employer. A row already marked ``resolved`` is reused
+    as-is (this is what makes a refreshed batch of jobs from the same company
+    "free" — see task Part 8). A row that previously resolved to "nothing" is
+    NOT retried on every ingest (that would hammer nothing productively); it
+    is retried at most once per day via ``last_verified_at``, or immediately
+    when new ATS/catalog data appears that the last attempt didn't have."""
+    key = _normalize_company(company_name)
+    if not key:
+        key = "unknown"
+    existing = db.scalar(select(CompanyBranding).where(CompanyBranding.normalized_key == key))
+
+    legacy_untrusted = bool(
+        existing is not None and is_untrusted_simplify_logo_url(existing.logo_url)
+    )
+    application_signal = bool(
+        application_url and (existing is None or existing.resolution_status != "resolved")
+    )
+    has_new_signal = bool(ats_logo_url or catalog_domain or catalog_logo_url or application_signal)
+    stale = (
+        existing is not None
+        and existing.resolution_status != "resolved"
+        and _is_stale(existing.last_verified_at)
+    )
+    if (
+        existing is not None
+        and existing.resolution_status == "resolved"
+        and not has_new_signal
+        and not legacy_untrusted
+    ):
+        return existing
+    if existing is not None and not has_new_signal and not stale and not legacy_untrusted:
+        return existing
+
+    resolved = resolve_company_logo(
+        company_name,
+        source_type=source_type,
+        catalog_domain=catalog_domain,
+        catalog_logo_url=catalog_logo_url,
+        ats_logo_url=ats_logo_url,
+        application_url=application_url,
+    )
+    if COMPANY_LOGO_URLS.get(key):
+        source = "curated"
+    elif ats_logo_url:
+        source = "ats"
+    elif catalog_domain or catalog_logo_url:
+        source = "catalog"
+    elif resolved["company_logo_url"]:
+        source = "curated"
+    else:
+        source = "none"
+    now = datetime.now(UTC)
+    if existing is None:
+        existing = CompanyBranding(normalized_key=key, canonical_name=company_name or key)
+        db.add(existing)
+    existing.canonical_name = company_name or existing.canonical_name
+    existing.domain = resolved["company_domain"] or None
+    existing.logo_url = resolved["company_logo_url"] or None
+    existing.source = source
+    existing.resolution_status = "resolved" if resolved["company_logo_url"] else "unresolved"
+    existing.last_verified_at = now
+    db.flush()
+    return existing
+
+
+def _is_stale(last_verified_at: datetime | None, *, hours: int = 24) -> bool:
+    if last_verified_at is None:
+        return True
+    checked = last_verified_at if last_verified_at.tzinfo else last_verified_at.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - checked).total_seconds() > hours * 3600

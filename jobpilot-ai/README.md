@@ -19,10 +19,44 @@ JobPilot AI assists the user. It does not pretend to be the user.
 
 - Frontend: Next.js App Router, TypeScript, Tailwind CSS, React forms.
 - Backend: FastAPI, Pydantic, SQLAlchemy, Alembic, PostgreSQL.
-- Jobs: Greenhouse and Lever public API adapters plus demo source.
+- Jobs: eight public ATS adapters plus attributed SimplifyJobs new-grad and internship feeds.
 - AI: OpenAI provider abstraction with deterministic local fallback.
 - Documents: DOCX and PDF export services.
-- Infrastructure: Docker Compose, Redis, Celery worker scaffold, GitHub Actions CI.
+- Infrastructure: Docker Compose, Redis, Celery `worker` + `scheduler` (beat) services, GitHub Actions CI.
+
+## Automated Ingestion & Fit Scoring
+
+Discovery, ingestion and fit scoring run automatically — no browser session required.
+
+- **Recurring ingestion**: the `scheduler` (Celery beat) service triggers a system-wide
+  run on `JOB_INGESTION_SCHEDULE` (default `0 6 * * *`, once every 24 hours). The run is guarded by a Redis
+  lock (+ Postgres advisory lock) so multiple replicas never ingest concurrently.
+  Per-source failures are isolated; each run is recorded in `ingestion_runs`.
+- **Automatic scoring**: whenever a job is inserted or its score-relevant content
+  changes, scoring is enqueued to the `worker` for every active user. Each
+  `(user, job)` fit score carries an explicit `score_state`
+  (`pending`/`scoring`/`scored`/`failed`/`profile_incomplete`), a `score_version`,
+  and content/profile hashes so work is idempotent and never redundant.
+- **Frontend**: the Jobs page shows "Calculating fit…" while a score settles, prompts
+  to complete the profile when needed, and polls only while pending scores are visible.
+
+Operational commands (run inside the `api` container):
+
+```bash
+# One-off backfill of missing scores (dry-run first)
+python -m app.jobs.backfill_scores --posted-within-days 7 --only-missing --dry-run
+python -m app.jobs.backfill_scores --posted-within-days 7 --only-missing
+
+# Admin ingestion controls
+python -m app.jobs.manage run-all                 # ingest every enabled source now
+python -m app.jobs.manage run-ats greenhouse      # one ATS provider
+python -m app.jobs.manage run-company stripe       # one company slug
+python -m app.jobs.manage validate-registry        # verify sources against live ATS
+python -m app.jobs.manage runs                      # recent ingestion-run history
+```
+
+Recent runs and the scoring backlog are also exposed at `/debug/ingestion-runs` and
+`/debug/scoring-status`.
 
 ## Stable Local Start
 
@@ -30,13 +64,17 @@ The default Docker Compose file is the stable local and production-like path. It
 
 ```bash
 cd /Users/cprakash/Documents/Jobs/Job_Apply/jobpilot-ai
-cp .env.example .env
-docker compose down -v
-docker compose up --build -d --force-recreate
+make dev
 docker compose logs api -f
 ```
 
-`docker compose down -v` deletes local Docker database volumes. Use it only for local development and never for production data.
+If `.env` does not exist yet, copy `.env.example` to `.env` before the first
+start. `make dev` preserves local Docker database volumes and disables optional
+Buildx Git metadata that can stall when this repository is stored in a macOS
+File Provider/iCloud folder.
+
+`make reset-db` deletes local Docker database volumes. Use it only for
+disposable local development data and never for production data.
 
 Open:
 
@@ -191,8 +229,9 @@ Backend:
 
 ```bash
 cd apps/api
-python3 -m compileall app
-pytest
+source .venv/bin/activate
+python -m compileall app
+env APP_ENV=test DEBUG=false python -m pytest
 ```
 
 Frontend:
@@ -204,6 +243,12 @@ npm run typecheck
 npm run build
 npm test
 ```
+
+To run the backend, web, and browser-extension checks together from the
+repository root, use `make test`. It automatically uses `apps/api/.venv` when
+that environment exists and prints the setup command when backend test
+dependencies are missing. The test target also isolates the API from unrelated
+ambient `APP_ENV` and `DEBUG` values exported by shell tooling.
 
 ## Roadmap
 

@@ -1,8 +1,8 @@
 """Application-session orchestration.
 
 Creating a session: validate the official URL, snapshot job + profile, reuse or
-generate the tailored resume and cover letter, compute the safe answer set, link
-the tracker, mint a one-time launch token, and write the audit trail. Also
+generate the tailored resume and cover letter, compute the safe answer set,
+mint a one-time launch token, and write the audit trail. Also
 handles the launch->session token exchange, status transitions, completion, and
 cancellation. Ownership and expiry are enforced here and again at the route.
 """
@@ -19,9 +19,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.applications.answer_vault_service import build_safe_answers
+from app.applications.session_refresh import current_profile_revision
 from app.applications.ats import detect_ats_from_url
+from app.applications.fixture_guard import guard_against_dev_fixture
 from app.applications.preparation import (
-    PreparationError,
     database_unavailable,
     invalid_application_url,
     profile_incomplete,
@@ -44,13 +45,14 @@ from app.models.entities import (
     ApplicationStatus,
     ApplicationTracker,
     DocumentType,
+    Education,
     Experience,
     GeneratedDocument,
     JobPosting,
     User,
     UserProfile,
 )
-from app.services.documents import public_dict
+from app.services.documents import profile_payload, public_dict
 
 logger = logging.getLogger("jobpilot.applications")
 
@@ -137,10 +139,41 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
 
     # --- load_candidate_profile: require the minimum to build a real application. ---
     _require_complete_profile(db, user)
+    # Fail closed: a known development/seed identity never reaches a real
+    # (production) application package. No-op outside app_env=="production".
+    guard_against_dev_fixture(user)
 
     # --- idempotency: reuse an existing usable session instead of duplicating. ---
     reused = _reuse_active_session(db, user, job)
     if reused is not None:
+        # A provider outage may have left an otherwise usable session without
+        # one or both optional artifacts. Reusing that session must repair the
+        # missing links instead of permanently returning "missing" until TTL.
+        resume_error: str | None = None
+        cover_error: str | None = None
+        repair_resume = reused.tailored_resume_id is None
+        repair_cover = reused.tailored_cover_letter_id is None
+        if repair_resume:
+            resume_doc, resume_error = await _safe_generate(db, user, job, DocumentType.resume)
+            reused.tailored_resume_id = resume_doc.id if resume_doc else None
+        if repair_cover:
+            cover_doc, cover_error = await _safe_generate(db, user, job, DocumentType.cover_letter)
+            reused.tailored_cover_letter_id = cover_doc.id if cover_doc else None
+        if repair_resume or repair_cover:
+            reused.warnings = _repaired_warnings(
+                reused.warnings or [],
+                resume_error=resume_error,
+                cover_error=cover_error,
+                repair_resume=repair_resume,
+                repair_cover=repair_cover,
+            )
+        # Rebuild the company-specific written draft on every explicit prepare
+        # action. That keeps it aligned with the latest profile/job even when
+        # the underlying application session is still within its reuse window.
+        written_answers = await _safe_written_answers(db, user, job)
+        reused.generated_answers = _replace_written_answers(
+            reused.generated_answers or [], written_answers
+        )
         raw_launch_token = create_launch_token(reused.id, user.id)
         reused.launch_token_hash = hash_token(raw_launch_token)
         reused.launch_token_used = False
@@ -154,7 +187,11 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
     cover_doc, cover_error = await _safe_generate(db, user, job, DocumentType.cover_letter)
 
     # --- generate_application_answers. ---
-    safe_answers, unresolved = build_safe_answers(db, user)
+    safe_answers, unresolved = build_safe_answers(db, user, company=job.company)
+    safe_answers = _replace_written_answers(
+        safe_answers,
+        await _safe_written_answers(db, user, job),
+    )
     warnings = _warnings(resume_error, cover_error, unresolved)
 
     # --- persist_application_package: the only place we touch the DB for writes;
@@ -171,6 +208,9 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
         tailored_cover_letter_id=cover_doc.id if cover_doc else None,
         generated_answers=safe_answers,
         unresolved_questions=unresolved,
+        # Stamp the revision these answers were built from, so a later profile
+        # edit makes this session detectably stale instead of silently wrong.
+        profile_revision=current_profile_revision(db, user.id),
         warnings=warnings,
         launch_token_hash=None,
         expires_at=datetime.now(UTC) + timedelta(minutes=SESSION_TTL_MINUTES),
@@ -181,9 +221,6 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
 
         raw_launch_token = create_launch_token(session.id, user.id)
         session.launch_token_hash = hash_token(raw_launch_token)
-
-        tracker = _link_tracker(db, user, job)
-        session.tracker_id = tracker.id
 
         log_action(db, session.id, ApplicationActionType.session_created, metadata={"job_id": job.id})
         if resume_doc:
@@ -207,6 +244,44 @@ async def create_application_session(db: Session, user: User, job: JobPosting) -
         resume_doc is not None, cover_doc is not None, len(warnings),
     )
     return session, raw_launch_token
+
+
+async def _safe_written_answers(
+    db: Session, user: User, job: JobPosting
+) -> list[dict[str, Any]]:
+    """Generate optional prose without ever failing application preparation."""
+    from app.applications.generated_answer_service import (
+        generate_written_application_answers,
+    )
+
+    try:
+        return await generate_written_application_answers(
+            profile_payload=profile_payload(db, user.id),
+            job_payload=public_dict(job),
+        )
+    except Exception as exc:  # noqa: BLE001 - optional artifact, sanitized log
+        logger.warning(
+            "apply.session.written_answers_failed user=%s job=%s reason=%s",
+            user.id,
+            job.id,
+            type(exc).__name__,
+        )
+        return []
+
+
+def _replace_written_answers(
+    existing: list[dict[str, Any]], generated: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    generated_keys = {
+        answer.get("canonical_key") for answer in generated if answer.get("canonical_key")
+    }
+    if not generated_keys:
+        return list(existing)
+    return [
+        answer
+        for answer in existing
+        if answer.get("canonical_key") not in generated_keys
+    ] + generated
 
 
 def exchange_launch_token(db: Session, raw_token: str) -> tuple[ApplicationSession, str]:
@@ -244,11 +319,25 @@ def complete_session(db: Session, session: ApplicationSession, *, confirmed: boo
         raise SessionError("Completion requires explicit user confirmation.")
     session.status = ApplicationSessionStatus.completed
     session.completed_at = datetime.now(UTC)
-    if session.tracker_id:
-        tracker = db.get(ApplicationTracker, session.tracker_id)
-        if tracker and tracker.status != ApplicationStatus.applied:
-            tracker.status = ApplicationStatus.applied
-            tracker.applied_at = datetime.now(UTC)
+    tracker = db.get(ApplicationTracker, session.tracker_id) if session.tracker_id else None
+    if tracker is None:
+        tracker = db.scalar(
+            select(ApplicationTracker).where(
+                (ApplicationTracker.user_id == session.user_id)
+                & (ApplicationTracker.job_id == session.job_id)
+            )
+        )
+    if tracker is None:
+        tracker = ApplicationTracker(
+            user_id=session.user_id,
+            job_id=session.job_id,
+            status=ApplicationStatus.applied,
+        )
+        db.add(tracker)
+        db.flush()
+    tracker.status = ApplicationStatus.applied
+    tracker.applied_at = tracker.applied_at or datetime.now(UTC)
+    session.tracker_id = tracker.id
     log_action(db, session.id, ApplicationActionType.application_completed, source=source,
                metadata={"job_snapshot": session.job_snapshot.get("title") if session.job_snapshot else None})
     db.commit()
@@ -360,33 +449,64 @@ def _reuse_active_session(db: Session, user: User, job: JobPosting) -> Applicati
     return existing
 
 
-def _link_tracker(db: Session, user: User, job: JobPosting) -> ApplicationTracker:
-    tracker = db.scalar(
-        select(ApplicationTracker).where(
-            (ApplicationTracker.user_id == user.id) & (ApplicationTracker.job_id == job.id)
-        )
-    )
-    if tracker is None:
-        tracker = ApplicationTracker(user_id=user.id, job_id=job.id, status=ApplicationStatus.applying)
-        db.add(tracker)
-        db.flush()
-    elif tracker.status in {ApplicationStatus.saved, ApplicationStatus.ready_to_apply}:
-        tracker.status = ApplicationStatus.applying
-    return tracker
-
-
 def _profile_snapshot(db: Session, user: User) -> dict[str, Any]:
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
     if profile is None:
         return {"email": user.email}
+    experiences = list(db.scalars(select(Experience).where(Experience.user_id == user.id)).all())
+    experiences.sort(
+        key=lambda item: (
+            bool(item.currently_working),
+            str(item.end_date or item.start_date or ""),
+        ),
+        reverse=True,
+    )
+    education = list(db.scalars(select(Education).where(Education.user_id == user.id)).all())
+    education.sort(key=lambda item: str(item.end_date or item.start_date or ""), reverse=True)
     return {
         "email": user.email,
         "full_name": profile.full_name,
+        "first_name": profile.first_name,
+        "middle_name": profile.middle_name,
+        "last_name": profile.last_name,
+        "preferred_first_name": profile.preferred_first_name,
+        "preferred_last_name": profile.preferred_last_name,
+        "name_confirmed": profile.name_confirmed,
         "location": ", ".join(
             filter(None, [profile.location_city, profile.location_state, profile.location_country])
         ),
         "skills": profile.skills or [],
         "target_roles": profile.target_roles or [],
+        "phone_country_iso2": profile.phone_country_iso2,
+        # Keep every record structured. The extension uses these arrays to
+        # expand repeated Employment/Education blocks without collapsing every
+        # row into the user's current job.
+        "experience": [
+            {
+                "company": item.company,
+                "title": item.title,
+                "location": item.location,
+                "start_date": item.start_date,
+                "end_date": item.end_date,
+                "currently_working": bool(item.currently_working),
+            }
+            for item in experiences
+            if item.company or item.title
+        ],
+        "education": [
+            {
+                "school": item.school,
+                "degree": item.degree,
+                "major": item.major,
+                "minor": item.minor,
+                "start_date": item.start_date,
+                "end_date": item.end_date,
+                "gpa": item.gpa,
+                "gpa_scale": item.gpa_scale,
+            }
+            for item in education
+            if item.school
+        ],
     }
 
 
@@ -405,4 +525,26 @@ def _warnings(resume_error: str | None, cover_error: str | None, unresolved: lis
         warnings.append(
             f"{len(unresolved)} sensitive question(s) must be answered by you on the employer page."
         )
+    return warnings
+
+
+def _repaired_warnings(
+    existing: list[str],
+    *,
+    resume_error: str | None,
+    cover_error: str | None,
+    repair_resume: bool,
+    repair_cover: bool,
+) -> list[str]:
+    """Replace stale document warnings after retrying missing artifacts."""
+    warnings = [
+        warning
+        for warning in existing
+        if not (repair_resume and "tailored resume" in warning.lower())
+        and not (repair_cover and "tailored cover letter" in warning.lower())
+    ]
+    if resume_error:
+        warnings.append(resume_error)
+    if cover_error:
+        warnings.append(cover_error)
     return warnings

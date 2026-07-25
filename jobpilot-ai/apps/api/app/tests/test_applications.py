@@ -1,10 +1,12 @@
 """Assisted auto-apply: session lifecycle, security, vault, and audit tests."""
 
+import io
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from pypdf import PdfReader
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -40,7 +42,7 @@ def client() -> Generator[TestClient, None, None]:
         engine.dispose()
 
 
-def auth(client: TestClient, email: str = "apply@example.com") -> dict[str, str]:
+def auth(client: TestClient, email: str = "apply@mailbox.test-domain.co") -> dict[str, str]:
     token = client.post("/auth/signup", json={"email": email, "password": "password123"}).json()
     return {"Authorization": f"Bearer {token['access_token']}"}
 
@@ -125,16 +127,177 @@ def test_create_session_prepares_documents_and_answers(client: TestClient) -> No
     answers = client.get(f"/application-sessions/{session_id}/answers", headers=headers).json()["answers"]
     keys = {a["canonical_key"] for a in answers}
     assert "full_name" in keys and "email" in keys
+    assert "custom_motivation" in keys
+    motivation = next(a for a in answers if a["canonical_key"] == "custom_motivation")
+    assert "Acme" in motivation["value"]
+    assert motivation["requires_review"] is True
     assert all(not a["sensitive"] for a in answers)
 
 
+def test_workday_password_is_write_only_and_injected_only_into_workday_session(
+    client: TestClient,
+) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    secret = "A-Strong-Workday-Password-19!"
+    saved = client.put(
+        "/profile/workday-credentials", headers=headers, json={"password": secret}
+    )
+    assert saved.status_code == 200
+
+    profile_text = client.get("/profile", headers=headers).text
+    assert secret not in profile_text
+    assert "workday_password_ciphertext" not in profile_text
+    assert client.get("/profile", headers=headers).json()["profile"][
+        "workday_password_configured"
+    ] is True
+
+    job_id = seed_job(
+        client,
+        company="Globus Medical",
+        url="https://globusmedical.wd5.myworkdayjobs.com/en-US/GMED/job/1",
+    )
+    db = next(app.dependency_overrides[get_db]())
+    user = db.scalar(select(E.User).where(E.User.email == "apply@mailbox.test-domain.co"))
+    row = E.ApplicationSession(
+        user_id=user.id,
+        job_id=job_id,
+        status=E.ApplicationSessionStatus.ready,
+        source_url="https://globusmedical.wd5.myworkdayjobs.com/en-US/GMED/job/1",
+        ats_type="workday",
+        profile_snapshot={},
+        job_snapshot={},
+        generated_answers=[],
+        unresolved_questions=[],
+        warnings=[],
+    )
+    db.add(row)
+    db.commit()
+    session_id = row.id
+
+    # The stored application-session snapshot never contains the plaintext.
+    row = db.get(E.ApplicationSession, session_id)
+    assert secret not in str(row.generated_answers)
+    db.close()
+
+    answers = client.get(
+        f"/application-sessions/{session_id}/answers", headers=headers
+    ).json()["answers"]
+    credential_answers = {
+        item["canonical_key"]: item for item in answers
+        if item["canonical_key"].startswith("application_account_password")
+    }
+    assert set(credential_answers) == {
+        "application_account_password",
+        "application_account_password_confirm",
+    }
+    assert all(item["value"] == secret for item in credential_answers.values())
+    assert all(item["sensitive"] and item["verified"] for item in credential_answers.values())
+
+    assert client.delete("/profile/workday-credentials", headers=headers).status_code == 200
+    assert client.get("/profile", headers=headers).json()["profile"][
+        "workday_password_configured"
+    ] is False
+
+
+def test_profile_eeo_answers_are_included_in_the_application_package(client: TestClient) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    saved = client.put(
+        "/profile/demographics",
+        headers=headers,
+        json={
+            "gender_identity": "man",
+            "veteran_status": "not_protected_veteran",
+            "disability_status": "no",
+            "hispanic_or_latino": "no",
+            "race_ethnicity": ["asian"],
+            "consent_to_store": True,
+        },
+    )
+    assert saved.status_code == 200
+
+    job_id = seed_job(client)
+    body = create_session(client, headers, job_id)
+    answers = client.get(
+        f"/application-sessions/{body['session_id']}/answers", headers=headers
+    ).json()["answers"]
+    by_key = {answer["canonical_key"]: answer for answer in answers}
+
+    assert by_key["gender"]["value"] == "Man"
+    assert by_key["race"]["value"] == "Asian"
+    assert by_key["veteran_status"]["value"] == "I am not a protected veteran"
+    assert by_key["disability_status"]["sensitive"] is True
+    assert all(by_key[key]["verified"] for key in ("gender", "race", "veteran_status"))
+
+
+def test_saving_profile_eeo_refreshes_an_existing_session(client: TestClient) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    job_id = seed_job(client)
+    body = create_session(client, headers, job_id)
+
+    client.put(
+        "/profile/demographics",
+        headers=headers,
+        json={"gender_identity": "man", "race_ethnicity": ["asian"], "consent_to_store": True},
+    )
+    refreshed = client.get(
+        f"/application-sessions/{body['session_id']}/answers", headers=headers
+    ).json()
+
+    assert refreshed["refreshed"] is True
+    assert {answer["canonical_key"] for answer in refreshed["answers"]} >= {"gender", "race"}
+
+
+def test_session_read_refreshes_structured_employment_and_education(client: TestClient) -> None:
+    """The extension reads /session before /answers. The first response must
+    therefore already contain the current repeater data, not a stale snapshot
+    that /answers refreshes one request too late."""
+    headers = auth(client)
+    complete_profile(client, headers)
+    job_id = seed_job(client, company="Lyft")
+    body = create_session(client, headers, job_id)
+
+    updated = client.put(
+        "/profile/career",
+        headers=headers,
+        json={
+            "education": [
+                {"school": "Arizona State University", "degree": "Bachelor of Science", "major": "Computer Science", "end_date": "2025-05-01"},
+                {"school": "Mesa Community College", "degree": "Associate of Science", "major": "Engineering", "end_date": "2021-05-01"},
+            ],
+            "experience": [
+                {"company": "VeoTrex", "title": "Software Engineer", "currently_working": True, "bullets": [], "technologies": []},
+                {"company": "Earlier Co", "title": "Developer", "currently_working": False, "bullets": [], "technologies": []},
+            ],
+            "projects": [],
+            "certifications": [],
+            "awards": [],
+        },
+    )
+    assert updated.status_code == 200, updated.text
+
+    session = client.get(
+        f"/application-sessions/{body['session_id']}", headers=headers
+    ).json()
+    assert [item["company"] for item in session["profile"]["experience"]] == [
+        "VeoTrex",
+        "Earlier Co",
+    ]
+    assert [item["school"] for item in session["profile"]["education"]] == [
+        "Arizona State University",
+        "Mesa Community College",
+    ]
+
+
 def test_session_not_accessible_to_other_user(client: TestClient) -> None:
-    owner = auth(client, "owner@example.com")
+    owner = auth(client, "owner@mailbox.test-domain.co")
     complete_profile(client, owner)
     job_id = seed_job(client)
     session_id = create_session(client, owner, job_id)["session_id"]
 
-    intruder = auth(client, "intruder@example.com")
+    intruder = auth(client, "intruder@mailbox.test-domain.co")
     resp = client.get(f"/application-sessions/{session_id}", headers=intruder)
     assert resp.status_code == 403
 
@@ -156,6 +319,11 @@ def test_resume_and_cover_letter_download(client: TestClient) -> None:
     r = client.get(f"/application-sessions/{session_id}/resume?fmt=pdf", headers=headers)
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/pdf"
+    resume = PdfReader(io.BytesIO(r.content))
+    text = "\n".join(page.extract_text() or "" for page in resume.pages)
+    assert "PROFESSIONAL EXPERIENCE" in text
+    assert "CORE SKILLS" in text
+    assert "{'company':" not in text
     c = client.get(f"/application-sessions/{session_id}/cover-letter?fmt=docx", headers=headers)
     assert c.status_code == 200
 
@@ -251,6 +419,10 @@ def test_complete_requires_confirmation_and_updates_tracker(client: TestClient) 
     complete_profile(client, headers)
     job_id = seed_job(client)
     session_id = create_session(client, headers, job_id)["session_id"]
+
+    # Preparing/opening is not an application. Nothing is tracked until the
+    # user explicitly confirms that they submitted it.
+    assert client.get("/jobs/tracker/all", headers=headers).json()["applications"] == []
 
     # Unconfirmed completion is rejected — JobPilot never assumes submission.
     assert client.post(f"/application-sessions/{session_id}/complete", headers=headers, json={"confirmed": False}).status_code == 422
@@ -387,7 +559,7 @@ def test_unhandled_error_response_includes_cors_header(monkeypatch) -> None:
 
     ec = _error_client()
     try:
-        headers = auth(ec, "cors@example.com")
+        headers = auth(ec, "cors@mailbox.test-domain.co")
         complete_profile(ec, headers)
         job_id = seed_job(ec)
 
@@ -521,8 +693,33 @@ def test_repeated_prepare_is_idempotent(client: TestClient) -> None:
     sessions = db.scalars(select(E.ApplicationSession).where(E.ApplicationSession.job_id == job_id)).all()
     trackers = db.scalars(select(E.ApplicationTracker).where(E.ApplicationTracker.job_id == job_id)).all()
     assert len(sessions) == 1
-    assert len(trackers) == 1
+    assert len(trackers) == 0
     db.close()
+
+
+def test_repeated_prepare_repairs_missing_document_links(client: TestClient) -> None:
+    headers = auth(client)
+    complete_profile(client, headers)
+    job_id = seed_job(client)
+    first = create_session(client, headers, job_id)
+
+    db = next(app.dependency_overrides[get_db]())
+    session = db.get(E.ApplicationSession, first["session_id"])
+    assert session is not None
+    session.tailored_resume_id = None
+    session.tailored_cover_letter_id = None
+    session.warnings = [
+        "Tailored resume could not be prepared automatically (TimeoutError). You can retry it.",
+        "Tailored cover letter could not be prepared automatically (TimeoutError). You can retry it.",
+    ]
+    db.commit()
+    db.close()
+
+    repaired = create_session(client, headers, job_id)
+    assert repaired["session_id"] == first["session_id"]
+    assert repaired["resume"]["document_id"] == first["resume"]["document_id"]
+    assert repaired["cover_letter"]["document_id"] == first["cover_letter"]["document_id"]
+    assert not any("could not be prepared" in warning for warning in repaired["warnings"])
 
 
 def test_prepare_after_cancel_creates_fresh_session(client: TestClient) -> None:
@@ -585,7 +782,7 @@ def test_database_persistence_failure_returns_structured_503(client: TestClient,
     def boom(*_args, **_kwargs):
         raise OperationalError("INSERT", {}, Exception("database is down"))
 
-    monkeypatch.setattr(svc, "_link_tracker", boom)
+    monkeypatch.setattr(svc, "log_action", boom)
     resp = client.post("/application-sessions", headers=headers, json={"job_id": job_id})
     assert resp.status_code == 503
     err = resp.json()["error"]
@@ -663,6 +860,16 @@ def test_autofill_results_rejected_for_other_user(client: TestClient) -> None:
 
 def test_autofill_results_requires_auth(client: TestClient) -> None:
     assert client.post("/application-sessions/1/autofill-results", json={"status": "completed"}).status_code == 401
+
+
+def test_extension_origin_receives_cors_headers(client: TestClient) -> None:
+    origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    resp = client.options(
+        "/application-sessions/token",
+        headers={"Origin": origin, "Access-Control-Request-Method": "POST"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == origin
 
 
 def test_nullable_job_fields_do_not_break_preparation(client: TestClient) -> None:

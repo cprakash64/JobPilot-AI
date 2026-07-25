@@ -18,6 +18,10 @@ from app.job_sources.base import JobSourceAdapter, NormalizedJob
 from app.jobs import job_ingestion_service
 from app.jobs.sources.breezy import BreezyAdapter
 from app.jobs.sources.recruitee import RecruiteeAdapter
+from app.jobs.sources.simplifyjobs import (
+    SimplifyJobsAdapter,
+    parse_verified_company_domain,
+)
 from app.jobs.sources.smartrecruiters import SmartRecruitersAdapter
 from app.jobs.sources.teamtailor import TeamtailorAdapter
 from app.jobs.sources.workable import WorkableAdapter
@@ -183,6 +187,111 @@ def test_breezy_connector(monkeypatch: pytest.MonkeyPatch) -> None:
     assert jobs[0].application_url == "https://acme.breezy.hr/p/p1"
 
 
+def test_simplifyjobs_connector_uses_direct_apply_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    recent_timestamp = int((datetime.now(UTC) - timedelta(hours=2)).timestamp())
+    payload = [
+        {
+            "id": "new-grad-1",
+            "company_name": "Example Robotics",
+            "title": "Software Engineer New Grad",
+            "locations": ["Pittsburgh, PA", "Remote in USA"],
+            "date_posted": recent_timestamp,
+            "url": "https://jobs.ashbyhq.com/example/role/application",
+            "company_url": (
+                "https://simplify.jobs/c/"
+                "f58a30c3-a04b-42bb-a8b9-b55894b3d405/Example-Robotics"
+            ),
+            "active": True,
+            "is_visible": True,
+            "sponsorship": "Offers Sponsorship",
+            "degrees": ["Bachelor's"],
+            "category": "Software",
+            "source": "Simplify",
+        },
+        {
+            "id": "closed-1",
+            "company_name": "Closed Company",
+            "title": "Closed Role",
+            "locations": ["Remote"],
+            "date_posted": recent_timestamp,
+            "url": "https://example.jobs/closed",
+            "active": False,
+            "is_visible": True,
+        },
+    ]
+    patch_httpx(monkeypatch, payload)
+
+    async def verified_profile(*_args, **_kwargs) -> str:
+        return (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            '{"props":{"pageProps":{"company":{"name":"Example Robotics",'
+            '"verified":true,"url":"https://www.example-robotics.com/"}}}}'
+            "</script>"
+        )
+
+    monkeypatch.setattr("app.jobs.sources.simplifyjobs.get_text", verified_profile)
+    jobs = run(
+        SimplifyJobsAdapter("New-Grad-Positions", "SimplifyJobs New Grad").fetch_recent_jobs(7)
+    )
+    assert len(jobs) == 1
+    assert jobs[0].source == "simplifyjobs"
+    assert jobs[0].company == "Example Robotics"
+    assert jobs[0].seniority_level == "entry"
+    assert jobs[0].workplace_type == "remote"
+    assert jobs[0].application_url == "https://jobs.ashbyhq.com/example/role/application"
+    assert jobs[0].company_domain == "example-robotics.com"
+    assert jobs[0].company_logo_url == ""
+    assert jobs[0].work_authorization_notes == "Offers Sponsorship"
+    assert jobs[0].degree_requirement == "Bachelor's"
+
+
+def test_simplifyjobs_does_not_derive_logo_from_an_untrusted_company_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recent_timestamp = int((datetime.now(UTC) - timedelta(hours=2)).timestamp())
+    payload = [
+        {
+            "id": "new-grad-2",
+            "company_name": "Example Robotics",
+            "title": "Software Engineer",
+            "locations": ["Remote in USA"],
+            "date_posted": recent_timestamp,
+            "url": "https://jobs.ashbyhq.com/example/role/application",
+            "company_url": (
+                "https://attacker.example/c/"
+                "f58a30c3-a04b-42bb-a8b9-b55894b3d405"
+            ),
+            "active": True,
+            "is_visible": True,
+        }
+    ]
+    patch_httpx(monkeypatch, payload)
+    jobs = run(
+        SimplifyJobsAdapter("New-Grad-Positions", "SimplifyJobs New Grad").fetch_recent_jobs(7)
+    )
+    assert jobs[0].company_logo_url == ""
+
+
+def test_simplifyjobs_uses_only_matching_verified_official_website() -> None:
+    html = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        '{"props":{"pageProps":{"company":{"name":"Example Robotics, Inc.",'
+        '"verified":true,"url":"https://www.example-robotics.com/about"}}}}'
+        "</script>"
+    )
+    assert parse_verified_company_domain(
+        html, expected_company_name="Example Robotics"
+    ) == "example-robotics.com"
+    assert parse_verified_company_domain(
+        html, expected_company_name="Different Company"
+    ) == ""
+
+
+def test_simplifyjobs_rejects_unapproved_repository() -> None:
+    jobs = run(SimplifyJobsAdapter("unknown-repository", "Unknown").fetch_recent_jobs(7))
+    assert jobs == []
+
+
 def test_connector_broken_source_raises_not_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a, **k):
         raise httpx.ConnectError("down")
@@ -200,6 +309,16 @@ def test_catalog_has_100_plus_verified_sources() -> None:
     assert len(registry) >= 100
     providers = {c.provider for c in registry}
     assert {"greenhouse", "lever", "ashby"} <= providers
+    smartrecruiters = [c for c in registry if c.provider == "smartrecruiters"]
+    assert len(smartrecruiters) >= 17
+    assert {"Visa", "ServiceNow", "Bosch", "Western Digital"} <= {
+        c.name for c in smartrecruiters
+    }
+    simplify = [c for c in registry if c.provider == "simplifyjobs"]
+    assert {c.slug for c in simplify} == {
+        "New-Grad-Positions",
+        "Summer2026-Internships",
+    }
     # Sorted by priority (highest first).
     assert registry[0].priority >= registry[-1].priority
 
@@ -367,6 +486,29 @@ def test_discovery_respects_timeout(client: TestClient, monkeypatch: pytest.Monk
     assert "AI Engineer" in titles          # fast source returned
     assert "Backend Engineer" not in titles  # slow source timed out (no crash)
     assert body["discovery"]["sources_failed"] == 1
+
+
+def test_timed_out_refresh_keeps_the_last_successful_source_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "job_discovery_cache_ttl_minutes", 1)
+    monkeypatch.setattr(settings, "job_discovery_timeout_seconds", 0.01)
+    source = _Src("greenhouse", "ReliableUntilSlow", [_job(1, "Backend Engineer")])
+
+    first_jobs, first_warnings, _ = run(job_ingestion_service._fetch_all([source], 7))
+    assert [job.title for job in first_jobs] == ["Backend Engineer"]
+    assert first_warnings == []
+
+    # Expire the normal cache, then make the next network refresh time out. The
+    # stale snapshot is preferable to deleting the source's jobs from the UI.
+    for key, (_, jobs) in list(job_ingestion_service._SOURCE_CACHE.items()):
+        job_ingestion_service._SOURCE_CACHE[key] = (
+            datetime.now(UTC) - timedelta(minutes=2), jobs
+        )
+    source._delay = 0.1
+    stale_jobs, warnings, _ = run(job_ingestion_service._fetch_all([source], 7))
+    assert [job.title for job in stale_jobs] == ["Backend Engineer"]
+    assert warnings == []
 
 
 def test_more_sources_yield_more_eligible_jobs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

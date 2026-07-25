@@ -12,6 +12,7 @@ Sources can be injected for testing; in production they come from the curated
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.job_sources.base import JobSourceAdapter, NormalizedJob
-from app.jobs.company_logo_service import resolve_company_logo
+from app.jobs.company_logo_service import get_or_create_company_branding
 from app.jobs.job_normalization_service import is_fresh, normalize_jobs
 from app.jobs.job_search_criteria_service import SearchCriteria, build_search_criteria
 from app.jobs.scoring_service import (
@@ -71,7 +72,9 @@ class DiscoveryResult:
 _SOURCE_CACHE: dict[tuple[str, str], tuple[datetime, list[NormalizedJob]]] = {}
 
 
-def _cache_get(adapter: JobSourceAdapter) -> list[NormalizedJob] | None:
+def _cache_get(
+    adapter: JobSourceAdapter, *, allow_expired: bool = False
+) -> list[NormalizedJob] | None:
     ttl = settings.job_discovery_cache_ttl_minutes
     if ttl <= 0:
         return None
@@ -79,7 +82,7 @@ def _cache_get(adapter: JobSourceAdapter) -> list[NormalizedJob] | None:
     if entry is None:
         return None
     stamp, jobs = entry
-    if datetime.now(UTC) - stamp > timedelta(minutes=ttl):
+    if not allow_expired and datetime.now(UTC) - stamp > timedelta(minutes=ttl):
         return None
     return jobs
 
@@ -161,41 +164,84 @@ async def discover_jobs(
     # jobs that were newly inserted or materially changed in this run.
     if changed_job_ids:
         result.scoring_tasks_queued = enqueue_scoring_for_jobs(
-            changed_job_ids, exclude_user_ids=[user_id]
+            db, changed_job_ids, exclude_user_ids=[user_id]
         )
     return result
 
 
-def enqueue_scoring_for_jobs(job_ids: list[int], *, exclude_user_ids: list[int] | None = None) -> int:
+def enqueue_scoring_for_jobs(
+    db: Session, job_ids: list[int], *, exclude_user_ids: list[int] | None = None
+) -> int:
     """Hand newly changed jobs to the background worker for scoring across all
-    active users. Falls back to inline scoring if the broker is unavailable, so
-    scores are never silently dropped. Returns the number of jobs queued."""
+    active users. Falls back to inline scoring **on the provided session** if the
+    broker is unavailable, so scores are never silently dropped. Returns the
+    number of jobs handed off (queued or scored inline)."""
     if not job_ids:
         return 0
+    exclude = exclude_user_ids or []
+    if _try_enqueue(job_ids, exclude):
+        return len(job_ids)
+
+    # Broker unavailable → degrade to synchronous inline scoring using the caller's
+    # session so the work still happens (and, in tests, hits the same database).
+    logging.getLogger("jobpilot.scoring").warning(
+        "Background scoring broker unavailable; scoring %d job(s) inline.", len(job_ids)
+    )
+    from app.jobs.scoring_service import active_user_ids, score_users_for_job
+
+    targets = [uid for uid in active_user_ids(db) if uid not in exclude]
+    for job_id in job_ids:
+        score_users_for_job(db, job_id, targets, commit=False)
+    db.commit()
+    return len(job_ids)
+
+
+def _try_enqueue(job_ids: list[int], exclude: list[int]) -> bool:
+    """Best-effort, fast-failing publish to Celery. Returns False (rather than
+    blocking on broker retries) when the broker cannot be reached quickly."""
+    if not broker_reachable():
+        return False
     try:
         from app.workers.tasks import score_jobs_for_users_task
 
-        score_jobs_for_users_task.delay(job_ids, exclude_user_ids or [])
-        return len(job_ids)
-    except Exception as exc:  # noqa: BLE001 - broker down, fall back to inline
-        import logging
-
-        logging.getLogger("jobpilot.scoring").warning(
-            "Could not enqueue background scoring (%s); scoring inline.", type(exc).__name__
+        score_jobs_for_users_task.apply_async(args=[job_ids, exclude], retry=False)
+        return True
+    except Exception as exc:  # noqa: BLE001 - broker down / not configured
+        logging.getLogger("jobpilot.scoring").info(
+            "Could not enqueue scoring task (%s).", type(exc).__name__
         )
-        from app.db.session import SessionLocal
-        from app.jobs.scoring_service import active_user_ids, score_users_for_job
+        return False
 
-        inline_db = SessionLocal()
-        try:
-            targets = [
-                uid for uid in active_user_ids(inline_db) if uid not in (exclude_user_ids or [])
-            ]
-            for job_id in job_ids:
-                score_users_for_job(inline_db, job_id, targets)
-        finally:
-            inline_db.close()
-        return len(job_ids)
+
+# A single cheap TCP probe tells us whether the Celery broker is up. Celery's own
+# publish path can take seconds to fail on a down broker (bounded retries × socket
+# timeouts), which would tax every request that enqueues work; this probe fails in
+# milliseconds so we can fall back to inline scoring immediately. Cached briefly to
+# avoid a probe on every single enqueue.
+_BROKER_PROBE: dict[str, tuple[float, bool]] = {}
+
+
+def broker_reachable(*, cache_seconds: float = 5.0) -> bool:
+    import socket
+    import time
+    from urllib.parse import urlparse
+
+    now = time.monotonic()
+    cached = _BROKER_PROBE.get("v")
+    if cached is not None and now - cached[0] < cache_seconds:
+        return cached[1]
+
+    parsed = urlparse(settings.redis_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 6379
+    ok = False
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            ok = True
+    except OSError:
+        ok = False
+    _BROKER_PROBE["v"] = (now, ok)
+    return ok
 
 
 def _resolve_packs(profile: UserProfile | None) -> list[str]:
@@ -228,6 +274,13 @@ async def _fetch_all(
             _cache_put(adapter, jobs)
             return jobs, None
         except Exception as exc:  # noqa: BLE001 - isolate per-source failures
+            # A transient timeout must not erase jobs from a source that worked
+            # on the preceding refresh. Return the last successful in-process
+            # snapshot and let the scheduled 24-hour ingestion retry it later.
+            if isinstance(exc, TimeoutError | asyncio.TimeoutError):
+                stale = _cache_get(adapter, allow_expired=True)
+                if stale is not None:
+                    return stale, None
             return [], f"Could not fetch from {label}: {type(exc).__name__}"
 
     results = await asyncio.gather(*[run(adapter) for adapter in adapters])
@@ -266,20 +319,24 @@ def _persist_job(db: Session, job: NormalizedJob) -> tuple[JobPosting, bool, boo
         existing = db.scalar(
             select(JobPosting).where(JobPosting.hash_for_deduplication == job.dedupe_hash)
         )
-    # Resolve a company logo once at ingestion (adapter-provided branding wins;
-    # otherwise the curated domain map). Stored so cards need no lookup at read.
-    logo = resolve_company_logo(
+    # Resolve (or reuse) this employer's branding ONCE, persisted separately
+    # from job rows — every posting from the same company reuses the same
+    # CompanyBranding row instead of re-resolving per job (see Part 8).
+    branding = get_or_create_company_branding(
+        db,
         job.company or "",
         catalog_domain=job.company_domain or None,
         catalog_logo_url=job.company_logo_url or None,
+        application_url=job.application_url or None,
+        source_type=job.source or None,
     )
     values = {
         "source_id": source.id,
         "external_id": job.external_id,
         "title": job.title,
         "company": job.company,
-        "company_domain": logo["company_domain"] or None,
-        "company_logo_url": logo["company_logo_url"] or None,
+        "company_domain": branding.domain,
+        "company_logo_url": branding.logo_url,
         "location": job.location,
         "remote_type": job.workplace_type,
         "employment_type": job.employment_type,
@@ -326,13 +383,18 @@ def _upsert_source(db: Session, job: NormalizedJob) -> JobSource:
     name = job.company
     source = db.scalar(select(JobSource).where(JobSource.name == name))
     if source is None:
+        terms_notes = (
+            "Public SimplifyJobs GitHub listing with attribution and a direct employer application URL."
+            if (job.source or "").lower() == "simplifyjobs"
+            else "Public ATS endpoint; no restricted portal scraping."
+        )
         source = JobSource(
             name=name,
             type=job.source or "ats",
             base_url=job.source_url,
             enabled=True,
             supports_api=True,
-            terms_notes="Public ATS endpoint; no restricted portal scraping.",
+            terms_notes=terms_notes,
         )
         db.add(source)
         db.flush()

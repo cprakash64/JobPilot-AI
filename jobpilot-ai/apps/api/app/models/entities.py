@@ -134,10 +134,49 @@ class UserProfile(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    # Backward-compatible DISPLAY value only. The structured parts below are the
+    # source of truth; ``full_name`` is recomputed from them whenever they are
+    # confirmed (see app.profile.names.compose_full_name).
     full_name: Mapped[str] = mapped_column(String(200), default="")
+    # Structured identity — the source of truth for name autofill.
+    # ``full_name`` alone is ambiguous for multi-token given names ("Chandra
+    # Prakash Pandey" is NOT first="Chandra" last="Prakash Pandey"), so these
+    # are never silently derived by splitting full_name; they are set only via
+    # explicit user confirmation (``name_confirmed``).
+    first_name: Mapped[str | None] = mapped_column(String(120))
+    middle_name: Mapped[str | None] = mapped_column(String(120))
+    last_name: Mapped[str | None] = mapped_column(String(120))
+    # Preferred first/last are separate fields because forms ask for them
+    # separately; when blank they fall back to the legal name ONLY where the
+    # form's helper text says to (see names.resolve_preferred_names).
+    preferred_first_name: Mapped[str | None] = mapped_column(String(120))
+    preferred_last_name: Mapped[str | None] = mapped_column(String(120))
+    # Legacy free-text "name you go by" — retained so existing profiles keep
+    # their value; superseded by preferred_first_name/preferred_last_name.
+    preferred_name: Mapped[str | None] = mapped_column(String(120))
+    name_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The address used ON APPLICATIONS — deliberately separate from the account
+    # email the user signs in with. Confirmed explicitly; a confirmed value
+    # always takes precedence over the account email (see resolve_application_email).
+    application_email: Mapped[str | None] = mapped_column(String(320))
+    application_email_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    application_email_updated_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    # Write-only employer-account secret. Never serialized by /profile; only a
+    # boolean "configured" flag is returned. Ciphertext is decrypted solely
+    # for a session-scoped Workday extension response.
+    workday_password_ciphertext: Mapped[str | None] = mapped_column(String(1000))
+    # Raw user input, kept verbatim as the fallback if parsing was ever wrong.
     phone: Mapped[str | None] = mapped_column(String(50))
+    # Structured phone — derived together by app.profile.phone.parse_phone so a
+    # form that asks for country and national number separately can be filled
+    # without concatenating strings (and without duplicating "+1").
+    phone_country_code: Mapped[str | None] = mapped_column(String(8))
+    phone_country_iso2: Mapped[str | None] = mapped_column(String(2))
+    phone_national_number: Mapped[str | None] = mapped_column(String(32))
+    phone_e164: Mapped[str | None] = mapped_column(String(32))
     location_city: Mapped[str | None] = mapped_column(String(120))
     location_state: Mapped[str | None] = mapped_column(String(120))
+    location_postal_code: Mapped[str | None] = mapped_column(String(32))
     location_country: Mapped[str | None] = mapped_column(String(120))
     linkedin_url: Mapped[str | None] = mapped_column(String(500))
     github_url: Mapped[str | None] = mapped_column(String(500))
@@ -163,9 +202,25 @@ class SensitiveDemographics(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
-    gender: Mapped[str | None] = mapped_column(String(120))
+    # Typed, per-question answers. Vocabularies live in app/profile/eeo.py —
+    # each question has its OWN closed option set, because reusing one
+    # Yes/No/Another list across five different questions is what allowed a
+    # gender to be stored as "yes".
+    gender_identity: Mapped[str | None] = mapped_column(String(64))
+    gender_self_description: Mapped[str | None] = mapped_column(String(200))
     veteran_status: Mapped[str | None] = mapped_column(String(120))
     disability_status: Mapped[str | None] = mapped_column(String(120))
+    hispanic_or_latino: Mapped[str | None] = mapped_column(String(64))
+    # A list: people identify with more than one category, and collapsing that
+    # to a single column is what produced the meaningless "another_option".
+    race_ethnicity: Mapped[list | None] = mapped_column(JsonType)
+    race_self_description: Mapped[str | None] = mapped_column(String(200))
+    # True when migration 0015 could not carry a legacy value across, so the UI
+    # asks the user to re-answer instead of showing a silently emptied form.
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Legacy free-text columns, retained (nulled by 0015) so no data is lost in
+    # place; nothing reads them any more.
+    gender: Mapped[str | None] = mapped_column(String(120))
     ethnicity: Mapped[str | None] = mapped_column(String(120))
     hispanic_latino_status: Mapped[str | None] = mapped_column(String(120))
     consent_to_store: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -189,6 +244,9 @@ class Education(Base):
     start_date: Mapped[DateValue | None] = mapped_column(Date)
     end_date: Mapped[DateValue | None] = mapped_column(Date)
     gpa: Mapped[str | None] = mapped_column(String(20))
+    # The scale is required to interpret and safely convert a GPA for employer
+    # dropdowns. Existing profiles are the common US 4.0 scale by default.
+    gpa_scale: Mapped[str] = mapped_column(String(10), default="4.0")
     honors: Mapped[list] = mapped_column(JsonType, default=list)
     coursework: Mapped[list] = mapped_column(JsonType, default=list)
 
@@ -244,6 +302,31 @@ class Award(Base):
     issuer: Mapped[str | None] = mapped_column(String(200))
     date: Mapped[DateValue | None] = mapped_column(Date)
     description: Mapped[str | None] = mapped_column(Text)
+
+
+class CompanyBranding(Base):
+    """Normalized company branding, persisted SEPARATELY from individual job
+    rows so every job posting from the same employer reuses one resolved
+    logo instead of re-resolving (and re-fetching) per job. See
+    app/jobs/company_logo_service.py for the resolution pipeline."""
+
+    __tablename__ = "company_branding"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Normalized (lowercased, suffix-stripped) company name — the reuse key.
+    normalized_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    canonical_name: Mapped[str] = mapped_column(String(255))
+    domain: Mapped[str | None] = mapped_column(String(255))
+    logo_url: Mapped[str | None] = mapped_column(String(1000))
+    # "ats" | "catalog" | "curated" | "discovered" | "none"
+    source: Mapped[str] = mapped_column(String(20), default="none")
+    # "resolved" | "unresolved" | "failed"
+    resolution_status: Mapped[str] = mapped_column(String(20), default="unresolved")
+    last_verified_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[DateTimeValue] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class JobSource(Base):
@@ -438,6 +521,11 @@ class ApplicationSession(Base):
     ats_type: Mapped[str | None] = mapped_column(String(40))
     profile_snapshot: Mapped[dict] = mapped_column(JsonType, default=dict)
     job_snapshot: Mapped[dict] = mapped_column(JsonType, default=dict)
+    # The profile revision these answers were built from. NULL (or a mismatch
+    # with the profile's current revision) means the snapshot is stale and must
+    # be rebuilt before the extension is allowed to use it.
+    profile_revision: Mapped[str | None] = mapped_column(String(32))
+    answers_refreshed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
     tailored_resume_id: Mapped[int | None] = mapped_column(
         ForeignKey("generated_documents.id", ondelete="SET NULL")
     )
@@ -487,13 +575,24 @@ class ApplicationAnswer(Base):
     explicitly verified them and enabled auto-fill (``allow_auto_fill``)."""
 
     __tablename__ = "application_answers"
-    __table_args__ = (UniqueConstraint("user_id", "canonical_key", name="uq_answer_user_key"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "canonical_key", "company_key", name="uq_answer_user_key_company"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     canonical_key: Mapped[str] = mapped_column(String(80), index=True)
     value: Mapped[str | None] = mapped_column(Text)
     display_value: Mapped[str | None] = mapped_column(Text)
+    # "global" (reusable everywhere), "company" (scoped to one employer via
+    # ``company_key``), or "sensitive" (reusable only after explicit consent —
+    # gated the same way as any other sensitive key, see canonical.py).
+    # "application"-scoped answers are never persisted here at all.
+    scope: Mapped[str] = mapped_column(String(20), default="global")
+    # Normalized employer name when scope == "company"; "" (not NULL) for every
+    # other scope so the unique constraint below reliably prevents duplicate
+    # global rows across both SQLite and Postgres.
+    company_key: Mapped[str] = mapped_column(String(160), default="")
     source: Mapped[str] = mapped_column(String(40), default="user")
     is_user_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     verification_required: Mapped[bool] = mapped_column(Boolean, default=False)
