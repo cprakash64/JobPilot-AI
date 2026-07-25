@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FIT_SCORE_STYLES, getFitScoreTone } from "../lib/fitScore";
+import { FIT_SCORE_STYLES, getFitScoreTone, getScoreDisplay } from "../lib/fitScore";
 
 describe("getFitScoreTone", () => {
   it("returns green emerald Strong fit for >= 80", () => {
@@ -52,5 +52,47 @@ describe("getFitScoreTone", () => {
     for (const style of Object.values(FIT_SCORE_STYLES)) {
       expect(style).not.toHaveProperty("strip");
     }
+  });
+});
+
+describe("getScoreDisplay", () => {
+  it("shows a calculating state for pending/scoring and keeps polling", () => {
+    for (const state of ["pending", "scoring"] as const) {
+      const d = getScoreDisplay(state, null);
+      expect(d.kind).toBe("calculating");
+      expect(d.label).toBe("Calculating fit…");
+      expect(d.pending).toBe(true);
+    }
+  });
+
+  it("treats a missing state with no score as calculating (not permanent 'Not scored')", () => {
+    const d = getScoreDisplay(null, null);
+    expect(d.kind).toBe("calculating");
+    expect(d.pending).toBe(true);
+  });
+
+  it("prompts to complete the profile for profile_incomplete", () => {
+    const d = getScoreDisplay("profile_incomplete", null);
+    expect(d.kind).toBe("profile_incomplete");
+    expect(d.label).toContain("Complete your profile");
+    expect(d.pending).toBe(false);
+  });
+
+  it("shows an unavailable state for failed and stops polling", () => {
+    const d = getScoreDisplay("failed", null);
+    expect(d.kind).toBe("failed");
+    expect(d.label).toBe("Score unavailable");
+    expect(d.pending).toBe(false);
+  });
+
+  it("renders the real score for scored and stops polling", () => {
+    const d = getScoreDisplay("scored", 82);
+    expect(d.kind).toBe("score");
+    expect(d.pending).toBe(false);
+  });
+
+  it("falls back to scored when a number exists but no state is given", () => {
+    const d = getScoreDisplay(undefined, 70);
+    expect(d.kind).toBe("score");
   });
 });

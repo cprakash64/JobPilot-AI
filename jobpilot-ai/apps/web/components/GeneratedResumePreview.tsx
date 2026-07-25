@@ -11,11 +11,11 @@ export function GeneratedResumePreview({ content }: { content: ResumeContent }) 
   const contact = [header.email, header.phone, header.location, ...(header.links ?? [])].filter(Boolean);
 
   return (
-    <div className="mx-auto w-full max-w-[820px] bg-white px-10 py-9 text-[13px] leading-relaxed text-[#1c1c1c] shadow-sm ring-1 ring-black/5 print:shadow-none [font-family:Georgia,'Times_New_Roman',serif]">
-      <header className="border-b border-[#111] pb-3 text-center">
+    <div className="mx-auto w-full max-w-[820px] bg-white px-10 py-9 text-[13px] leading-relaxed text-[var(--text-primary)] shadow-sm ring-1 ring-black/5 print:shadow-none [font-family:Georgia,'Times_New_Roman',serif]">
+      <header className="border-b border-[var(--text-primary)] pb-3 text-center">
         <h1 className="text-2xl font-bold uppercase tracking-wide">{header.full_name || "Your Name"}</h1>
         {contact.length > 0 && (
-          <p className="mt-1 text-[12px] text-[#333]">{contact.join("  |  ")}</p>
+          <p className="mt-1 text-[12px] text-[var(--text-secondary)]">{contact.join("  |  ")}</p>
         )}
       </header>
 
@@ -49,9 +49,9 @@ export function GeneratedResumePreview({ content }: { content: ResumeContent }) 
                   {exp.title}
                   {exp.company ? ` — ${exp.company}` : ""}
                 </p>
-                {exp.dates && <p className="text-[12px] text-[#333]">{exp.dates}</p>}
+                {exp.dates && <p className="text-[12px] text-[var(--text-secondary)]">{exp.dates}</p>}
               </div>
-              {exp.location && <p className="text-[12px] italic text-[#444]">{exp.location}</p>}
+              {exp.location && <p className="text-[12px] italic text-[var(--text-secondary)]">{exp.location}</p>}
               <BulletList items={exp.bullets} />
             </div>
           ))}
@@ -65,7 +65,7 @@ export function GeneratedResumePreview({ content }: { content: ResumeContent }) 
               <p className="font-bold">
                 {proj.name}
                 {proj.technologies?.length ? (
-                  <span className="font-normal text-[#444]"> — {proj.technologies.join(", ")}</span>
+                  <span className="font-normal text-[var(--text-secondary)]"> — {proj.technologies.join(", ")}</span>
                 ) : null}
               </p>
               <BulletList items={proj.bullets} />
@@ -83,7 +83,7 @@ export function GeneratedResumePreview({ content }: { content: ResumeContent }) 
                 {edu.degree ? `, ${edu.degree}` : ""}
                 {edu.details ? ` — ${edu.details}` : ""}
               </p>
-              {edu.dates && <p className="text-[12px] text-[#333]">{edu.dates}</p>}
+              {edu.dates && <p className="text-[12px] text-[var(--text-secondary)]">{edu.dates}</p>}
             </div>
           ))}
         </Section>
@@ -107,7 +107,7 @@ export function GeneratedResumePreview({ content }: { content: ResumeContent }) 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="mt-4">
-      <h2 className="mb-1.5 border-b border-[#999] pb-0.5 text-[12px] font-bold uppercase tracking-wide text-[#111]">
+      <h2 className="mb-1.5 border-b border-[var(--text-muted)] pb-0.5 text-[12px] font-bold uppercase tracking-wide text-[var(--text-primary)]">
         {title}
       </h2>
       {children}

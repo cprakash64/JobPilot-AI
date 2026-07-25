@@ -1,9 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import LoginPage from "../app/login/page";
 import SignupPage from "../app/signup/page";
+import HomePage from "../app/page";
 
 const routerMock = vi.hoisted(() => ({
   push: vi.fn()
@@ -80,5 +81,27 @@ describe("auth pages", () => {
     await userEvent.click(screen.getByRole("button", { name: "Log in" }));
 
     expect(await screen.findByText("Invalid credentials")).toBeInTheDocument();
+  });
+
+  it("opens login over the landing page and closes it without navigation", async () => {
+    render(React.createElement(HomePage));
+
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(screen.getByRole("dialog", { name: "Sign in to JobPilot" })).toBeInTheDocument();
+    expect(screen.getByText("A calmer way to run your job search.")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Close authentication" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("opens signup from the landing page and can switch to login in place", async () => {
+    render(React.createElement(HomePage));
+
+    await userEvent.click(screen.getByRole("button", { name: "Get started" }));
+    const dialog = screen.getByRole("dialog", { name: "Create your account" });
+    expect(dialog).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    expect(screen.getByRole("dialog", { name: "Sign in to JobPilot" })).toBeInTheDocument();
   });
 });

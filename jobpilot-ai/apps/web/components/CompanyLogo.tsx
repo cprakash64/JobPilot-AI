@@ -1,57 +1,101 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { API_URL } from "@/lib/api";
 
 /**
- * Company logo with a safe fallback.
- *
- * Renders the resolved company logo image when a URL is available; if the image
- * is missing or fails to load (404, blocked, network error) it falls back to a
- * clean initial-letter avatar. A logo never blocks or breaks the job card.
+ * Company logo with a real fallback chain: try the primary (proxied,
+ * cached, SSRF-safe) source first, then a secondary direct source if the
+ * first fails, and fall back to a deterministic generated company mark once
+ * every real source has failed. That guarantees every card has a recognizable
+ * visual identity without pretending an unverified domain belongs to a
+ * company. The logo area is fixed so the layout never shifts.
  */
 export function CompanyLogo({
   company,
   logoUrl,
+  proxyPath,
+  companyDomain,
   size = 44
 }: {
   company: string;
   logoUrl?: string | null;
+  /** Relative API path for the preferred (proxied) source, e.g.
+   * "/jobs/companies/acme/logo". */
+  proxyPath?: string | null;
+  companyDomain?: string | null;
   size?: number;
 }) {
-  const [failed, setFailed] = useState(false);
-  const showImage = Boolean(logoUrl) && !failed;
+  const sources = useMemo(() => {
+    const list: string[] = [];
+    if (proxyPath) list.push(`${API_URL}${proxyPath}`);
+    if (logoUrl) list.push(logoUrl);
+    if (companyDomain) list.push(`https://${companyDomain}/favicon.ico`);
+    return list;
+  }, [proxyPath, logoUrl, companyDomain]);
+
+  const [attempt, setAttempt] = useState(0);
+  const src = sources[attempt];
 
   return (
     <div
       className="flex shrink-0 items-center justify-center overflow-hidden rounded-xl border border-line bg-white"
-      style={{ width: size, height: size }}
+      // The app supports a dark theme and some company favicons (RTX is one)
+      // are black-on-transparent. Pin the logo canvas to real white so a valid
+      // image never looks like an empty dark square.
+      style={{ width: size, height: size, backgroundColor: "#ffffff" }}
     >
-      {showImage ? (
-        // eslint-disable-next-line @next/next/no-img-element -- external logo host; next/image would require per-domain config + CSP allowances
+      {src ? (
+        // eslint-disable-next-line @next/next/no-img-element -- external/proxied logo host; next/image would require per-domain config + CSP allowances
         <img
-          src={logoUrl as string}
+          key={src}
+          src={src}
           alt={`${company} logo`}
           width={size}
           height={size}
           loading="lazy"
           className="h-full w-full object-contain p-1"
-          onError={() => setFailed(true)}
+          onError={() => setAttempt((a) => a + 1)}
         />
       ) : (
-        <span className="text-sm font-semibold text-pine" aria-hidden>
-          {initials(company)}
-        </span>
+        <GeneratedCompanyMark company={company} size={size} />
       )}
     </div>
   );
 }
 
-function initials(company: string): string {
-  const value = (company || "?")
+const BRAND_PALETTE = [
+  ["#17324D", "#D9EAF7"],
+  ["#3B1D64", "#E9DDF8"],
+  ["#17453B", "#D8EFE7"],
+  ["#6A2E18", "#F7E2D7"],
+  ["#4E3B0D", "#F6ECC8"],
+  ["#3B2948", "#EADFF1"]
+] as const;
+
+function GeneratedCompanyMark({ company, size }: { company: string; size: number }) {
+  const words = company
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
     .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((word) => word[0]?.toUpperCase() ?? "")
-    .join("");
-  return value || "?";
+    .filter(Boolean);
+  const initials = (words.length > 1 ? `${words[0][0]}${words[1][0]}` : words[0]?.slice(0, 2) || "JP").toUpperCase();
+  const hash = Array.from(company).reduce((value, character) => ((value * 31) + character.charCodeAt(0)) >>> 0, 7);
+  const [foreground, background] = BRAND_PALETTE[hash % BRAND_PALETTE.length];
+
+  return (
+    <span
+      data-testid="company-logo-generated"
+      role="img"
+      aria-label={`${company} generated company mark`}
+      className="flex h-full w-full items-center justify-center font-bold tracking-[-0.04em]"
+      style={{
+        color: foreground,
+        backgroundColor: background,
+        fontSize: Math.max(11, Math.round(size * 0.33))
+      }}
+    >
+      {initials}
+    </span>
+  );
 }

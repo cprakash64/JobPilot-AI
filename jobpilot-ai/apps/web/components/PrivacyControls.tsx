@@ -30,7 +30,7 @@ export function PrivacyControls() {
         <Button variant="danger" type="button" onClick={deleteAccount}><Trash2 className="h-4 w-4" /> Delete account</Button>
         {message && <p className="self-center text-sm text-coral">{message}</p>}
       </div>
-      {exported && <pre className="mt-5 max-h-[520px] overflow-auto rounded-md bg-[#17211b] p-4 text-xs text-white">{exported}</pre>}
+      {exported && <pre className="mt-5 max-h-[520px] overflow-auto rounded-md bg-[var(--text-primary)] p-4 text-xs text-white">{exported}</pre>}
     </section>
   );
 }

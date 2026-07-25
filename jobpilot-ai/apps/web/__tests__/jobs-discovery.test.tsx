@@ -168,10 +168,7 @@ describe("JobDiscovery", () => {
     expect(within(card).getByText("92")).toBeInTheDocument();
     expect(within(card).getByText("Strong fit")).toBeInTheDocument();
     expect(within(card).getByText("Posted 2 days ago")).toBeInTheDocument();
-    const applyLink = within(card).getByRole("link", { name: /Apply on official site/ });
-    expect(applyLink).toHaveAttribute("href", "https://job-boards.greenhouse.io/acme/1");
-    expect(applyLink).toHaveAttribute("rel", "noopener noreferrer");
-    expect(applyLink).toHaveAttribute("target", "_blank");
+    expect(within(card).getByRole("button", { name: /Apply on official site/ })).toBeInTheDocument();
     // Source badge shows the ATS provider name.
     expect(within(card).getByText("Greenhouse")).toBeInTheDocument();
   });
@@ -200,7 +197,7 @@ describe("JobDiscovery", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
     const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
-    expect(within(card).queryByRole("link", { name: /Apply on official site/ })).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Apply on official site/ })).not.toBeInTheDocument();
     expect(within(card).getByText("No official link available")).toBeInTheDocument();
   });
 
@@ -239,24 +236,23 @@ describe("JobDiscovery", () => {
     expect(screen.getByText("Warehouse Associate")).toBeInTheDocument();
   });
 
-  it("shows the eligibility criteria line", async () => {
+  it("shows a concise results summary", async () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     expect(
-      await screen.findByText(/Filtered to your roles, level, and locations\./)
+      await screen.findByText(/0 jobs for you/)
     ).toBeInTheDocument();
   });
 
-  it("shows matched count and searched source count after discovery", async () => {
+  it("shows the matched count without technical source diagnostics", async () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
     await screen.findByText("Machine Learning Engineer");
 
-    expect(screen.getByText(/Showing 1 matched job/)).toBeInTheDocument();
-    expect(screen.getByText(/Searched 30 verified company sources/)).toBeInTheDocument();
-    expect(screen.getByText(/Excluded by location: 5/)).toBeInTheDocument();
-    expect(screen.getByText(/Excluded by seniority: 3/)).toBeInTheDocument();
+    expect(screen.getByText(/1 job for you/)).toBeInTheDocument();
+    expect(screen.queryByText(/Searched 30 verified company sources/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Excluded by location/)).not.toBeInTheDocument();
   });
 
   it("shows the broaden-results helper when fewer than 10 jobs", async () => {
@@ -454,7 +450,7 @@ describe("JobDiscovery", () => {
 
   it("re-fetches with the selected posted-within value and updates visible jobs", async () => {
     // Server returns only a recent job for 7 days, and an extra 10-day-old job
-    // for 15 days. Changing the dropdown must call the API with the new value
+    // for 14 days. Changing the dropdown must call the API with the new value
     // AND surface the previously-withheld job.
     const recent = makeJob({ id: 1, title: "Recent Backend Engineer", posted_at: isoDaysAgo(2) });
     const older = makeJob({ id: 2, title: "Older Backend Engineer", posted_at: isoDaysAgo(10) });
@@ -464,7 +460,7 @@ describe("JobDiscovery", () => {
       if (url.pathname === "/jobs") {
         const days = Number(url.searchParams.get("posted_within_days"));
         requestedDays.push(days);
-        const jobs = days >= 15 ? [recent, older] : [recent];
+        const jobs = days >= 14 ? [recent, older] : [recent];
         return Promise.resolve(
           jsonResponse({
             profile_complete: true,
@@ -484,10 +480,10 @@ describe("JobDiscovery", () => {
     expect(screen.queryByText("Older Backend Engineer")).not.toBeInTheDocument();
     expect(requestedDays).toContain(7);
 
-    await userEvent.selectOptions(screen.getByLabelText("Posted within days"), "15");
+    await userEvent.selectOptions(screen.getByLabelText("Posted within days"), "14");
 
     // The API was called with the new window and the 10-day-old job now shows.
-    await waitFor(() => expect(requestedDays).toContain(15));
+    await waitFor(() => expect(requestedDays).toContain(14));
     expect(await screen.findByText("Older Backend Engineer")).toBeInTheDocument();
     expect(screen.getByText("Recent Backend Engineer")).toBeInTheDocument();
   });
@@ -534,14 +530,14 @@ describe("JobDiscovery", () => {
     expect(logo).toHaveAttribute("src", "https://logo.clearbit.com/openai.com");
   });
 
-  it("falls back to the company initial when no logo URL is available", async () => {
+  it("falls back to a generated company mark when no real logo URL is available", async () => {
     mockJobsFetch({ discovered: [makeJob({ company: "Acme", company_logo_url: "" })] });
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
 
     const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
-    expect(within(card).queryByRole("img")).not.toBeInTheDocument();
-    expect(within(card).getByText("A")).toBeInTheDocument();
+    expect(within(card).getByRole("img", { name: "Acme generated company mark" })).toHaveTextContent("AC");
+    expect(within(card).getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 
   it("saves a job via the official save action", async () => {

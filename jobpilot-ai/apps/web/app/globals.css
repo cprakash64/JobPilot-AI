@@ -2,18 +2,195 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Semantic theme tokens.
+ *
+ * Everything visual references these variables rather than a literal colour, so
+ * light and dark are two value sets rather than two sets of components. The
+ * Tailwind palette names (panel/line/ink/pine/…) are remapped onto the same
+ * variables in tailwind.config.ts, which is what makes existing utility classes
+ * like `bg-panel` or `border-line` theme-aware without editing every component.
+ *
+ * Dark mode is driven purely by `prefers-color-scheme`. There is no class
+ * toggle and no JavaScript: a script that stamps a theme class before hydration
+ * is the usual source of hydration mismatches, and following the OS preference
+ * is the requirement here.
+ */
+
 :root {
-  color-scheme: light;
+  /* Renders native UI (form controls, scrollbars, and the canvas before our CSS
+   * paints) in BOTH schemes. This is also what prevents the white flash in dark
+   * mode: the UA background is already dark on the very first paint, before any
+   * stylesheet or script runs. */
+  color-scheme: light dark;
+
+  /* Surfaces — warm neutrals, matching the established JobPilot identity. */
+  --background: #fbfbf8;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-muted: #f6f7f2;
+
+  /* Text */
+  --text-primary: #17211b;
+  --text-secondary: #33403a;
+  --text-muted: #5d675f;
+
+  /* Lines */
+  --border: #d8ddd2;
+  --border-strong: #b6bfb4;
+
+  /* Brand — deep pine green */
+  --accent: #1f5e45;
+  --accent-hover: #174935;
+  --accent-foreground: #ffffff;
+
+  /* Focus: a distinct, non-brand hue so it reads as an affordance. */
+  --focus-ring: #2f6f9f;
+
+  /* Status */
+  --success: #1f6b4a;
+  --success-surface: #eef8f1;
+  --success-border: #b9d7c3;
+  --warning: #7a5d12;
+  --warning-surface: #fff9e8;
+  --warning-border: #ead191;
+  --danger: #9f3d28;
+  --danger-hover: #7f2f1e;
+  --danger-surface: #fff3ef;
+  --danger-border: #f0b4a4;
+
+  /* Chrome */
+  --overlay: rgb(23 33 27 / 45%);
+  --shadow: 0 1px 2px rgb(23 33 27 / 6%), 0 8px 24px rgb(23 33 27 / 8%);
+  --glass-surface: rgb(255 255 255 / 90%);
+  --glass-surface-strong: rgb(255 255 255 / 94%);
+  --glass-border: rgb(23 33 27 / 14%);
+  --glass-shadow: 0 24px 64px rgb(23 33 27 / 18%), 0 3px 12px rgb(23 33 27 / 8%);
+  --glass-input: rgb(255 255 255 / 66%);
+  --input-background: #ffffff;
+  --disabled-background: #f1f2ee;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Charcoal/graphite with a warm cast — deliberately not pure black, which
+     * flattens elevation and reads as a void. */
+    --background: #14171a;
+    --surface: #1b1f22;
+    --surface-raised: #23282c;
+    --surface-muted: #21262a;
+
+    --text-primary: #eef1ed;
+    --text-secondary: #c3cbc5;
+    --text-muted: #98a29b;
+
+    --border: #333a3d;
+    --border-strong: #4a5357;
+
+    /* Lifted from the light pine so it stays legible on a dark surface — still
+     * unmistakably the same brand green, never a bright green panel. */
+    --accent: #4c9e7a;
+    --accent-hover: #5fb28d;
+    --accent-foreground: #0d1310;
+
+    --focus-ring: #7db8e8;
+
+    --success: #6cc196;
+    --success-surface: #172b22;
+    --success-border: #2c5c45;
+    --warning: #e0b95f;
+    --warning-surface: #2b2415;
+    --warning-border: #5c4a1f;
+    --danger: #f08a70;
+    --danger-hover: #f5a692;
+    --danger-surface: #2e1a15;
+    --danger-border: #6b3527;
+
+    --overlay: rgb(0 0 0 / 62%);
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 45%);
+    --glass-surface: rgb(27 31 34 / 88%);
+    --glass-surface-strong: rgb(27 31 34 / 93%);
+    --glass-border: rgb(255 255 255 / 13%);
+    --glass-shadow: 0 24px 64px rgb(0 0 0 / 48%), 0 3px 12px rgb(0 0 0 / 30%);
+    --glass-input: rgb(255 255 255 / 8%);
+    --input-background: #23282c;
+    --disabled-background: #262b2e;
+  }
 }
 
 * {
   box-sizing: border-box;
 }
 
+/* Painted on <html> as well as <body> so the right colour covers the viewport
+ * during first paint and over-scroll, not just the body box. */
+html {
+  background: var(--background);
+  color: var(--text-primary);
+}
+
 body {
   margin: 0;
-  background: #fbfbf8;
-  color: #17211b;
+  background: var(--background);
+  color: var(--text-primary);
+}
+
+/* Modal chrome stays quiet: a uniform dimmed blur separates the task without
+ * turning the underlying page into a decorative reflection. */
+.assisted-application-backdrop {
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  background: var(--overlay);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.assisted-application-dialog {
+  position: relative;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-surface);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  animation: assisted-application-enter 220ms cubic-bezier(.2, .78, .2, 1) both;
+}
+
+.assisted-application-glass-bar {
+  background: var(--glass-surface-strong);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+
+.auth-backdrop {
+  background: rgb(9 13 11 / 52%);
+  -webkit-backdrop-filter: blur(16px) saturate(108%);
+  backdrop-filter: blur(16px) saturate(108%);
+}
+
+.auth-dialog {
+  border: 1px solid var(--glass-border);
+  background: var(--glass-surface);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 rgb(255 255 255 / 14%);
+  -webkit-backdrop-filter: blur(28px) saturate(125%);
+  backdrop-filter: blur(28px) saturate(125%);
+  animation: assisted-application-enter 220ms cubic-bezier(.2, .78, .2, 1) both;
+}
+
+.auth-input {
+  background: var(--glass-input);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
+}
+
+@keyframes assisted-application-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(.975);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 a {
@@ -21,8 +198,87 @@ a {
   text-decoration: none;
 }
 
-.focus-ring:focus-visible {
-  outline: 3px solid #2f6f9f;
+/* Visible in BOTH themes: a focus ring the colour of its surroundings is no
+ * focus ring at all. */
+.focus-ring:focus-visible,
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
+/* Native controls follow the scheme (checkbox ticks, select arrows, spinners). */
+input,
+select,
+textarea,
+button {
+  color-scheme: inherit;
+}
+
+/* Placeholders stay legible instead of fading into the field. */
+::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+:disabled {
+  background-color: var(--disabled-background);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+/* Scrollbars. `color-scheme` handles these natively in Firefox and Safari;
+ * Chromium still needs the vendor pseudo-elements. */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface-muted);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid var(--surface-muted);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Screen-reader-only helper — used for "(required)" and error prefixes so
+ * meaning never depends on colour alone. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Honour the OS "reduce motion" setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

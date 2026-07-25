@@ -13,17 +13,45 @@ describe("CompanyLogo", () => {
     expect(img).toHaveAttribute("src", "https://logo.clearbit.com/openai.com");
   });
 
-  it("falls back to the initial when no logo URL is provided", () => {
+  it("renders a generated company mark when no real logo URL is available", () => {
     render(React.createElement(CompanyLogo, { company: "Cardinal Health", logoUrl: null }));
-    expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.getByText("CH")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Cardinal Health generated company mark" })).toHaveTextContent("CH");
+    expect(screen.getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 
-  it("falls back to the initial when the image errors", () => {
+  it("falls back to a generated mark when the only real image errors", () => {
     render(React.createElement(CompanyLogo, { company: "Deepgram", logoUrl: "https://logo.clearbit.com/deepgram.com" }));
     const img = screen.getByRole("img", { name: "Deepgram logo" });
     fireEvent.error(img);
-    expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.getByText("D")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Deepgram generated company mark" })).toHaveTextContent("DE");
+  });
+
+  it("prefers the proxied source, and falls back to the direct logo URL if the proxy fails", () => {
+    render(
+      React.createElement(CompanyLogo, {
+        company: "Deepgram",
+        logoUrl: "https://logo.clearbit.com/deepgram.com",
+        proxyPath: "/jobs/companies/deepgram/logo"
+      })
+    );
+    const first = screen.getByRole("img", { name: "Deepgram logo" });
+    expect(first).toHaveAttribute("src", expect.stringContaining("/jobs/companies/deepgram/logo"));
+    fireEvent.error(first);
+    const second = screen.getByRole("img", { name: "Deepgram logo" });
+    expect(second).toHaveAttribute("src", "https://logo.clearbit.com/deepgram.com");
+  });
+
+  it("never shows a broken-image icon: after every source fails, a generated mark remains", () => {
+    render(
+      React.createElement(CompanyLogo, {
+        company: "Deepgram",
+        logoUrl: "https://logo.clearbit.com/deepgram.com",
+        proxyPath: "/jobs/companies/deepgram/logo"
+      })
+    );
+    fireEvent.error(screen.getByRole("img", { name: "Deepgram logo" }));
+    fireEvent.error(screen.getByRole("img", { name: "Deepgram logo" }));
+    expect(screen.getByRole("img", { name: "Deepgram generated company mark" })).toHaveTextContent("DE");
+    expect(screen.getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 });

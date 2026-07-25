@@ -5,7 +5,7 @@ export default function ResumePage() {
     <AppShell>
       <header className="mb-6">
         <h1 className="text-3xl font-semibold">Resume generation</h1>
-        <p className="mt-2 text-[#5d675f]">Generate tailored, ATS-friendly resumes from the job discovery page. The backend stores every version per job and checks unsupported claims.</p>
+        <p className="mt-2 text-[var(--text-muted)]">Generate tailored, ATS-friendly resumes from the job discovery page. The backend stores every version per job and checks unsupported claims.</p>
       </header>
     </AppShell>
   );

@@ -7,6 +7,7 @@ import {
   Briefcase,
   Building2,
   CalendarDays,
+  Check,
   ExternalLink,
   FileText,
   Loader2,
@@ -15,6 +16,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  SlidersHorizontal,
   X
 } from "lucide-react";
 import {
@@ -26,9 +28,10 @@ import {
   type Job,
   type JobsResponse,
   type RefreshSummary,
-  type ResumeContent
+  type ResumeContent,
+  type ScoreState
 } from "@/lib/api";
-import { getFitScoreTone } from "@/lib/fitScore";
+import { getFitScoreTone, getScoreDisplay } from "@/lib/fitScore";
 import { CompanyLogo } from "@/components/CompanyLogo";
 import { Button } from "@/components/Button";
 import { GeneratedResumePreview } from "@/components/GeneratedResumePreview";
@@ -36,6 +39,7 @@ import { GeneratedCoverLetterPreview } from "@/components/GeneratedCoverLetterPr
 import { AutoApplyModal } from "@/components/AutoApplyModal";
 
 type DocType = "resume" | "cover_letter";
+type JobSort = "newest" | "fit";
 
 const WORKPLACE_OPTIONS = ["", "remote", "hybrid", "onsite"] as const;
 
@@ -48,18 +52,17 @@ export function JobDiscovery() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
-  const [debug, setDebug] = useState<DiscoverySummary | null>(null);
   const [detailsId, setDetailsId] = useState<number | null>(null);
   const [applyJob, setApplyJob] = useState<Job | null>(null);
   const [docModal, setDocModal] = useState<{ doc: GeneratedDocument; subtitle: string } | null>(null);
   const [generating, setGenerating] = useState<{ jobId: number; type: DocType } | null>(null);
+  const [dateRefreshing, setDateRefreshing] = useState(true);
 
   const [role, setRole] = useState("");
   const [workplace, setWorkplace] = useState("");
-  const [company, setCompany] = useState("");
-  const [location, setLocation] = useState("");
   const [minFit, setMinFit] = useState(0);
   const [postedWithin, setPostedWithin] = useState(7);
+  const [sortBy, setSortBy] = useState<JobSort>("newest");
 
   // Re-fetch from the server whenever the "Posted within" window changes so the
   // list actually reflects the selected range (7 vs 15 vs 30 days). The backend
@@ -77,12 +80,50 @@ export function JobDiscovery() {
         if (active) {
           setError(loadError instanceof Error ? loadError.message : "Could not load jobs.");
         }
+      } finally {
+        if (active) {
+          setDateRefreshing(false);
+        }
       }
     })();
     return () => {
       active = false;
     };
   }, [postedWithin]);
+
+  // Controlled polling: while any visible job is still being scored in the
+  // background, re-fetch the list on a light interval so "Calculating fit…"
+  // resolves into a real score without a manual refresh. Polling STOPS as soon
+  // as no visible score is pending, so a fully-scored list never polls.
+  const hasPendingScores = useMemo(
+    () =>
+      jobs.some((job) => {
+        const state = job.match?.score_state ?? (job.match?.fit_score == null ? "pending" : "scored");
+        return state === "pending" || state === "scoring";
+      }),
+    [jobs]
+  );
+
+  useEffect(() => {
+    if (!hasPendingScores) {
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(async () => {
+      try {
+        const result = await api<JobsResponse>(`/jobs?posted_within_days=${postedWithin}`);
+        if (active) {
+          setJobs(result.jobs);
+        }
+      } catch {
+        // Transient; the next tick (or a manual action) will retry.
+      }
+    }, 4000);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [hasPendingScores, postedWithin, jobs]);
 
   const filtered = useMemo(() => {
     // Filtering "posted within N days" is inherently time-dependent.
@@ -96,14 +137,18 @@ export function JobDiscovery() {
         return (
           (!role || haystack.includes(role.toLowerCase())) &&
           (!workplace || (job.workplace_type || "").toLowerCase() === workplace) &&
-          (!company || job.company.toLowerCase().includes(company.toLowerCase())) &&
-          (!location || (job.location || "").toLowerCase().includes(location.toLowerCase())) &&
           fit >= minFit &&
           (withinDays === null || withinDays <= postedWithin)
         );
       })
-      .sort((a, b) => (b.match?.fit_score ?? -1) - (a.match?.fit_score ?? -1));
-  }, [jobs, role, workplace, company, location, minFit, postedWithin]);
+      .sort((a, b) => {
+        if (sortBy === "fit") {
+          return (b.match?.fit_score ?? -1) - (a.match?.fit_score ?? -1);
+        }
+        const postedDifference = dateValue(b.posted_at) - dateValue(a.posted_at);
+        return postedDifference || (b.match?.fit_score ?? -1) - (a.match?.fit_score ?? -1);
+      });
+  }, [jobs, role, workplace, minFit, postedWithin, sortBy]);
 
   const detailsJob = useMemo(() => jobs.find((job) => job.id === detailsId) ?? null, [jobs, detailsId]);
 
@@ -130,8 +175,7 @@ export function JobDiscovery() {
   }
 
   function applyDiscoverySummary(discovery?: DiscoverySummary) {
-    setWarnings(discovery?.source_warnings ?? []);
-    setDebug(discovery ?? null);
+    setWarnings(summarizeSourceWarnings(discovery?.source_warnings ?? []));
     if (!discovery) {
       setMessage("");
       return;
@@ -151,7 +195,7 @@ export function JobDiscovery() {
       );
       setJobs(result.jobs);
       setProfileComplete(result.profile_complete);
-      setWarnings(result.summary.source_warnings ?? []);
+      setWarnings(summarizeSourceWarnings(result.summary.source_warnings ?? []));
       setMessage(`Re-scored ${result.summary.rescored_count} jobs · ${result.summary.matched_count} match your profile.`);
     } catch (refreshError) {
       if (process.env.NODE_ENV === "development") {
@@ -203,12 +247,12 @@ export function JobDiscovery() {
         <Button variant="secondary" type="button" onClick={refreshMatches} disabled={busy}>
           {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh matches
         </Button>
-        {message && <p className="self-center text-sm text-[#5d675f]">{message}</p>}
-        {error && <p className="self-center text-sm text-[#9f3d28]">{error}</p>}
+        {message && <p className="self-center text-sm text-[var(--text-muted)]">{message}</p>}
+        {error && <p className="self-center text-sm text-[var(--danger)]">{error}</p>}
       </div>
 
       {!profileComplete && (
-        <div className="mb-4 rounded-lg border border-[#ead191] bg-[#fff9e8] p-4 text-sm text-[#5b4a17]">
+        <div className="mb-4 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-sm text-[var(--warning)]">
           <p className="font-semibold">Complete your profile to discover better jobs.</p>
           <p className="mt-1">
             Add target roles and skills on your <a className="font-medium text-pine underline" href="/profile">profile</a> so we can
@@ -218,11 +262,11 @@ export function JobDiscovery() {
       )}
 
       {warnings.length > 0 && (
-        <div className="mb-4 rounded-lg border border-[#ead191] bg-[#fff9e8] p-4">
+        <div className="mb-4 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[#9a6a00]" />
-            <div className="text-sm text-[#5b4a17]">
-              <p className="font-semibold">Some sources could not be reached</p>
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--warning)]" />
+            <div className="text-sm text-[var(--warning)]">
+              <p className="font-semibold">A small number of sources are temporarily unavailable</p>
               <ul className="mt-1 list-disc pl-5">
                 {warnings.map((warning) => (
                   <li key={warning}>{warning}</li>
@@ -233,52 +277,124 @@ export function JobDiscovery() {
         </div>
       )}
 
-      <div className="mb-4 grid gap-3 rounded-lg border border-line bg-white p-4 md:grid-cols-3 lg:grid-cols-6">
-        <input aria-label="Role or skill" className="h-10 rounded-md border border-line px-3" placeholder="Role or skill" value={role} onChange={(event) => setRole(event.target.value)} />
-        <select aria-label="Workplace type" className="h-10 rounded-md border border-line bg-white px-3" value={workplace} onChange={(event) => setWorkplace(event.target.value)}>
-          {WORKPLACE_OPTIONS.map((option) => (
-            <option key={option || "any"} value={option}>{option ? option[0].toUpperCase() + option.slice(1) : "Any workplace"}</option>
-          ))}
-        </select>
-        <input aria-label="Company" className="h-10 rounded-md border border-line px-3" placeholder="Company" value={company} onChange={(event) => setCompany(event.target.value)} />
-        <input aria-label="Location" className="h-10 rounded-md border border-line px-3" placeholder="Location" value={location} onChange={(event) => setLocation(event.target.value)} />
-        <label className="flex flex-col text-xs text-[#5d675f]">
-          Min fit: {minFit}
-          <input aria-label="Minimum fit score" type="range" min={0} max={100} step={5} value={minFit} onChange={(event) => setMinFit(Number(event.target.value))} />
-        </label>
-        <label className="flex flex-col text-xs text-[#5d675f]">
-          Posted within
-          <select aria-label="Posted within days" className="h-10 rounded-md border border-line bg-white px-2" value={postedWithin} onChange={(event) => setPostedWithin(Number(event.target.value))}>
-            <option value={7}>7 days</option>
-            <option value={15}>15 days</option>
-            <option value={30}>30 days</option>
-          </select>
-        </label>
+      <div className="mb-4 rounded-2xl border border-line bg-white p-4 shadow-sm">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="rounded-xl bg-[var(--success-surface)] p-2 text-pine">
+              <SlidersHorizontal className="h-4 w-4" />
+            </span>
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Refine your matches</h2>
+              <p className="text-xs text-[var(--text-muted)]">
+                Search by role, then narrow by fit, workplace, or recency.
+              </p>
+            </div>
+          </div>
+          {(role || workplace || minFit > 0) && (
+            <button
+              type="button"
+              onClick={() => {
+                setRole("");
+                setWorkplace("");
+                setMinFit(0);
+              }}
+              className="focus-ring rounded-lg px-3 py-2 text-xs font-medium text-[var(--text-muted)] hover:bg-panel"
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+          <label className="xl:col-span-2">
+            <span className="mb-1.5 block text-xs font-medium text-[var(--text-muted)]">
+              Role or skill
+            </span>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-[var(--text-muted)]" />
+              <input
+                aria-label="Role or skill"
+                className="h-11 w-full rounded-lg border border-line bg-panel/20 pl-9 pr-3 text-sm"
+                placeholder="e.g. Software Engineer"
+                value={role}
+                onChange={(event) => setRole(event.target.value)}
+              />
+            </div>
+          </label>
+
+          <FilterSelect
+            label="Workplace"
+            ariaLabel="Workplace type"
+            value={workplace}
+            onChange={setWorkplace}
+            options={WORKPLACE_OPTIONS.map((option) => ({
+              value: option,
+              label: option ? option[0].toUpperCase() + option.slice(1) : "Any workplace"
+            }))}
+          />
+
+          <FilterSelect
+            label="Minimum fit"
+            ariaLabel="Minimum fit score"
+            value={String(minFit)}
+            onChange={(value) => setMinFit(Number(value))}
+            options={[
+              { value: "0", label: "Any fit" },
+              { value: "60", label: "60% and above" },
+              { value: "70", label: "70% and above" },
+              { value: "80", label: "80% and above" }
+            ]}
+          />
+
+          <div className="relative">
+            <FilterSelect
+              label="Posted within"
+              ariaLabel="Posted within days"
+              value={String(postedWithin)}
+              onChange={(value) => {
+                setDateRefreshing(true);
+                setPostedWithin(Number(value));
+              }}
+              options={[
+                { value: "1", label: "Past 24 hours" },
+                { value: "3", label: "Past 3 days" },
+                { value: "7", label: "Past 7 days" },
+                { value: "14", label: "Past 14 days" },
+                { value: "30", label: "Past 30 days" }
+              ]}
+            />
+            {dateRefreshing && (
+              <Loader2
+                aria-label="Refreshing date range"
+                className="absolute right-8 top-8 h-4 w-4 animate-spin text-pine"
+              />
+            )}
+          </div>
+
+          <FilterSelect
+            label="Sort by"
+            ariaLabel="Sort jobs"
+            value={sortBy}
+            onChange={(value) => setSortBy(value as JobSort)}
+            options={[
+              { value: "newest", label: "Newest first" },
+              { value: "fit", label: "Best fit" }
+            ]}
+          />
+        </div>
       </div>
 
-      <div className="mb-3 text-sm text-[#5d675f]">
+      <div className="mb-3 text-sm text-[var(--text-muted)]">
         <p>
-          <span className="font-medium text-[#33403a]">Showing {filtered.length} matched job{filtered.length === 1 ? "" : "s"}</span>
-          {debug?.sources_searched ? ` · Searched ${debug.sources_searched} verified company source${debug.sources_searched === 1 ? "" : "s"}` : ""}
-          {" · Filtered to your roles, level, and locations."}
+          <span className="font-medium text-[var(--text-secondary)]">
+            {filtered.length} job{filtered.length === 1 ? "" : "s"} for you
+          </span>
+          {` · Posted in the last ${postedWithin === 1 ? "24 hours" : `${postedWithin} days`}`}
         </p>
-        {debug && (
-          <details className="mt-2 rounded-md border border-line bg-panel/40 px-3 py-2 text-xs">
-            <summary className="cursor-pointer font-medium">Source coverage</summary>
-            <ul className="mt-2 grid gap-0.5">
-              <li>Sources searched: {debug.sources_searched ?? 0} ({debug.sources_succeeded ?? 0} ok, {debug.sources_failed ?? 0} failed)</li>
-              <li>New jobs found: {debug.fresh}</li>
-              <li>Excluded by location: {debug.excluded_location ?? 0}</li>
-              <li>Excluded by seniority: {debug.excluded_seniority ?? 0}</li>
-              <li>Excluded by role mismatch: {debug.excluded_role ?? 0}</li>
-              <li>Eligible jobs shown: {debug.eligible ?? filtered.length}</li>
-            </ul>
-          </details>
-        )}
       </div>
 
       {hasDiscovered && filtered.length > 0 && filtered.length < 10 && (
-        <p className="mb-3 rounded-md border border-[#ead191] bg-[#fff9e8] px-3 py-2 text-sm text-[#5b4a17]">
+        <p className="mb-3 rounded-md border border-[var(--warning-border)] bg-[var(--warning-surface)] px-3 py-2 text-sm text-[var(--warning)]">
           We found only a few strict matches. Add more target roles or locations to broaden results.
         </p>
       )}
@@ -297,7 +413,7 @@ export function JobDiscovery() {
           />
         ))}
         {filtered.length === 0 && (
-          <div className="rounded-lg border border-line bg-white p-8 text-center text-[#5d675f]">
+          <div className="rounded-lg border border-line bg-white p-8 text-center text-[var(--text-muted)]">
             {!profileComplete
               ? "Complete your profile to discover better jobs."
               : hasDiscovered
@@ -307,7 +423,23 @@ export function JobDiscovery() {
         )}
       </div>
 
-      {detailsJob && <JobDetailsModal job={detailsJob} onClose={() => setDetailsId(null)} onSave={() => saveJob(detailsJob.id)} />}
+      {detailsJob && (
+        <JobDetailsModal
+          job={detailsJob}
+          onClose={() => setDetailsId(null)}
+          onSave={() => saveJob(detailsJob.id)}
+          onApply={() => {
+            setApplyJob(detailsJob);
+            setDetailsId(null);
+          }}
+        />
+      )}
+      {generating && (
+        <DocumentGenerationModal
+          type={generating.type}
+          job={jobs.find((job) => job.id === generating.jobId) ?? null}
+        />
+      )}
       {docModal && <DocumentModal doc={docModal.doc} subtitle={docModal.subtitle} onClose={() => setDocModal(null)} />}
       {applyJob && (
         <AutoApplyModal
@@ -320,6 +452,140 @@ export function JobDiscovery() {
       )}
     </div>
   );
+}
+
+const GENERATION_STEPS: Record<DocType, string[]> = {
+  resume: [
+    "Reading the role requirements",
+    "Selecting your most relevant experience",
+    "Tailoring language and keywords",
+    "Checking accuracy and ATS structure"
+  ],
+  cover_letter: [
+    "Understanding the role and company",
+    "Choosing evidence from your profile",
+    "Writing a focused first draft",
+    "Checking accuracy and tone"
+  ]
+};
+
+function DocumentGenerationModal({ type, job }: { type: DocType; job: Job | null }) {
+  const [activeStep, setActiveStep] = useState(0);
+  const steps = GENERATION_STEPS[type];
+  const title = type === "resume" ? "Tailoring your resume" : "Writing your cover letter";
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setActiveStep((current) => Math.min(current + 1, steps.length - 1));
+    }, 2400);
+    return () => window.clearInterval(timer);
+  }, [type, steps.length]);
+
+  return (
+    <div className="assisted-application-backdrop fixed inset-0 z-50 p-4 sm:p-6">
+      <div
+        className="assisted-application-dialog w-full max-w-[540px] overflow-hidden rounded-[24px]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="document-generation-title"
+      >
+        <div className="border-b border-line px-6 py-5 sm:px-7">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-pine">Preparing your application</p>
+          <h3 id="document-generation-title" className="mt-1.5 text-2xl font-semibold tracking-[-0.03em]">
+            {title}
+          </h3>
+          {job && (
+            <p className="mt-1.5 text-sm text-[var(--text-muted)]">
+              {job.title} · {job.company}
+            </p>
+          )}
+        </div>
+
+        <div className="px-6 py-6 sm:px-7">
+          <div className="h-1.5 overflow-hidden rounded-full bg-panel" aria-hidden="true">
+            <div
+              className="h-full rounded-full bg-pine transition-[width] duration-700 ease-out"
+              style={{ width: `${Math.min(88, 18 + activeStep * 22)}%` }}
+            />
+          </div>
+          <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
+            We’re using only facts from your saved profile and the employer’s job description.
+          </p>
+
+          <ol className="mt-5 grid gap-2" aria-live="polite">
+            {steps.map((step, index) => {
+              const complete = index < activeStep;
+              const active = index === activeStep;
+              return (
+                <li
+                  key={step}
+                  className={`flex items-center gap-3 rounded-xl border px-3.5 py-3 text-sm transition ${
+                    active
+                      ? "border-[var(--success-border)] bg-[var(--success-surface)] text-[var(--text-primary)]"
+                      : "border-transparent text-[var(--text-muted)]"
+                  }`}
+                >
+                  <span
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-full ${
+                      complete ? "bg-pine text-white" : active ? "bg-white text-pine" : "border border-line"
+                    }`}
+                  >
+                    {complete ? <Check className="h-3.5 w-3.5" /> : active ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  </span>
+                  <span className={active ? "font-medium" : ""}>{step}</span>
+                </li>
+              );
+            })}
+          </ol>
+
+          <p className="mt-5 text-xs text-[var(--text-muted)]">
+            Usually ready in under a minute. You’ll be able to preview, edit, and download it before applying.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FilterSelect({
+  label,
+  ariaLabel,
+  value,
+  onChange,
+  options
+}: {
+  label: string;
+  ariaLabel: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+}) {
+  return (
+    <label>
+      <span className="mb-1.5 block text-xs font-medium text-[var(--text-muted)]">{label}</span>
+      <select
+        aria-label={ariaLabel}
+        className="h-11 w-full rounded-lg border border-line bg-white px-3 text-sm font-medium text-[var(--text-secondary)]"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {options.map((option) => (
+          <option key={option.value || "any"} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function summarizeSourceWarnings(warnings: string[]): string[] {
+  const timeouts = warnings.filter((warning) => /TimeoutError|timed?\s*out/i.test(warning));
+  const other = warnings.filter((warning) => !/TimeoutError|timed?\s*out/i.test(warning));
+  const summary = timeouts.length > 0
+    ? [`${timeouts.length} source${timeouts.length === 1 ? "" : "s"} responded too slowly. Jobs from all other sources are shown, and the daily refresh will retry automatically.`]
+    : [];
+  return [...summary, ...other.slice(0, 5)];
 }
 
 function JobCard({
@@ -347,15 +613,20 @@ function JobCard({
       {/* Top row: company identity + fit badge */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
-          <CompanyLogo company={job.company} logoUrl={job.company_logo_url} />
+          <CompanyLogo
+            company={job.company}
+            logoUrl={job.company_logo_url}
+            proxyPath={job.company_logo_proxy_path}
+            companyDomain={job.company_domain}
+          />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-[#33403a]">{job.company}</p>
+            <p className="truncate text-sm font-semibold text-[var(--text-secondary)]">{job.company}</p>
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
               <SourceBadge source={job.source} />
             </div>
           </div>
         </div>
-        <FitBadge score={fit} label={job.match?.fit_label ?? null} />
+        <FitBadge score={fit} label={job.match?.fit_label ?? null} scoreState={job.match?.score_state ?? null} />
       </div>
 
       {/* Title */}
@@ -364,7 +635,7 @@ function JobCard({
       </h2>
 
       {/* Metadata row */}
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[#5d675f]">
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[var(--text-muted)]">
         {job.location && <Meta icon={<MapPin className="h-3.5 w-3.5" />}>{job.location}</Meta>}
         {job.workplace_type && job.workplace_type !== "unknown" && (
           <Meta icon={<Building2 className="h-3.5 w-3.5" />}>{capitalize(job.workplace_type)}</Meta>
@@ -380,7 +651,7 @@ function JobCard({
 
       {/* AI match explanation */}
       {reasons.length > 0 ? (
-        <ul className="mt-3 grid gap-1 text-sm leading-6 text-[#33403a]">
+        <ul className="mt-3 grid gap-1 text-sm leading-6 text-[var(--text-secondary)]">
           {reasons.map((reason) => (
             <li key={reason} className="flex gap-2">
               <span aria-hidden className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-pine/70" />
@@ -389,21 +660,35 @@ function JobCard({
           ))}
         </ul>
       ) : (
-        !job.match && (
-          <p className="mt-3 text-sm text-[#5d675f]">Refresh matches after completing your profile for a fit score.</p>
-        )
+        (() => {
+          const display = getScoreDisplay(job.match?.score_state ?? null, job.match?.fit_score ?? null);
+          if (display.kind === "score") {
+            return null;
+          }
+          return (
+            <p className="mt-3 flex items-center gap-2 text-sm text-[var(--text-muted)]">
+              {display.kind === "calculating" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              <span>{display.helper}</span>
+              {display.kind === "profile_incomplete" && (
+                <a href="/profile" className="font-medium text-pine underline">
+                  Complete profile
+                </a>
+              )}
+            </p>
+          );
+        })()
       )}
 
       {/* Gaps / risks — present but visually quiet */}
       {job.match && (job.match.missing_skills.length > 0 || job.match.risk_factors.length > 0) && (
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5d675f]">
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
           {job.match.missing_skills.length > 0 && (
             <span>
               <span className="font-medium">Missing:</span> {job.match.missing_skills.slice(0, 4).join(", ")}
             </span>
           )}
           {job.match.risk_factors.length > 0 && (
-            <span className="text-[#9f3d28]">{job.match.risk_factors[0]}</span>
+            <span className="text-[var(--danger)]">{job.match.risk_factors[0]}</span>
           )}
         </div>
       )}
@@ -429,7 +714,7 @@ function JobCard({
 function Meta({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="text-[#8a958c]">{icon}</span>
+      <span className="text-[var(--text-muted)]">{icon}</span>
       {children}
     </span>
   );
@@ -531,8 +816,8 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
         <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-4">
           <div className="min-w-0">
             <h3 className="text-xl font-semibold">{isResume ? "Tailored Resume" : "Cover Letter"}</h3>
-            <p className="mt-0.5 text-sm text-[#33403a]">{subtitle}</p>
-            <p className="text-xs text-[#5d675f]">Generated from your saved profile and this job description.</p>
+            <p className="mt-0.5 text-sm text-[var(--text-secondary)]">{subtitle}</p>
+            <p className="text-xs text-[var(--text-muted)]">Generated from your saved profile and this job description.</p>
             <div className="mt-2 flex flex-wrap gap-1.5">
               {isResume && quality.ats_friendly && <QualityBadge label="ATS-friendly" />}
               {quality.job_tailored && <QualityBadge label="Tailored to job" />}
@@ -544,7 +829,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
               <button
                 type="button"
                 aria-pressed={mode === "preview"}
-                className={`px-3 py-1.5 ${mode === "preview" ? "bg-pine text-white" : "bg-white text-[#33403a]"}`}
+                className={`px-3 py-1.5 ${mode === "preview" ? "bg-pine text-white" : "bg-white text-[var(--text-secondary)]"}`}
                 onClick={() => setMode("preview")}
               >
                 Preview
@@ -552,7 +837,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
               <button
                 type="button"
                 aria-pressed={mode === "edit"}
-                className={`px-3 py-1.5 ${mode === "edit" ? "bg-pine text-white" : "bg-white text-[#33403a]"}`}
+                className={`px-3 py-1.5 ${mode === "edit" ? "bg-pine text-white" : "bg-white text-[var(--text-secondary)]"}`}
                 onClick={() => setMode("edit")}
               >
                 Edit
@@ -566,7 +851,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
 
         <div className="flex-1 overflow-auto bg-panel/50 p-6">
           {(warnings.length > 0 || (quality.missing_job_skills_not_claimed?.length ?? 0) > 0) && (
-            <div className="mx-auto mb-4 max-w-[820px] rounded-md border border-[#ead191] bg-[#fff9e8] px-3 py-2 text-xs text-[#5b4a17]">
+            <div className="mx-auto mb-4 max-w-[820px] rounded-md border border-[var(--warning-border)] bg-[var(--warning-surface)] px-3 py-2 text-xs text-[var(--warning)]">
               {warnings.map((warning) => (
                 <p key={warning}>{warning}</p>
               ))}
@@ -592,9 +877,9 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
           <Button type="button" onClick={save}><Save className="h-4 w-4" /> Save document</Button>
           <Button variant="secondary" type="button" onClick={copy}>Copy text</Button>
           <Button variant="secondary" type="button" onClick={() => download("docx")}>Download DOCX</Button>
-          <Button variant="secondary" type="button" onClick={() => download("pdf")}>Download PDF <span className="ml-1 text-[10px] uppercase text-[#5d675f]">beta</span></Button>
+          <Button variant="secondary" type="button" onClick={() => download("pdf")}>Download PDF</Button>
           <Button variant="secondary" type="button" onClick={onClose}>Close</Button>
-          {status && <span className="text-sm text-[#5d675f]">{status}</span>}
+          {status && <span className="text-sm text-[var(--text-muted)]">{status}</span>}
         </div>
       </div>
     </div>
@@ -603,7 +888,7 @@ function DocumentModal({ doc, subtitle, onClose }: { doc: GeneratedDocument; sub
 
 function QualityBadge({ label }: { label: string }) {
   return (
-    <span className="inline-flex items-center rounded-full border border-[#bcd3c3] bg-[#eef5f0] px-2 py-0.5 text-[11px] font-medium text-[#2f5741]">
+    <span className="inline-flex items-center rounded-full border border-[var(--success-border)] bg-[var(--success-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)]">
       {label}
     </span>
   );
@@ -817,23 +1102,6 @@ function isValidApplyUrl(url: string | null | undefined): boolean {
   );
 }
 
-function ApplyButton({ url }: { url: string | null | undefined }) {
-  if (!isValidApplyUrl(url)) {
-    // Never render an apply link to a missing/placeholder URL.
-    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[#5d675f]">No official link available</span>;
-  }
-  return (
-    <a
-      className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-pine px-4 text-sm font-medium text-white"
-      href={url ?? undefined}
-      target="_blank"
-      rel="noopener noreferrer"
-    >
-      Apply on official site <ExternalLink className="h-4 w-4" />
-    </a>
-  );
-}
-
 /**
  * Primary apply control. For a valid official URL it launches the assisted
  * application flow (prepare docs + secure session, then open the employer site);
@@ -841,30 +1109,30 @@ function ApplyButton({ url }: { url: string | null | undefined }) {
  */
 function AssistedApplyButton({ url, onApply }: { url: string | null | undefined; onApply: () => void }) {
   if (!isValidApplyUrl(url)) {
-    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[#5d675f]">No official link available</span>;
+    return <span className="inline-flex h-10 items-center rounded-md bg-panel px-4 text-sm text-[var(--text-muted)]">No official link available</span>;
   }
-  // Keep a real href (so open-in-new-tab / right-click still reach the official
-  // page) but intercept a plain click to run the assisted-apply preparation flow.
   return (
-    <a
-      href={url ?? undefined}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={(event) => {
-        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) {
-          return; // let the browser open the raw link in a new tab/window
-        }
-        event.preventDefault();
-        onApply();
-      }}
+    <button
+      type="button"
+      onClick={onApply}
       className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-pine px-4 text-sm font-medium text-white"
     >
       Apply on official site <ExternalLink className="h-4 w-4" />
-    </a>
+    </button>
   );
 }
 
-function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => void; onSave: () => void }) {
+function JobDetailsModal({
+  job,
+  onClose,
+  onSave,
+  onApply
+}: {
+  job: Job;
+  onClose: () => void;
+  onSave: () => void;
+  onApply: () => void;
+}) {
   return (
     <div className="fixed inset-0 z-50 bg-black/40 p-4" onClick={onClose}>
       <div
@@ -874,7 +1142,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
         <div className="flex items-start justify-between gap-4 border-b border-line p-5">
           <div>
             <h3 className="text-xl font-semibold">{job.title}</h3>
-            <p className="mt-1 text-sm text-[#5d675f]">
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
               {job.company}
               {job.location ? ` · ${job.location}` : ""}
             </p>
@@ -895,7 +1163,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
             <section className="mt-4 rounded-lg border border-line bg-panel/50 p-4">
               <h4 className="font-semibold">Why this matches</h4>
               {job.match.match_reasons.length === 0 && job.match.fit_score !== null && (
-                <p className="mt-1 text-xs text-[#5d675f]">Deterministic match — add more profile detail for richer reasons.</p>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">Deterministic match — add more profile detail for richer reasons.</p>
               )}
               <ul className="mt-2 list-disc pl-5 text-sm leading-6">
                 {job.match.match_reasons.map((reason) => (
@@ -906,7 +1174,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
                 <p className="mt-2 text-sm"><span className="font-medium">Missing skills:</span> {job.match.missing_skills.join(", ")}</p>
               )}
               {job.match.risk_factors.length > 0 && (
-                <ul className="mt-2 list-disc pl-5 text-sm text-[#9f3d28]">
+                <ul className="mt-2 list-disc pl-5 text-sm text-[var(--danger)]">
                   {job.match.risk_factors.map((risk) => (
                     <li key={risk}>{risk}</li>
                   ))}
@@ -921,7 +1189,7 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
           {job.responsibilities && job.responsibilities.length > 0 && (
             <section className="mt-4">
               <h4 className="font-semibold">Responsibilities</h4>
-              <ul className="mt-2 list-disc pl-5 text-sm leading-6 text-[#33403a]">
+              <ul className="mt-2 list-disc pl-5 text-sm leading-6 text-[var(--text-secondary)]">
                 {job.responsibilities.map((item) => (
                   <li key={item}>{item}</li>
                 ))}
@@ -943,12 +1211,12 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
           {job.description_clean && (
             <section className="mt-4">
               <h4 className="font-semibold">Description</h4>
-              <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#33403a]">{job.description_clean.slice(0, 4000)}</p>
+              <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[var(--text-secondary)]">{job.description_clean.slice(0, 4000)}</p>
             </section>
           )}
         </div>
         <div className="flex flex-wrap gap-2 border-t border-line p-4">
-          <ApplyButton url={job.application_url} />
+          <AssistedApplyButton url={job.application_url} onApply={onApply} />
           <Button variant="secondary" type="button" onClick={onSave}><Save className="h-4 w-4" /> Save to tracker</Button>
         </div>
       </div>
@@ -956,11 +1224,45 @@ function JobDetailsModal({ job, onClose, onSave }: { job: Job; onClose: () => vo
   );
 }
 
-function FitBadge({ score, label }: { score: number | null; label: string | null }) {
+function FitBadge({
+  score,
+  label,
+  scoreState
+}: {
+  score: number | null;
+  label: string | null;
+  scoreState?: ScoreState | null;
+}) {
+  const display = getScoreDisplay(scoreState, score);
+
+  // Non-scored lifecycle states get a neutral badge with a clear message so a
+  // pending/incomplete/failed score never reads as a permanent "Not scored".
+  if (display.kind !== "score") {
+    return (
+      <div
+        data-fit-tone="none"
+        data-score-state={scoreState ?? "pending"}
+        className="w-24 shrink-0 rounded-xl border border-line bg-panel px-2 py-2 text-center text-[var(--text-muted)]"
+        title={display.helper}
+      >
+        <p className="text-[10px] font-medium uppercase tracking-wide opacity-70">Fit score</p>
+        {display.kind === "calculating" ? (
+          <p className="flex h-8 items-center justify-center" aria-label="Calculating fit">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </p>
+        ) : (
+          <p className="text-2xl font-bold leading-tight">—</p>
+        )}
+        <p className="mt-0.5 text-[10px] font-semibold leading-tight">{display.label}</p>
+      </div>
+    );
+  }
+
   const tone = getFitScoreTone(score);
   return (
     <div
       data-fit-tone={tone.key}
+      data-score-state="scored"
       className={`w-24 shrink-0 rounded-xl border px-2 py-2 text-center ${tone.container}`}
       title={tone.description}
     >
@@ -971,14 +1273,24 @@ function FitBadge({ score, label }: { score: number | null; label: string | null
   );
 }
 
-const SOURCE_LABELS: Record<string, string> = { greenhouse: "Greenhouse", lever: "Lever", ashby: "Ashby" };
+const SOURCE_LABELS: Record<string, string> = {
+  greenhouse: "Greenhouse",
+  lever: "Lever",
+  ashby: "Ashby",
+  smartrecruiters: "SmartRecruiters",
+  recruitee: "Recruitee",
+  workable: "Workable",
+  teamtailor: "Teamtailor",
+  breezy: "Breezy",
+  simplifyjobs: "SimplifyJobs"
+};
 
 function SourceBadge({ source }: { source: string | null }) {
   if (!source || source === "demo") {
     return null;
   }
   const label = SOURCE_LABELS[source.toLowerCase()] ?? source[0].toUpperCase() + source.slice(1);
-  return <span className="rounded-full border border-line px-2 py-0.5 text-xs text-[#5d675f]">{label}</span>;
+  return <span className="rounded-full border border-line px-2 py-0.5 text-xs text-[var(--text-muted)]">{label}</span>;
 }
 
 function WorkplaceBadge({ type }: { type: string | null }) {
@@ -997,7 +1309,7 @@ function PostedBadge({ postedAt }: { postedAt: string | null }) {
   if (!label) {
     return null;
   }
-  return <span className="rounded-full bg-panel px-2 py-0.5 text-xs text-[#5d675f]">{label}</span>;
+  return <span className="rounded-full bg-panel px-2 py-0.5 text-xs text-[var(--text-muted)]">{label}</span>;
 }
 
 function daysAgo(postedAt: string | null, now: number): number | null {
@@ -1009,6 +1321,14 @@ function daysAgo(postedAt: string | null, now: number): number | null {
     return null;
   }
   return Math.floor((now - time) / (1000 * 60 * 60 * 24));
+}
+
+function dateValue(postedAt: string | null): number {
+  if (!postedAt) {
+    return 0;
+  }
+  const value = new Date(postedAt).getTime();
+  return Number.isNaN(value) ? 0 : value;
 }
 
 function postedLabel(postedAt: string | null): string | null {

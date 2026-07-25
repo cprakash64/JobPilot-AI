@@ -58,9 +58,13 @@ export type RefreshSummary = {
   source_warnings: string[];
 };
 
+export type ScoreState = "pending" | "scoring" | "scored" | "failed" | "profile_incomplete";
+
 export type JobMatchInfo = {
   fit_score: number | null;
   fit_label: string | null;
+  score_state?: ScoreState | null;
+  scoring_error_code?: string | null;
   match_reasons: string[];
   missing_skills: string[];
   risk_factors: string[];
@@ -76,6 +80,9 @@ export type Job = {
   company: string;
   company_domain?: string | null;
   company_logo_url?: string | null;
+  /** Relative path on the API — served through JobPilot's own cached, SSRF-safe
+   * logo proxy. Preferred over company_logo_url when present. */
+  company_logo_proxy_path?: string | null;
   source: string | null;
   location: string | null;
   workplace_type: string | null;
@@ -266,7 +273,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       retryable: typeof structured?.retryable === "boolean" ? structured.retryable : fallback.retryable,
       serverCode: structured?.code,
       stage: structured?.stage,
-      requestId: structured?.request_id
+      // The structured envelope carries it when present; every response also
+      // carries the X-Request-ID header (see the API's catch_unhandled_errors
+      // middleware), so a plain `detail` error still gets a correlation id the
+      // user can quote in a support request.
+      requestId: structured?.request_id ?? response.headers.get("x-request-id") ?? undefined
     });
   }
   return response.json() as Promise<T>;
