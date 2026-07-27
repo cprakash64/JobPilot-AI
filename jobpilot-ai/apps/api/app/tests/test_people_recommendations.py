@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,8 +19,21 @@ from app.core.security import create_access_token, hash_password
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models.entities import CompanyBranding, JobPosting, PeopleDiscoveryRun, User
+from app.models.entities import (
+    CompanyBranding,
+    JobPeopleCandidate,
+    JobPosting,
+    PeopleDiscoveryRun,
+    ProfessionalPerson,
+    User,
+    UserJobPeopleRecommendation,
+    UserProfile,
+)
 from app.people import providers
+from app.people.employment_validation import (
+    EMPLOYMENT_VALIDATION_VERSION,
+    validate_current_employment,
+)
 from app.people.feature_flags import configuration_summary
 from app.people.intelligence import (
     expand_titles,
@@ -29,6 +44,7 @@ from app.people.intelligence import (
 from app.people.providers import ApolloPeopleProvider, MockPeopleProvider, ProviderUnavailable
 from app.people.schemas import (
     EmailVerificationResult,
+    OutreachDraftRequest,
     PeopleSearchQuery,
     PersonEnrichmentRequest,
     ProviderPerson,
@@ -44,6 +60,8 @@ from app.people.security import is_professional_email, safe_profile_url
 from app.people.service import (
     allocate_enrichment_targets,
     build_category_search_queries,
+    find_email,
+    outreach_draft,
 )
 from app.people.title_ontology import normalize_title, title_similarity
 
@@ -699,6 +717,315 @@ def test_discovery_cache_actions_and_cross_user_denial(
     )
     assert feedback.status_code == 200
     assert feedback.json()["suppressed"] is True
+
+
+def test_employment_validation_suppresses_newer_conflict_former_and_parent() -> None:
+    profile = extract_job_people_profile(_job())
+    now = datetime.now(UTC)
+    exact = ProviderPerson(
+        **_records()[2].model_dump(exclude={"employment_verified_at"}),
+        employment_verified_at=now - timedelta(days=10),
+    )
+    conflict = validate_current_employment(
+        exact,
+        profile,
+        prior_observations=[{
+            "company_domain": "new-employer.example",
+            "verified_at": now.isoformat(),
+        }],
+        now=now,
+    )
+    assert conflict.status == "conflicting_current_employment"
+    assert conflict.rejection_codes == ["current_employment_conflict"]
+
+    former = exact.model_copy(update={
+        "current_company_name": "Other Company",
+        "current_company_domain": "other.example",
+        "previous_employers": ["Acme AI"],
+    })
+    former_result = validate_current_employment(former, profile, now=now)
+    assert former_result.status == "former_employee"
+    assert former_result.rejection_codes == ["former_employee"]
+
+    related_profile = profile.model_copy(update={
+        "company_domain": "commerce.acme.example",
+        "parent_company_domain": "acme.example",
+    })
+    related = exact.model_copy(update={
+        "current_company_name": "Acme",
+        "current_company_domain": "acme.example",
+    })
+    related_result = validate_current_employment(related, related_profile, now=now)
+    assert related_result.status == "confirmed_related_company"
+    assert related_result.rejection_codes == ["related_company_only"]
+
+
+def _persist_recommendation(
+    db: Session,
+    *,
+    status: str = "confirmed_exact_company",
+    revalidation_required: bool = False,
+    category: str = "likely_recruiter",
+) -> tuple[User, JobPosting, ProfessionalPerson, UserJobPeopleRecommendation]:
+    user = User(
+        email=f"{category}-{status}@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    job.external_id = f"{category}-{status}"
+    job.hash_for_deduplication = hashlib.sha256(job.external_id.encode()).hexdigest()
+    person = ProfessionalPerson(
+        canonical_full_name="Rita Recruiter",
+        normalized_full_name="rita recruiter",
+        current_company_name="Acme AI",
+        current_company_domain="acme.example",
+        current_title="Senior Technical Recruiter",
+        normalized_title="senior technical recruiter",
+        employment_last_verified_at=datetime.now(UTC),
+        employment_revalidation_required=revalidation_required,
+        employment_conflict_detected_at=(
+            datetime.now(UTC) if revalidation_required else None
+        ),
+    )
+    db.add_all([user, job, person])
+    db.flush()
+    candidate = JobPeopleCandidate(
+        job_id=job.id,
+        person_id=person.id,
+        candidate_category=category,
+        category_score=88,
+        data_confidence=0.9,
+        current_employment_confidence=0.95,
+        employment_validation_status=status,
+        employment_validation_version=EMPLOYMENT_VALIDATION_VERSION,
+        employment_validation_checked_at=datetime.now(UTC),
+        recommendation_reasons=["Exact current company confirmed."],
+        recommendation_limitations=[],
+        scoring_version="people-v2:people-title-v2",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+    )
+    db.add(candidate)
+    db.flush()
+    recommendation = UserJobPeopleRecommendation(
+        user_id=user.id,
+        job_id=job.id,
+        job_people_candidate_id=candidate.id,
+        personalized_reasons=[],
+        personalized_score=88,
+    )
+    db.add(recommendation)
+    db.commit()
+    return user, job, person, recommendation
+
+
+def test_old_cache_is_hidden_and_email_is_blocked_for_employment_conflict(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.people import service
+
+    user, job, person, recommendation = _persist_recommendation(
+        db,
+        revalidation_required=True,
+    )
+    candidate = db.get(
+        JobPeopleCandidate, recommendation.job_people_candidate_id
+    )
+    assert candidate is not None
+    candidate.employment_validation_version = "people-employment-v1"
+    db.commit()
+    assert service._fresh_candidates(db, job.id) == []
+
+    provider_called = False
+
+    def unexpected_provider():
+        nonlocal provider_called
+        provider_called = True
+        raise AssertionError("Hunter must not be called for an employment conflict")
+
+    monkeypatch.setattr(settings, "people_email_discovery_enabled", True)
+    monkeypatch.setattr(service, "get_email_provider", unexpected_provider)
+    result = asyncio.run(find_email(
+        db, user, job.id, recommendation.id
+    ))
+    assert result["status"] == "employment_conflict"
+    assert result["professional_email"] is None
+    assert provider_called is False
+    assert person.professional_email_ciphertext is None
+    monkeypatch.setattr(settings, "people_outreach_drafting_enabled", True)
+    with pytest.raises(HTTPException) as blocked_draft:
+        outreach_draft(
+            db,
+            user,
+            job.id,
+            recommendation.id,
+            OutreachDraftRequest(
+                draft_type="recruiter_introduction",
+                message_type="linkedin_message",
+            ),
+        )
+    assert blocked_draft.value.status_code == 409
+
+
+def test_hunter_is_explicit_cached_and_never_displays_risky_email(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.people import service
+
+    user, job, person, recommendation = _persist_recommendation(db)
+
+    class RiskyEmailProvider:
+        credits = 2
+        find_calls = 0
+        verify_calls = 0
+
+        async def find_work_email(self, request):
+            self.find_calls += 1
+            assert request.company_domain == "acme.example"
+            return WorkEmailResult(
+                status="unknown",
+                email="private-address@acme.example",
+                professional=True,
+                provider="hunter",
+            )
+
+        async def verify_work_email(self, email):
+            self.verify_calls += 1
+            return EmailVerificationResult(
+                status="risky",
+                provider="hunter",
+                verified_at=datetime.now(UTC),
+            )
+
+    provider = RiskyEmailProvider()
+    monkeypatch.setattr(settings, "people_email_discovery_enabled", True)
+    monkeypatch.setattr(settings, "people_email_daily_credit_budget", 20)
+    monkeypatch.setattr(settings, "people_email_per_user_daily_limit", 10)
+    monkeypatch.setattr(service, "get_email_provider", lambda: provider)
+    assert provider.find_calls == 0
+
+    with caplog.at_level(logging.INFO):
+        first = asyncio.run(find_email(db, user, job.id, recommendation.id))
+        second = asyncio.run(find_email(db, user, job.id, recommendation.id))
+
+    assert first["status"] == second["status"] == "risky"
+    assert first["professional_email"] is None
+    assert provider.find_calls == 1
+    assert provider.verify_calls == 1
+    assert person.professional_email_ciphertext is None
+    assert person.professional_email_hash is None
+    assert "private-address@" not in caplog.text
+
+
+def test_grounded_drafts_differ_by_category_and_respect_linkedin_limit(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "people_outreach_drafting_enabled", True)
+    user, job, person, recruiter = _persist_recommendation(db)
+    db.add(UserProfile(
+        user_id=user.id,
+        full_name="Casey Candidate",
+        skills=["Python", "Machine Learning"],
+    ))
+    manager_candidate = JobPeopleCandidate(
+        job_id=job.id,
+        person_id=person.id,
+        candidate_category="potential_hiring_manager",
+        category_score=90,
+        data_confidence=0.9,
+        current_employment_confidence=0.95,
+        employment_validation_status="confirmed_exact_company",
+        employment_validation_version=EMPLOYMENT_VALIDATION_VERSION,
+        employment_validation_checked_at=datetime.now(UTC),
+        recommendation_reasons=[],
+        recommendation_limitations=[],
+        scoring_version="people-v2:people-title-v2",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+    )
+    referrer_candidate = JobPeopleCandidate(
+        job_id=job.id,
+        person_id=person.id,
+        candidate_category="potential_referrer",
+        category_score=85,
+        data_confidence=0.9,
+        current_employment_confidence=0.95,
+        employment_validation_status="confirmed_exact_company",
+        employment_validation_version=EMPLOYMENT_VALIDATION_VERSION,
+        employment_validation_checked_at=datetime.now(UTC),
+        recommendation_reasons=[],
+        recommendation_limitations=[],
+        scoring_version="people-v2:people-title-v2",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+    )
+    db.add_all([manager_candidate, referrer_candidate])
+    db.flush()
+    manager = UserJobPeopleRecommendation(
+        user_id=user.id,
+        job_id=job.id,
+        job_people_candidate_id=manager_candidate.id,
+        personalized_reasons=[],
+        personalized_score=90,
+    )
+    referrer = UserJobPeopleRecommendation(
+        user_id=user.id,
+        job_id=job.id,
+        job_people_candidate_id=referrer_candidate.id,
+        personalized_reasons=[],
+        personalized_score=85,
+    )
+    db.add_all([manager, referrer])
+    db.commit()
+
+    recruiter_draft = outreach_draft(
+        db,
+        user,
+        job.id,
+        recruiter.id,
+        OutreachDraftRequest(
+            draft_type="recruiter_introduction",
+            message_type="email",
+        ),
+    )
+    manager_draft = outreach_draft(
+        db,
+        user,
+        job.id,
+        manager.id,
+        OutreachDraftRequest(
+            draft_type="potential_hiring_manager_introduction",
+            message_type="linkedin_message",
+        ),
+    )
+    referrer_draft = outreach_draft(
+        db,
+        user,
+        job.id,
+        referrer.id,
+        OutreachDraftRequest(
+            draft_type="referrer_introduction",
+            message_type="linkedin_connection_note",
+        ),
+    )
+    assert "recruiting team" in recruiter_draft["body"]
+    assert "engineering function" in manager_draft["body"]
+    assert "perspective" in referrer_draft["body"]
+    assert 90 <= len(recruiter_draft["body"].split()) <= 150
+    assert 60 <= len(manager_draft["body"].split()) <= 110
+    assert len(referrer_draft["body"]) <= 300
+    assert recruiter_draft["assumptions"] == []
+    assert manager_draft["assumptions"] == []
+    assert "referral_willingness_unconfirmed" in referrer_draft[
+        "omitted_uncertain_facts"
+    ]
+    all_text = " ".join(
+        draft["body"]
+        for draft in (recruiter_draft, manager_draft, referrer_draft)
+    ).lower()
+    assert "mutual connection" not in all_text
+    assert "will refer" not in all_text
+    assert "i hope this message finds you well" not in all_text
 
 
 def test_feature_disabled_returns_safe_visible_availability_reason(

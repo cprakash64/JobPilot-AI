@@ -14,6 +14,24 @@ import { Button } from "@/components/Button";
 
 type JobId = string | number;
 type PersonAction = "email" | "save" | "unsave" | "contacted" | "incorrect";
+type MessageType = "email" | "linkedin_connection_note" | "linkedin_message";
+type DraftTone = "concise" | "warm" | "direct";
+type OutreachDraftData = {
+  message_type: MessageType;
+  subject: string | null;
+  body: string;
+  facts_used: string[];
+  assumptions: string[];
+  omitted_uncertain_facts: string[];
+  character_count: number;
+  requires_manual_review: boolean;
+};
+type DraftContext = {
+  person: PeopleRecommendation;
+  messageType: MessageType;
+  tone: DraftTone;
+  guidance: string;
+};
 
 const CATEGORY_HEADINGS: Array<[keyof PeopleResponse["categories"], string]> = [
   ["likely_recruiters", "Likely Recruiters"],
@@ -99,7 +117,8 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   const [loading, setLoading] = useState(loadOnMount);
   const [discovering, setDiscovering] = useState(false);
   const [actionId, setActionId] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState<OutreachDraftData | null>(null);
+  const [draftContext, setDraftContext] = useState<DraftContext | null>(null);
   const discoveryInFlight = useRef(false);
 
   const load = useCallback(async (force = true) => {
@@ -188,9 +207,34 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
           method: "POST",
           body: JSON.stringify({
             information_correct_rating: "incorrect",
-            incorrect_reason: "Reported from the job-details card."
+            employment_current_rating: "stale"
           })
         });
+      } else if (action === "email") {
+        const response = await api<{
+          status: PeopleRecommendation["email_status"];
+          professional_email?: string | null;
+          verified_at?: string | null;
+        }>(`/jobs/${jobId}/people/${person.recommendation_id}/email`, {
+          method: "POST"
+        });
+        setData((current) => current ? {
+          ...current,
+          categories: Object.fromEntries(
+            Object.entries(current.categories).map(([key, people]) => [
+              key,
+              people.map((item) => item.recommendation_id === person.recommendation_id
+                ? {
+                    ...item,
+                    email_status: response.status,
+                    professional_email: response.professional_email ?? null,
+                    email_verified_at: response.verified_at ?? null
+                  }
+                : item)
+            ])
+          ) as PeopleResponse["categories"]
+        } : current);
+        return;
       } else {
         const suffix = action === "unsave" ? "save" : action;
         await api(`/jobs/${jobId}/people/${person.recommendation_id}/${suffix}`, {
@@ -212,7 +256,12 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
     }
   }, [jobId, load]);
 
-  const draftOutreach = useCallback(async (person: PeopleRecommendation) => {
+  const draftOutreach = useCallback(async (
+    person: PeopleRecommendation,
+    messageType: MessageType,
+    tone: DraftTone = "concise",
+    guidance = ""
+  ) => {
     setActionId(person.recommendation_id);
     setError("");
     try {
@@ -220,13 +269,22 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
         person.category === "potential_hiring_manager"
           ? "potential_hiring_manager_introduction"
           : person.category === "potential_referrer"
-            ? "referral_request"
+            ? "referrer_introduction"
             : "recruiter_introduction";
-      const response = await api<{ draft: string }>(
+      const response = await api<OutreachDraftData>(
         `/jobs/${jobId}/people/${person.recommendation_id}/outreach-draft`,
-        { method: "POST", body: JSON.stringify({ draft_type: type }) }
+        {
+          method: "POST",
+          body: JSON.stringify({
+            draft_type: type,
+            message_type: messageType,
+            tone,
+            user_guidance: guidance || null
+          })
+        }
       );
-      setDraft(response.draft);
+      setDraft(response);
+      setDraftContext({ person, messageType, tone, guidance });
     } catch (draftError) {
       setError(
         safePeopleError(
@@ -246,7 +304,9 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
     discovering,
     actionId,
     draft,
+    draftContext,
     setDraft,
+    setDraftContext,
     load,
     discover,
     broaden,
@@ -409,7 +469,13 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
         </div>
       ) : null}
 
-      <OutreachDraft draft={controller.draft} setDraft={controller.setDraft} />
+      <OutreachDraft
+        draft={controller.draft}
+        context={controller.draftContext}
+        setDraft={controller.setDraft}
+        setContext={controller.setDraftContext}
+        regenerate={controller.draftOutreach}
+      />
     </section>
   );
 }
@@ -612,6 +678,15 @@ function CompactPerson({
       </p>
       <h4 className="mt-1 font-semibold">{person.full_name}</h4>
       <p className="text-sm text-[var(--text-secondary)]">{person.current_title}</p>
+      <p className="mt-1 text-xs text-[var(--text-muted)]">
+        Current employment confidence: {Math.round(person.current_employment_confidence * 100)}%
+        {checkedDate(person.employment_last_verified_at)
+          ? ` · verified ${checkedDate(person.employment_last_verified_at)}`
+          : ""}
+      </p>
+      {person.employment_warning ? (
+        <p className="mt-2 text-sm text-amber-800">{person.employment_warning}</p>
+      ) : null}
       <EmailState person={person} />
       <div className="mt-3 flex flex-wrap gap-2">
         {profileUrl ? (
@@ -624,7 +699,8 @@ function CompactPerson({
             LinkedIn profile <ExternalLink className="h-4 w-4" />
           </a>
         ) : null}
-        {emailEnabled && ["not_requested", "provider_error"].includes(person.email_status) ? (
+        {emailEnabled && person.email_lookup_allowed &&
+        ["not_requested", "provider_error", "provider_unavailable"].includes(person.email_status) ? (
           <button
             className="rounded-md border border-line px-3 py-2 text-sm"
             disabled={busy}
@@ -652,7 +728,10 @@ function PersonCard({
   emailEnabled: boolean;
   outreachEnabled: boolean;
   onAction: (person: PeopleRecommendation, action: PersonAction) => Promise<void>;
-  onDraft: (person: PeopleRecommendation) => Promise<void>;
+  onDraft: (
+    person: PeopleRecommendation,
+    messageType: MessageType
+  ) => Promise<void>;
 }) {
   const profileUrl = safeExternalUrl(person.professional_profile_url);
   return (
@@ -665,6 +744,15 @@ function PersonCard({
         <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-xs">{person.category_label}</span>
       </div>
       <p className="mt-2 text-xs font-medium text-[var(--text-muted)]">{confidenceText(person.confidence)}</p>
+      <p className="mt-1 text-xs font-medium text-[var(--text-muted)]">
+        Current employment confidence: {Math.round(person.current_employment_confidence * 100)}%
+      </p>
+      <p className="mt-1 text-xs text-[var(--text-muted)]">
+        Employment last verified {checkedDate(person.employment_last_verified_at) ?? "date unavailable"}
+      </p>
+      {person.employment_warning ? (
+        <p className="mt-2 text-sm text-amber-800">{person.employment_warning}</p>
+      ) : null}
       <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">
         {person.reasons.slice(0, 3).map((reason) => <li key={reason}>{reason}</li>)}
       </ul>
@@ -686,15 +774,21 @@ function PersonCard({
             LinkedIn profile <ExternalLink className="h-4 w-4" />
           </a>
         ) : null}
-        {emailEnabled && ["not_requested", "provider_error"].includes(person.email_status) ? (
+        {emailEnabled && person.email_lookup_allowed &&
+        ["not_requested", "provider_error", "provider_unavailable"].includes(person.email_status) ? (
           <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onAction(person, "email")}>
             <Mail className="mr-1 inline h-4 w-4" />
             {person.email_status === "provider_error" ? "Retry work email" : "Find work email"}
           </button>
         ) : null}
         {outreachEnabled ? (
-          <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person)}>
-            <MessageSquareText className="mr-1 inline h-4 w-4" /> Draft outreach
+          <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person, "linkedin_message")}>
+            <MessageSquareText className="mr-1 inline h-4 w-4" /> Draft LinkedIn message
+          </button>
+        ) : null}
+        {outreachEnabled ? (
+          <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person, "email")}>
+            <Mail className="mr-1 inline h-4 w-4" /> Draft email
           </button>
         ) : null}
         <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} aria-pressed={person.saved} onClick={() => void onAction(person, person.saved ? "unsave" : "save")}>
@@ -732,30 +826,127 @@ function EmailState({ person }: { person: PeopleRecommendation }) {
   if (person.email_status === "provider_error") {
     return <p className="mt-2 text-sm text-amber-800">Work-email provider temporarily unavailable.</p>;
   }
+  if (person.email_status === "provider_unavailable") {
+    return <p className="mt-2 text-sm text-amber-800">Work-email provider temporarily unavailable.</p>;
+  }
+  if (person.email_status === "rate_limited") {
+    return <p className="mt-2 text-sm text-amber-800">The work-email provider rate limit has been reached.</p>;
+  }
+  if (person.email_status === "budget_exceeded") {
+    return <p className="mt-2 text-sm text-[var(--text-muted)]">Work-email lookup is unavailable because its daily limit was reached.</p>;
+  }
+  if (person.email_status === "employment_conflict") {
+    return <p className="mt-2 text-sm text-amber-800">Work email is unavailable until current employment is revalidated.</p>;
+  }
+  if (person.email_status === "identity_uncertain") {
+    return <p className="mt-2 text-sm text-amber-800">Work email is unavailable because the professional identity is uncertain.</p>;
+  }
   return null;
 }
 
 function OutreachDraft({
   draft,
-  setDraft
+  context,
+  setDraft,
+  setContext,
+  regenerate
 }: {
-  draft: string;
-  setDraft: (value: string) => void;
+  draft: OutreachDraftData | null;
+  context: DraftContext | null;
+  setDraft: (value: OutreachDraftData | null) => void;
+  setContext: (value: DraftContext | null) => void;
+  regenerate: (
+    person: PeopleRecommendation,
+    messageType: MessageType,
+    tone?: DraftTone,
+    guidance?: string
+  ) => Promise<void>;
 }) {
-  if (!draft) return null;
+  if (!draft || !context) return null;
+  const close = () => {
+    setDraft(null);
+    setContext(null);
+  };
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="outreach-draft-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="w-full max-w-xl rounded-xl bg-[var(--surface)] p-5 shadow-xl">
         <div className="flex items-center justify-between">
           <h3 id="outreach-draft-title" className="text-lg font-semibold">Review outreach draft</h3>
-          <button aria-label="Close outreach draft" onClick={() => setDraft("")}><X /></button>
+          <button aria-label="Close outreach draft" onClick={close}><X /></button>
         </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="text-sm">
+            Tone
+            <select
+              aria-label="Draft tone"
+              className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] p-2"
+              value={context.tone}
+              onChange={(event) => setContext({
+                ...context,
+                tone: event.target.value as DraftTone
+              })}
+            >
+              <option value="concise">Concise</option>
+              <option value="warm">Warm</option>
+              <option value="direct">Direct</option>
+            </select>
+          </label>
+          <label className="text-sm">
+            Optional guidance
+            <input
+              aria-label="Draft guidance"
+              className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] p-2"
+              value={context.guidance}
+              onChange={(event) => setContext({ ...context, guidance: event.target.value })}
+              placeholder="Add a fact or preference"
+            />
+          </label>
+        </div>
+        {draft.subject !== null ? (
+          <label className="mt-4 block text-sm">
+            Subject
+            <input
+              aria-label="Outreach subject"
+              className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] p-2"
+              value={draft.subject}
+              onChange={(event) => setDraft({ ...draft, subject: event.target.value })}
+            />
+          </label>
+        ) : null}
         <textarea
           aria-label="Outreach draft"
           className="mt-4 min-h-56 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] p-3"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          value={draft.body}
+          onChange={(event) => setDraft({
+            ...draft,
+            body: event.target.value,
+            character_count: event.target.value.length
+          })}
         />
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <span className="text-xs text-[var(--text-muted)]">{draft.character_count} characters</span>
+          <Button
+            variant="secondary"
+            onClick={() => void regenerate(
+              context.person,
+              context.messageType,
+              context.tone,
+              context.guidance
+            )}
+          >
+            Regenerate draft
+          </Button>
+        </div>
+        {draft.facts_used.length ? (
+          <p className="mt-3 text-xs text-[var(--text-muted)]">
+            Grounded in: {draft.facts_used.join("; ")}
+          </p>
+        ) : null}
+        {draft.omitted_uncertain_facts.length ? (
+          <p className="mt-1 text-xs text-[var(--text-muted)]">
+            Omitted as uncertain: {draft.omitted_uncertain_facts.join("; ")}
+          </p>
+        ) : null}
         <p className="mt-2 text-sm text-[var(--text-muted)]">
           Review and edit before manually sending. JobPilot never sends this message automatically.
         </p>

@@ -138,6 +138,17 @@ export type PeopleRecommendation = {
   category_label: string;
   relevance_score: number;
   confidence: "high" | "moderate" | "limited";
+  current_employment_confidence: number;
+  employment_validation_status:
+    | "confirmed_exact_company"
+    | "confirmed_related_company"
+    | "conflicting_current_employment"
+    | "former_employee"
+    | "stale_or_uncertain"
+    | "insufficient_evidence";
+  employment_last_verified_at: string | null;
+  employment_warning: string | null;
+  email_lookup_allowed: boolean;
   reasons: string[];
   limitations: string[];
   last_checked_at: string;
@@ -150,6 +161,11 @@ export type PeopleRecommendation = {
     | "risky"
     | "unknown"
     | "not_found"
+    | "employment_conflict"
+    | "identity_uncertain"
+    | "rate_limited"
+    | "budget_exceeded"
+    | "provider_unavailable"
     | "provider_error";
   professional_email: string | null;
   email_verified_at: string | null;

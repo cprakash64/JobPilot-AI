@@ -293,6 +293,26 @@ or migration is required. The Redis coalescing lock and provider circuit breaker
   and created no additional run or Apollo request.
 - [x] `git diff --check` and final worktree status inspected; no commit created.
 
+## Five-job controlled live validation (2026-07-27)
+
+One exact-company discovery was invoked for each of five existing jobs: Stripe job `7363`, Retell
+AI job `7600`, Capital One job `7440`, Okta job `7637`, and Abnormal Security job `7624`. The
+first attempt stopped before provider construction because the local user's per-user daily budget
+had been reached. The completed bounded command used a process-local allowance within the
+unchanged global budget; it did not persist a configuration change. Ranking thresholds and all
+provider feature flags were unchanged.
+
+The five completed Apollo runs consumed 40 reported credits. Four jobs returned accepted
+recommendations. Abnormal Security returned a current honest no-match because all eight enriched
+records failed exact-company domain verification; it is broaden-eligible, but no broadened search
+was run. All 24 displayed records matched their job's canonical company domain and had plausible
+category titles. Thirteen had safe identity-consistent LinkedIn links; the UI omits the link for
+the remaining abbreviated identities.
+
+One cache reopen per job left the Apollo run count at one and did not construct a provider. The
+complete diagnostics and blank-label human-review worksheet are recorded in
+`docs/reports/people-live-validation-2026-07-27.md`.
+
 ## Precision-preserving recall improvement (2026-07-27)
 
 Status: implementation and offline validation complete; live provider validation is pending
@@ -362,3 +382,63 @@ recommendations. Keep existing relevance thresholds until the 20-job manual revi
   pre-existing style debt in `models/entities.py` and import ordering in `core/config.py`; the
   changed People implementation and migration are clean.
 - [ ] Live validation pending explicit approval; maximum three jobs.
+
+## Employment accuracy, verified email, and grounded outreach (2026-07-27)
+
+Status: implementation and offline/full-stack validation complete. No live provider request was
+authorized or made by this change.
+
+### Architecture and decisions
+
+- `people-employment-v2` validates identity strength, exact canonical company domain, provider
+  evidence timestamp, former-employer history, related-company-only evidence, preserved source
+  observations, and newer conflicting employers. Only `confirmed_exact_company` candidates can
+  be displayed or used for email lookup. Older validation versions are excluded from current
+  cache reads and the discovery fingerprint forces job-scoped revalidation.
+- Migration `0022_people_employment_v2` adds typed validation state to candidates and a
+  canonical revalidation flag/conflict timestamp. Provider source records retain prior safe
+  normalized employment observations; raw payloads are still not stored.
+- Incorrect-employment feedback immediately suppresses the user recommendation, marks the
+  canonical record for revalidation, and blocks email. A later provider observation can clear the
+  flag only when exact-company evidence is newer than the recorded conflict.
+- Optional PDL verification remains off by default. When explicitly enabled it is bounded to one
+  candidate per category for conflicts, stale records, strong would-be matches, or comparison
+  mode; identity matching is conservative and only safe aggregate provider/credit diagnostics
+  are retained. Existing broad PDL fallback remains independently disabled.
+- Hunter is an explicit per-person action after employment/identity gates. Finder uses only the
+  canonical full name and company domain; Verifier decides the typed status. Only `verified`
+  emails are encrypted and displayable. Risky, accept-all, unknown, and not-found outcomes are
+  cached without storing an address. Redis coalescing, result TTL, hourly limiting, and separate
+  global/per-user Hunter credit budgets prevent duplicate charges.
+- Outreach remains deterministic and never sends. Recruiter, manager, and referrer objectives
+  use only applicant profile facts, job facts, verified recipient role/company, confirmed shared
+  evidence, and explicit user guidance. Responses include subject/body, facts used, assumptions,
+  omitted uncertain facts, character count, and manual-review state. Email, LinkedIn direct
+  message, and connection-note formats support concise, warm, and direct tones; a direct referral
+  request is used only when explicitly selected.
+- Person cards show current-employment confidence and verification date, gate work-email lookup,
+  expose distinct LinkedIn/email draft actions, and keep the draft editable with tone, optional
+  guidance, and regeneration. Save, contacted, and safe incorrect-information feedback remain
+  manual actions.
+
+### Rollout and rollback
+
+Deploy migration `0022` before the API/worker/scheduler/web images. Keep secondary employment
+verification, PDL fallback, email discovery, and network matching disabled until their existing
+secrets, contracts, and explicit budgets are confirmed. Roll back application code first, then
+downgrade `0022`; old candidate rows remain present but the v2 application never displays
+pre-versioned rows. The provider circuit breaker and Redis coalescing must remain enabled.
+
+### Validation checklist
+
+- [x] Focused People backend: 28 passed.
+- [x] Focused People frontend: 27 passed.
+- [x] Complete API: 624 passed. Complete web: 196 passed.
+- [x] Web lint, typecheck, production build, and Chromium People E2E: 3 passed.
+- [x] Extension typecheck/build and 284 tests passed.
+- [x] Migration upgrade/downgrade/re-upgrade passed in a disposable PostgreSQL database; the
+  disposable database was removed. Docker Compose configuration passed, the rebuilt local stack
+  is healthy, and readiness reports `0022_people_employment_v2` at head.
+- [x] `git diff --check` and final status inspected; no commit created.
+- [ ] Separate live validation is still required before claiming current Apollo, PDL, Hunter, or
+  model-backed behavior; this implementation made no external provider request.

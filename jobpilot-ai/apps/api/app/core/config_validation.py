@@ -136,6 +136,38 @@ def _check_people_encryption_key(key: str | None, *, email_enabled: bool) -> lis
     ]
 
 
+def _check_people_email_configuration(settings) -> list[Finding]:
+    if not bool(getattr(settings, "people_email_discovery_enabled", False)):
+        return []
+    findings: list[Finding] = []
+    if not (getattr(settings, "hunter_api_key", None) or "").strip():
+        findings.append(
+            Finding(
+                "HUNTER_API_KEY",
+                "is missing while professional-email discovery is enabled",
+            )
+        )
+    for setting, attribute in (
+        ("PEOPLE_EMAIL_DAILY_CREDIT_BUDGET", "people_email_daily_credit_budget"),
+        ("PEOPLE_EMAIL_PER_USER_DAILY_LIMIT", "people_email_per_user_daily_limit"),
+    ):
+        if int(getattr(settings, attribute, 0) or 0) <= 0:
+            findings.append(
+                Finding(
+                    setting,
+                    "must be a positive limit while professional-email discovery is enabled",
+                )
+            )
+    if int(getattr(settings, "people_email_result_ttl_days", 0) or 0) <= 0:
+        findings.append(
+            Finding(
+                "PEOPLE_EMAIL_RESULT_TTL_DAYS",
+                "must be positive while professional-email discovery is enabled",
+            )
+        )
+    return findings
+
+
 def _check_cors(origins: list[str] | None, *, allow_credentials: bool) -> list[Finding]:
     values = [o.strip() for o in (origins or []) if o and o.strip()]
     if not values:
@@ -217,6 +249,7 @@ def collect_findings(settings) -> list[Finding]:
         getattr(settings, "people_data_encryption_key", None),
         email_enabled=bool(getattr(settings, "people_email_discovery_enabled", False)),
     )
+    findings += _check_people_email_configuration(settings)
     findings += _check_cors(
         getattr(settings, "cors_origins", None),
         allow_credentials=bool(getattr(settings, "cors_allow_credentials", True)),

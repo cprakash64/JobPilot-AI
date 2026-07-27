@@ -31,6 +31,11 @@ from app.models.entities import (
     UserJobPeopleRecommendation,
     UserProfile,
 )
+from app.people.employment_validation import (
+    EMPLOYMENT_VALIDATION_VERSION,
+    EmploymentValidationResult,
+    validate_current_employment,
+)
 from app.people.feature_flags import is_beta
 from app.people.intelligence import extract_job_people_profile
 from app.people.observability import metric
@@ -130,6 +135,7 @@ def query_fingerprint(
     payload["scoring_version"] = SCORING_VERSION
     payload["discovery_strategy_version"] = DISCOVERY_STRATEGY_VERSION
     payload["discovery_strategy"] = strategy
+    payload["employment_validation_version"] = EMPLOYMENT_VALIDATION_VERSION
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -151,6 +157,10 @@ def _fresh_candidates(db: Session, job_id: int) -> list[JobPeopleCandidate]:
                 JobPeopleCandidate.job_id == job_id,
                 JobPeopleCandidate.expires_at > _now(),
                 JobPeopleCandidate.scoring_version == SCORING_VERSION,
+                JobPeopleCandidate.employment_validation_version
+                == EMPLOYMENT_VALIDATION_VERSION,
+                JobPeopleCandidate.employment_validation_status
+                == "confirmed_exact_company",
             )
         )
     )
@@ -322,10 +332,153 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
         )
         db.add(source)
     else:
-        source.normalized_evidence = value.evidence
+        prior = source.normalized_evidence if isinstance(source.normalized_evidence, dict) else {}
+        observations = list(prior.get("employment_observations") or [])[-9:]
+        previous_snapshot = {
+            "company_name": prior.get("current_company_name"),
+            "company_domain": prior.get("current_company_domain"),
+            "title": prior.get("current_title"),
+            "verified_at": prior.get("employment_verified_at"),
+        }
+        incoming_snapshot = {
+            "company_name": value.evidence.get("current_company_name"),
+            "company_domain": value.evidence.get("current_company_domain"),
+            "title": value.evidence.get("current_title"),
+            "verified_at": value.evidence.get("employment_verified_at"),
+        }
+        if any(previous_snapshot.values()) and previous_snapshot != incoming_snapshot:
+            observations.append(previous_snapshot)
+        source.normalized_evidence = {
+            **value.evidence,
+            "employment_observations": observations,
+        }
         source.field_provenance = value.field_provenance
         source.source_last_updated_at = value.source_last_updated_at
     return canonical
+
+
+def _employment_observations(
+    db: Session, value: ProviderPerson
+) -> tuple[list[dict], bool, datetime | None]:
+    source = db.scalar(
+        select(ProfessionalPersonSource).where(
+            ProfessionalPersonSource.provider == value.provider,
+            ProfessionalPersonSource.provider_person_id == value.provider_person_id,
+        )
+    )
+    canonical = db.get(ProfessionalPerson, source.person_id) if source else None
+    linkedin = _normalized_linkedin(value.linkedin_url)
+    if canonical is None and linkedin:
+        canonical = db.scalar(
+            select(ProfessionalPerson).where(
+                ProfessionalPerson.linkedin_url_normalized == linkedin
+            )
+        )
+    if canonical is None:
+        return [], False, None
+    observations: list[dict] = []
+    for existing_source in db.scalars(
+        select(ProfessionalPersonSource).where(
+            ProfessionalPersonSource.person_id == canonical.id
+        )
+    ):
+        evidence = (
+            existing_source.normalized_evidence
+            if isinstance(existing_source.normalized_evidence, dict)
+            else {}
+        )
+        snapshot = {
+            "company_name": evidence.get("current_company_name"),
+            "company_domain": evidence.get("current_company_domain"),
+            "title": evidence.get("current_title"),
+            "verified_at": evidence.get("employment_verified_at"),
+        }
+        if any(snapshot.values()):
+            observations.append(snapshot)
+        observations.extend(
+            item
+            for item in (evidence.get("employment_observations") or [])
+            if isinstance(item, dict)
+        )
+    return (
+        observations,
+        canonical.employment_revalidation_required,
+        canonical.employment_conflict_detected_at,
+    )
+
+
+def _validate_employment(
+    db: Session, person: ProviderPerson, profile
+) -> EmploymentValidationResult:
+    observations, revalidation_required, revalidation_required_since = (
+        _employment_observations(db, person)
+    )
+    return validate_current_employment(
+        person,
+        profile,
+        prior_observations=observations,
+        revalidation_required=revalidation_required,
+        revalidation_required_since=revalidation_required_since,
+    )
+
+
+async def _secondary_employment_validation(
+    person: ProviderPerson,
+    profile,
+    category: PeopleCategory,
+) -> tuple[EmploymentValidationResult, ProviderPerson] | None:
+    provider = PDLPeopleProvider()
+    try:
+        rows = await provider.search_people(
+            PeopleSearchQuery(
+                category=category,
+                company_name=profile.company_name,
+                company_domain=profile.company_domain,
+                company_aliases=profile.company_aliases,
+                titles=[person.current_title],
+                title_group="employment_verification",
+                seniorities=[],
+                role_family=profile.role_family,
+                department=profile.department,
+                location=profile.location,
+                location_filter_mode="none",
+                company_match_kind="canonical",
+                limit=5,
+            )
+        )
+    except ProviderUnavailable:
+        return None
+    match = next(
+        (
+            row
+            for row in rows
+            if (
+                safe_profile_url(row.linkedin_url)
+                and safe_profile_url(row.linkedin_url)
+                == safe_profile_url(person.linkedin_url)
+            )
+            or (
+                normalize_text(row.full_name) == normalize_text(person.full_name)
+                and row.current_company_domain == person.current_company_domain
+                and normalize_text(row.current_title)
+                == normalize_text(person.current_title)
+            )
+        ),
+        None,
+    )
+    if match is None:
+        return None
+    result = validate_current_employment(match, profile)
+    usage = await provider.get_usage()
+    return (
+        result.model_copy(
+            update={
+                "verification_provider": "secondary_licensed_provider",
+                "credits_consumed": usage.credits_used,
+            }
+        ),
+        match,
+    )
 
 
 def _ensure_recommendation(
@@ -368,12 +521,15 @@ def _budget_check(db: Session, user_id: int) -> None:
     start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
     global_used = db.scalar(
         select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0)).where(
-            PeopleDiscoveryRun.started_at >= start
+            PeopleDiscoveryRun.started_at >= start,
+            PeopleDiscoveryRun.provider != "hunter",
         )
     ) or 0
     user_used = db.scalar(
         select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0)).where(
-            PeopleDiscoveryRun.user_id == user_id, PeopleDiscoveryRun.started_at >= start
+            PeopleDiscoveryRun.user_id == user_id,
+            PeopleDiscoveryRun.started_at >= start,
+            PeopleDiscoveryRun.provider != "hunter",
         )
     ) or 0
     if settings.people_daily_credit_budget and global_used >= settings.people_daily_credit_budget:
@@ -394,6 +550,35 @@ def _budget_check(db: Session, user_id: int) -> None:
                 "retryable": True,
             },
         )
+
+
+def _email_budget_exceeded(db: Session, user_id: int) -> bool:
+    start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    global_used = db.scalar(
+        select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0))
+        .where(
+            PeopleDiscoveryRun.provider == "hunter",
+            PeopleDiscoveryRun.started_at >= start,
+        )
+    ) or 0
+    user_used = db.scalar(
+        select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0))
+        .where(
+            PeopleDiscoveryRun.provider == "hunter",
+            PeopleDiscoveryRun.user_id == user_id,
+            PeopleDiscoveryRun.started_at >= start,
+        )
+    ) or 0
+    return bool(
+        (
+            settings.people_email_daily_credit_budget > 0
+            and settings.people_email_daily_credit_budget <= global_used
+        )
+        or (
+            settings.people_email_per_user_daily_limit > 0
+            and settings.people_email_per_user_daily_limit <= user_used
+        )
+    )
 
 
 _PEOPLE_CATEGORIES: tuple[PeopleCategory, ...] = (
@@ -593,9 +778,11 @@ def allocate_enrichment_targets(
 
 
 @contextmanager
-def _redis_lock(job_id: int, fingerprint: str) -> Iterator[bool]:
+def _redis_lock(
+    job_id: int, fingerprint: str, *, namespace: str = "discover"
+) -> Iterator[bool]:
     client = None
-    key = f"people:discover:{job_id}:{fingerprint}"
+    key = f"people:{namespace}:{job_id}:{fingerprint}"
     token = hashlib.sha256(f"{key}:{_now().isoformat()}".encode()).hexdigest()
     acquired = True
     try:
@@ -731,6 +918,7 @@ async def discover(
             "domain_confidence": profile.domain_confidence,
             "evidence_source": profile.company_evidence_source,
             "scoring_version": SCORING_VERSION,
+            "employment_validation_version": EMPLOYMENT_VALIDATION_VERSION,
             "discovery_strategy_version": DISCOVERY_STRATEGY_VERSION,
             "discovery_strategy": strategy,
         }
@@ -762,6 +950,9 @@ async def discover(
                 "related_company_search_used": False,
                 "broadened_title_search_used": strategy == "broadened",
                 "discovery_strategy": strategy,
+                "employment_secondary_verification_attempts": 0,
+                "employment_secondary_verification_matches": 0,
+                "employment_secondary_verification_credits": 0,
             }
             for category in _PEOPLE_CATEGORIES
         }
@@ -910,11 +1101,69 @@ async def discover(
                 if person is None:
                     diagnostics[category]["candidates_rejected"] += 1
                     continue
+                employment = _validate_employment(db, person, profile)
                 score = score_candidate(
                     category, person, profile,
                     shared_school=bool(school), shared_employer=bool(employer),
                 )
                 data_confidence = confidence(person)
+                should_secondary_verify = bool(
+                    settings.people_employment_secondary_verification_enabled
+                    and (
+                        employment.status
+                        in {
+                            "conflicting_current_employment",
+                            "stale_or_uncertain",
+                        }
+                        or (
+                            employment.status == "confirmed_exact_company"
+                            and score >= _category_threshold(category) + 15
+                        )
+                        or settings.people_employment_comparison_mode
+                    )
+                    and diagnostics[category][
+                        "employment_secondary_verification_attempts"
+                    ]
+                    == 0
+                )
+                if should_secondary_verify:
+                    diagnostics[category][
+                        "employment_secondary_verification_attempts"
+                    ] += 1
+                    secondary_match = await _secondary_employment_validation(
+                        person, profile, category
+                    )
+                    if secondary_match is not None:
+                        secondary_result, secondary_person = secondary_match
+                        diagnostics[category][
+                            "employment_secondary_verification_matches"
+                        ] += 1
+                        diagnostics[category][
+                            "employment_secondary_verification_credits"
+                        ] += secondary_result.credits_consumed
+                        _person_for_provider(db, secondary_person)
+                        db.flush()
+                        secondary = _validate_employment(
+                            db, secondary_person, profile
+                        ).model_copy(
+                            update={
+                                "verification_provider": (
+                                    "secondary_licensed_provider"
+                                ),
+                                "credits_consumed": (
+                                    secondary_result.credits_consumed
+                                ),
+                            }
+                        )
+                        if (
+                            secondary.status == "confirmed_exact_company"
+                            and secondary.verified_at is not None
+                            and (
+                                employment.verified_at is None
+                                or secondary.verified_at >= employment.verified_at
+                            )
+                        ):
+                            employment = secondary
                 threshold = _category_threshold(category)
                 rejection_reasons = candidate_rejection_reasons(
                     category,
@@ -925,6 +1174,8 @@ async def discover(
                     relevance_threshold=threshold,
                     confidence_threshold=settings.people_min_data_confidence,
                 )
+                rejection_reasons.extend(employment.rejection_codes)
+                rejection_reasons = list(dict.fromkeys(rejection_reasons))
                 if (
                     rejection_reasons == ["weak_company_confidence"]
                     and category != "potential_referrer"
@@ -953,7 +1204,10 @@ async def discover(
                     candidate = JobPeopleCandidate(
                         job_id=job_id, person_id=canonical.id, candidate_category=category,
                         category_score=score, data_confidence=data_confidence,
-                        current_employment_confidence=min(1.0, data_confidence + 0.05),
+                        current_employment_confidence=employment.confidence,
+                        employment_validation_status=employment.status,
+                        employment_validation_version=EMPLOYMENT_VALIDATION_VERSION,
+                        employment_validation_checked_at=_now(),
                         recommendation_reasons=reasons,
                         recommendation_limitations=limitations,
                         scoring_version=SCORING_VERSION, expires_at=expires,
@@ -963,10 +1217,16 @@ async def discover(
                 else:
                     candidate.category_score = score
                     candidate.data_confidence = data_confidence
+                    candidate.current_employment_confidence = employment.confidence
+                    candidate.employment_validation_status = employment.status
+                    candidate.employment_validation_version = EMPLOYMENT_VALIDATION_VERSION
+                    candidate.employment_validation_checked_at = _now()
                     candidate.recommendation_reasons = reasons
                     candidate.recommendation_limitations = limitations
                     candidate.expires_at = expires
                 _ensure_recommendation(db, user.id, candidate, school, employer)
+                canonical.employment_revalidation_required = False
+                canonical.employment_conflict_detected_at = None
                 displayed[category] += 1
                 diagnostics[category]["final_displayed_count"] += 1
                 metric(
@@ -984,7 +1244,11 @@ async def discover(
                 run.safe_failure_message = _safe_provider_message(failures[0])
             run.records_searched = searched
             run.records_enriched = len(enriched)
-            run.provider_credits_used = usage.credits_used
+            secondary_credits = sum(
+                int(value["employment_secondary_verification_credits"])
+                for value in diagnostics.values()
+            )
+            run.provider_credits_used = usage.credits_used + secondary_credits
             for category in _PEOPLE_CATEGORIES:
                 diagnostics[category]["seniorities_used"] = list(dict.fromkeys(
                     diagnostics[category]["seniorities_used"]
@@ -998,12 +1262,13 @@ async def discover(
             db.commit()
             metric(
                 "people_provider_credits_used",
-                usage.credits_used,
+                run.provider_credits_used,
                 provider=usage.provider,
             )
             logger.info(
                 "people_discovery status=%s job_id=%s searched=%s displayed=%s credits=%s scoring_version=%s",
-                run.status, job_id, searched, sum(displayed.values()), usage.credits_used, SCORING_VERSION,
+                run.status, job_id, searched, sum(displayed.values()),
+                run.provider_credits_used, SCORING_VERSION,
             )
         except Exception:
             db.rollback()
@@ -1043,6 +1308,11 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             UserJobPeopleRecommendation.job_id == job_id,
             UserJobPeopleRecommendation.suppressed_at.is_(None),
             JobPeopleCandidate.scoring_version == SCORING_VERSION,
+            JobPeopleCandidate.employment_validation_version
+            == EMPLOYMENT_VALIDATION_VERSION,
+            JobPeopleCandidate.employment_validation_status
+            == "confirmed_exact_company",
+            ProfessionalPerson.employment_revalidation_required.is_(False),
         )
         .order_by(JobPeopleCandidate.category_score.desc())
     ).all()
@@ -1063,9 +1333,14 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         expires_at = expires if expires_at is None else min(expires_at, expires)
         if expires <= now:
             continue
+        email_lookup_allowed = (
+            candidate.employment_validation_status == "confirmed_exact_company"
+            and not person.employment_revalidation_required
+        )
         email = (
             decrypt_email(person.professional_email_ciphertext)
             if person.email_verification_status == "verified"
+            and email_lookup_allowed
             else None
         )
         categories[key_map[candidate.candidate_category]].append(
@@ -1082,11 +1357,26 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
                 }[candidate.candidate_category],
                 "relevance_score": round(candidate.category_score),
                 "confidence": confidence_label(candidate.data_confidence),
+                "current_employment_confidence": round(
+                    candidate.current_employment_confidence, 2
+                ),
+                "employment_validation_status": (
+                    candidate.employment_validation_status
+                ),
+                "employment_last_verified_at": (
+                    person.employment_last_verified_at
+                ),
+                "employment_warning": None,
+                "email_lookup_allowed": email_lookup_allowed,
                 "reasons": [*candidate.recommendation_reasons, *recommendation.personalized_reasons][:3],
                 "limitations": candidate.recommendation_limitations,
                 "last_checked_at": candidate.discovered_at,
                 "professional_profile_url": safe_profile_url(person.linkedin_url),
-                "email_status": person.email_verification_status,
+                "email_status": (
+                    person.email_verification_status
+                    if email_lookup_allowed
+                    else "employment_conflict"
+                ),
                 "professional_email": email,
                 "email_verified_at": person.email_verified_at,
                 "saved": recommendation.saved_at is not None,
@@ -1235,7 +1525,26 @@ def owned_recommendation(
 async def find_email(db: Session, user: User, job_id: int, recommendation_id: int) -> dict:
     if not settings.people_email_discovery_enabled:
         raise HTTPException(status_code=404, detail="Email discovery is disabled")
-    recommendation, _, person = owned_recommendation(db, user, job_id, recommendation_id)
+    recommendation, candidate, person = owned_recommendation(
+        db, user, job_id, recommendation_id
+    )
+    if (
+        candidate.employment_validation_version != EMPLOYMENT_VALIDATION_VERSION
+        or candidate.employment_validation_status != "confirmed_exact_company"
+        or person.employment_revalidation_required
+    ):
+        status_value = (
+            "employment_conflict"
+            if person.employment_revalidation_required
+            or candidate.employment_validation_status
+            == "conflicting_current_employment"
+            else "identity_uncertain"
+        )
+        return {
+            "status": status_value,
+            "professional_email": None,
+            "verified_at": None,
+        }
     checked_at = person.email_verified_at
     if checked_at and checked_at.tzinfo is None:
         checked_at = checked_at.replace(tzinfo=UTC)
@@ -1243,7 +1552,8 @@ async def find_email(db: Session, user: User, job_id: int, recommendation_id: in
     if (
         person.email_verification_status in reusable_statuses
         and checked_at
-        and checked_at > _now() - timedelta(days=settings.people_result_ttl_days)
+        and checked_at
+        > _now() - timedelta(days=settings.people_email_result_ttl_days)
     ):
         return {
             "status": person.email_verification_status,
@@ -1254,50 +1564,115 @@ async def find_email(db: Session, user: User, job_id: int, recommendation_id: in
             ),
             "verified_at": person.email_verified_at,
         }
-    rate_limit(f"email:{user.id}", settings.people_email_rate_limit_per_hour)
-    _budget_check(db, user.id)
-    domain = person.current_company_domain
-    if not domain:
-        return {"status": "not_found", "professional_email": None}
-    provider = get_email_provider()
-    metric("people_email_find_requests_total", provider="hunter")
     try:
-        found = await provider.find_work_email(
-            WorkEmailRequest(full_name=person.canonical_full_name, company_domain=domain)
-        )
-        if not found.email or not is_professional_email(found.email, domain):
-            person.email_verification_status = "not_found"
-            person.email_verified_at = _now()
-        else:
-            verified = await provider.verify_work_email(found.email)
-            person.email_verification_status = verified.status
-            person.email_verified_at = verified.verified_at or _now()
-            if verified.status == "verified":
-                person.professional_email_ciphertext = encrypt_email(found.email)
-                person.professional_email_hash = email_hash(found.email)
-                metric("people_email_verified_total", provider=verified.provider)
-        db.add(
-            PeopleDiscoveryRun(
-                job_id=job_id,
-                user_id=user.id,
-                status=f"email_{person.email_verification_status}",
-                provider="hunter",
-                query_fingerprint=hashlib.sha256(
-                    f"email:{person.id}:{_now().date().isoformat()}".encode()
-                ).hexdigest(),
-                records_searched=1,
-                provider_credits_used=int(getattr(provider, "credits", 0)),
-                completed_at=_now(),
+        rate_limit(f"email:{user.id}", settings.people_email_rate_limit_per_hour)
+    except HTTPException:
+        return {
+            "status": "rate_limited",
+            "professional_email": None,
+            "verified_at": None,
+        }
+    if _email_budget_exceeded(db, user.id):
+        return {
+            "status": "budget_exceeded",
+            "professional_email": None,
+            "verified_at": None,
+        }
+    job = _job_or_404(db, job_id)
+    domain = extract_job_people_profile(job, db).company_domain
+    if not domain or person.current_company_domain != domain:
+        return {
+            "status": "employment_conflict",
+            "professional_email": None,
+            "verified_at": None,
+        }
+    with _redis_lock(
+        job_id, f"{user.id}:{person.id}", namespace="email"
+    ) as acquired:
+        if not acquired:
+            return {
+                "status": "searching",
+                "professional_email": None,
+                "verified_at": None,
+            }
+        db.refresh(person)
+        if (
+            person.email_verification_status in reusable_statuses
+            and person.email_verified_at
+            and (
+                person.email_verified_at
+                if person.email_verified_at.tzinfo
+                else person.email_verified_at.replace(tzinfo=UTC)
             )
-        )
-        record_audit(
-            db, user.id, "people_work_email_discovered",
-            {"job_id": job_id, "recommendation_id": recommendation.id, "status": person.email_verification_status},
-        )
-        db.commit()
-    except ProviderUnavailable:
-        person.email_verification_status = "provider_error"
-        db.commit()
+            > _now() - timedelta(days=settings.people_email_result_ttl_days)
+        ):
+            return {
+                "status": person.email_verification_status,
+                "professional_email": (
+                    decrypt_email(person.professional_email_ciphertext)
+                    if person.email_verification_status == "verified"
+                    else None
+                ),
+                "verified_at": person.email_verified_at,
+            }
+        provider = get_email_provider()
+        metric("people_email_find_requests_total", provider="hunter")
+        try:
+            found = await provider.find_work_email(
+                WorkEmailRequest(
+                    full_name=person.canonical_full_name,
+                    company_domain=domain,
+                )
+            )
+            if not found.email or not is_professional_email(found.email, domain):
+                person.email_verification_status = "not_found"
+                person.email_verified_at = _now()
+            else:
+                verified = await provider.verify_work_email(found.email)
+                person.email_verification_status = verified.status
+                person.email_verified_at = verified.verified_at or _now()
+                if verified.status == "verified":
+                    person.professional_email_ciphertext = encrypt_email(found.email)
+                    person.professional_email_hash = email_hash(found.email)
+                    metric("people_email_verified_total", provider=verified.provider)
+                else:
+                    person.professional_email_ciphertext = None
+                    person.professional_email_hash = None
+            db.add(
+                PeopleDiscoveryRun(
+                    job_id=job_id,
+                    user_id=user.id,
+                    status=f"email_{person.email_verification_status}",
+                    provider="hunter",
+                    query_fingerprint=hashlib.sha256(
+                        f"email:{user.id}:{person.id}:{_now().date().isoformat()}".encode()
+                    ).hexdigest(),
+                    records_searched=1,
+                    records_enriched=1
+                    if person.email_verification_status != "not_found"
+                    else 0,
+                    provider_credits_used=int(getattr(provider, "credits", 0)),
+                    completed_at=_now(),
+                )
+            )
+            record_audit(
+                db,
+                user.id,
+                "people_work_email_discovered",
+                {
+                    "job_id": job_id,
+                    "recommendation_id": recommendation.id,
+                    "status": person.email_verification_status,
+                },
+            )
+            db.commit()
+        except ProviderUnavailable as exc:
+            person.email_verification_status = (
+                "rate_limited"
+                if exc.reason == "provider_rate_limited"
+                else "provider_unavailable"
+            )
+            db.commit()
     if person.email_verification_status == "not_found":
         metric("people_email_not_found_total", provider="hunter")
     return {
@@ -1316,38 +1691,198 @@ def outreach_draft(
     if not settings.people_outreach_drafting_enabled:
         raise HTTPException(status_code=404, detail="Outreach drafting is disabled")
     recommendation, candidate, person = owned_recommendation(db, user, job_id, recommendation_id)
+    if (
+        recommendation.suppressed_at is not None
+        or candidate.employment_validation_version
+        != EMPLOYMENT_VALIDATION_VERSION
+        or candidate.employment_validation_status != "confirmed_exact_company"
+        or person.employment_revalidation_required
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PEOPLE_EMPLOYMENT_REVALIDATION_REQUIRED",
+                "message": (
+                    "Current employment must be revalidated before drafting outreach."
+                ),
+            },
+        )
     job = _job_or_404(db, job_id)
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
     name = (profile.full_name if profile else "") or "a candidate"
-    greeting = f"Hi {person.canonical_full_name.split()[0]},"
-    evidence_line = ""
+    first_name = person.canonical_full_name.split()[0]
+    greeting = f"Hi {first_name},"
+    facts_used = [
+        f"job:{job.title}",
+        f"company:{job.company}",
+        f"recipient_title:{person.current_title}",
+        f"recipient_company:{person.current_company_name}",
+    ]
+    shared_line = ""
     if request.draft_type == "shared_school" and recommendation.shared_school:
-        evidence_line = f" I noticed that we both attended {recommendation.shared_school}."
+        shared_line = f" We both attended {recommendation.shared_school}."
+        facts_used.append("confirmed_shared_school")
     elif request.draft_type == "shared_previous_employer" and recommendation.shared_employer:
-        evidence_line = f" I noticed that we both worked at {recommendation.shared_employer}."
+        shared_line = f" We both worked at {recommendation.shared_employer}."
+        facts_used.append("confirmed_shared_previous_employer")
     elif request.draft_type in {"shared_school", "shared_previous_employer"}:
         raise HTTPException(status_code=422, detail="The selected shared evidence is not available.")
-    if request.draft_type == "referral_request":
-        ask = "If you feel comfortable, would you be open to sharing your perspective on the role or referral process?"
-    elif request.draft_type == "potential_hiring_manager_introduction":
-        ask = "I would value any public context you can share about the function and what the team values."
-    elif request.draft_type == "follow_up":
-        ask = "I wanted to follow up in case you have a moment to share any perspective."
-    elif request.draft_type == "thank_you":
-        ask = "Thank you for taking the time to consider my note."
+
+    skills = [
+        str(value).strip()
+        for value in (profile.skills if profile else [])
+        if str(value).strip()
+    ]
+    job_skills = {
+        normalize_text(str(value))
+        for value in [*(job.required_skills or []), *(job.preferred_skills or [])]
+    }
+    qualifications = [
+        skill for skill in skills if normalize_text(skill) in job_skills
+    ][:2]
+    if not qualifications:
+        qualifications = skills[:2]
+    qualification_line = ""
+    if qualifications:
+        qualification_line = (
+            " My relevant experience includes "
+            + " and ".join(qualifications)
+            + "."
+        )
+        facts_used.extend(f"applicant_skill:{value}" for value in qualifications)
+    advertised_skills = [
+        str(value).strip()
+        for value in (job.required_skills or [])
+        if str(value).strip()
+    ][:2]
+    job_focus_line = ""
+    if advertised_skills:
+        job_focus_line = (
+            " The posting specifically emphasizes "
+            + " and ".join(advertised_skills)
+            + "."
+        )
+        facts_used.extend(f"job_skill:{value}" for value in advertised_skills)
+
+    if candidate.candidate_category == "likely_recruiter":
+        role_line = (
+            f" I applied for the {job.title} role at {job.company}."
+            f"{qualification_line}{job_focus_line}"
+        )
+        ask = (
+            " If you handle this area, could you point me to the most useful "
+            "information to include for the recruiting team?"
+        )
+        omitted = ["recruiter_assignment_unconfirmed"]
+    elif candidate.candidate_category == "potential_hiring_manager":
+        role_line = (
+            f" I’m applying for the {job.title} role at {job.company}."
+            f"{qualification_line}{job_focus_line}"
+        )
+        ask = (
+            " From your perspective, what capability matters most for someone "
+            "joining this engineering function?"
+        )
+        omitted = ["team_membership_unconfirmed", "hiring_responsibility_unconfirmed"]
     else:
-        ask = "I would appreciate any perspective you are comfortable sharing about the opportunity."
-    detail = f" {request.user_details.strip()}" if request.user_details else ""
-    draft = (
-        f"{greeting}\n\nI’m {name}, and I’m applying for the {job.title} role at {job.company}."
-        f"{evidence_line}{detail} {ask}\n\nThank you for your time,\n{name}"
-    )
+        role_line = (
+            f" I’m applying for the {job.title} role at {job.company}, and your "
+            f"work as {person.current_title} is close to the area I’m exploring."
+            f"{qualification_line}{job_focus_line}"
+        )
+        direct_referral = request.draft_type in {
+            "referral_request",
+            "direct_referral_request",
+        }
+        ask = (
+            " If you’re comfortable, would you consider referring me after "
+            "reviewing my background?"
+            if direct_referral
+            else " Would you be open to sharing one perspective on the role or application process?"
+        )
+        omitted = ["referral_willingness_unconfirmed"]
+    guidance = request.user_guidance or request.user_details
+    guidance_line = f" {guidance.strip()}" if guidance and guidance.strip() else ""
+    if guidance_line:
+        facts_used.append("user_provided_guidance")
+
+    if request.tone == "warm":
+        opener = " I appreciate you taking a moment to read this."
+        close = "Thanks for any perspective you’re comfortable sharing."
+    elif request.tone == "direct":
+        opener = ""
+        close = "Thank you for considering the question."
+    else:
+        opener = ""
+        close = "Thanks for your time."
+    core = f"{greeting}{opener}{shared_line}{role_line}{guidance_line}{ask}"
+    if request.message_type == "email":
+        category_context = {
+            "likely_recruiter": (
+                "I want to give the recruiting team the clearest, most relevant "
+                "summary rather than send a broad introduction."
+            ),
+            "potential_hiring_manager": (
+                "I’m especially interested in how the advertised work maps to "
+                "the engineering priorities your function is solving."
+            ),
+            "potential_referrer": (
+                "I’m looking for candid context before making any request beyond "
+                "learning more about the opportunity."
+            ),
+        }[candidate.candidate_category]
+        body = (
+            f"{core}\n\n{category_context} That context would help me keep the "
+            "application focused and useful. I’m happy to share a concise resume "
+            f"or clarify any relevant experience.\n\n{close}\n{name}"
+        )
+        subject = f"Question about {job.title} at {job.company}"
+    elif request.message_type == "linkedin_connection_note":
+        body = f"{greeting}{role_line}{ask}"
+        if len(body) > 300:
+            body = (
+                f"Hi {first_name}, I’m applying for {job.title} at {job.company}. "
+                "Would you be open to connecting and sharing one brief perspective?"
+            )
+        body = body[:300]
+        subject = None
+    else:
+        direct_context = {
+            "likely_recruiter": (
+                "I want to make the application easy for the recruiting team "
+                "to review."
+            ),
+            "potential_hiring_manager": (
+                "I’m trying to understand how the advertised work connects to "
+                "the function’s current engineering priorities."
+            ),
+            "potential_referrer": (
+                "I’m looking for candid context before making any request beyond "
+                "learning about the opportunity."
+            ),
+        }[candidate.candidate_category]
+        body = f"{core}\n\n{direct_context}\n\n{close}\n{name}"
+        subject = None
+    response = {
+        "message_type": request.message_type,
+        "subject": subject,
+        "body": body,
+        "draft": body,
+        "facts_used": facts_used,
+        "assumptions": [],
+        "omitted_uncertain_facts": omitted,
+        "character_count": len(body),
+        "requires_manual_review": True,
+        "requires_user_review": True,
+        "sent": False,
+    }
     record_audit(db, user.id, "people_outreach_draft_generated", {
-        "job_id": job_id, "recommendation_id": recommendation.id, "draft_type": request.draft_type,
+        "job_id": job_id, "recommendation_id": recommendation.id,
+        "draft_type": request.draft_type, "message_type": request.message_type,
         "automatically_sent": False, "category": candidate.candidate_category,
     })
     db.commit()
-    return {"draft": draft, "requires_user_review": True, "sent": False}
+    return response
 
 
 def set_saved(db: Session, user: User, job_id: int, recommendation_id: int, saved: bool) -> dict:
@@ -1367,14 +1902,22 @@ def mark_contacted(db: Session, user: User, job_id: int, recommendation_id: int)
 def submit_feedback(
     db: Session, user: User, job_id: int, recommendation_id: int, request: FeedbackRequest
 ) -> dict:
-    recommendation, _, _ = owned_recommendation(db, user, job_id, recommendation_id)
+    recommendation, candidate, person = owned_recommendation(
+        db, user, job_id, recommendation_id
+    )
     feedback = PeopleRecommendationFeedback(
         user_id=user.id, recommendation_id=recommendation.id,
         relevance_rating=request.relevance_rating,
         employment_current_rating=request.employment_current_rating,
         information_correct_rating=request.information_correct_rating,
         contacted=request.contacted, received_response=request.received_response,
-        incorrect_reason=request.incorrect_reason,
+        incorrect_reason=(
+            "employment_revalidation_requested"
+            if request.employment_current_rating == "stale"
+            else "information_reported_incorrect"
+            if request.information_correct_rating == "incorrect"
+            else None
+        ),
     )
     db.add(feedback)
     metric(
@@ -1382,12 +1925,22 @@ def submit_feedback(
         category="all",
         scoring_version=SCORING_VERSION,
     )
+    employment_reported_incorrect = (
+        request.employment_current_rating == "stale"
+        or request.information_correct_rating == "incorrect"
+    )
     if request.information_correct_rating == "incorrect":
         recommendation.suppressed_at = _now()
         metric(
             "people_recommendation_reported_incorrect_total",
             scoring_version=SCORING_VERSION,
         )
+    if employment_reported_incorrect:
+        recommendation.suppressed_at = _now()
+        person.employment_revalidation_required = True
+        person.employment_conflict_detected_at = _now()
+        candidate.employment_validation_status = "conflicting_current_employment"
+        candidate.employment_validation_checked_at = _now()
     record_audit(db, user.id, "people_recommendation_feedback", {
         "job_id": job_id, "recommendation_id": recommendation.id,
         "reported_incorrect": request.information_correct_rating == "incorrect",

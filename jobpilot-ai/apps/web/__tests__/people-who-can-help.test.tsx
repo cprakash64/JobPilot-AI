@@ -12,6 +12,11 @@ const recommendation = {
   category_label: "Likely recruiter",
   relevance_score: 88,
   confidence: "high",
+  current_employment_confidence: 0.95,
+  employment_validation_status: "confirmed_exact_company",
+  employment_last_verified_at: "2026-07-25T12:00:00Z",
+  employment_warning: null,
+  email_lookup_allowed: true,
   reasons: ["Currently listed at the hiring company.", "Has a relevant recruiting title."],
   limitations: ["Recruiting responsibility for this opening has not been confirmed."],
   last_checked_at: "2026-07-25T12:00:00Z",
@@ -351,7 +356,8 @@ describe("PeopleWhoCanHelp", () => {
       "rel", "noopener noreferrer"
     );
     expect(screen.getByRole("button", { name: /Find work email/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Draft outreach/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Draft LinkedIn message/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Draft email/ })).toBeInTheDocument();
   });
 
   it("does not render a profile action for a non-allowlisted URL", async () => {
@@ -375,6 +381,36 @@ describe("PeopleWhoCanHelp", () => {
     expect(screen.queryByRole("link", { name: "LinkedIn profile" })).not.toBeInTheDocument();
   });
 
+  it("shows employment verification and blocks email lookup when employment conflicts", async () => {
+    const conflicted = response({
+      categories: {
+        likely_recruiters: [{
+          ...recommendation,
+          current_employment_confidence: 0.1,
+          employment_validation_status: "conflicting_current_employment",
+          employment_warning: "Current employment needs revalidation.",
+          email_lookup_allowed: false,
+          email_status: "employment_conflict"
+        }],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => conflicted,
+      text: async () => JSON.stringify(conflicted)
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PeopleWhoCanHelp jobId={7} />);
+
+    expect(await screen.findByText("Current employment needs revalidation.")).toBeInTheDocument();
+    expect(screen.getByText("Current employment confidence: 10%")).toBeInTheDocument();
+    expect(screen.getByText(/Work email is unavailable until current employment is revalidated/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Find work email/ })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("opens an editable manual-review dialog for a grounded draft", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({
@@ -385,24 +421,38 @@ describe("PeopleWhoCanHelp", () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          draft: "Hi Rita,\\n\\nI’m applying for the role.",
-          requires_user_review: true,
+          message_type: "linkedin_message",
+          subject: null,
+          body: "Hi Rita,\\n\\nI’m applying for the role.",
+          facts_used: ["job:Machine Learning Engineer"],
+          assumptions: [],
+          omitted_uncertain_facts: ["recruiter_assignment_unconfirmed"],
+          character_count: 43,
+          requires_manual_review: true,
           sent: false
         }),
         text: async () => JSON.stringify({
-          draft: "Hi Rita,\\n\\nI’m applying for the role.",
-          requires_user_review: true,
+          message_type: "linkedin_message",
+          subject: null,
+          body: "Hi Rita,\\n\\nI’m applying for the role.",
+          facts_used: ["job:Machine Learning Engineer"],
+          assumptions: [],
+          omitted_uncertain_facts: ["recruiter_assignment_unconfirmed"],
+          character_count: 43,
+          requires_manual_review: true,
           sent: false
         })
       });
     vi.stubGlobal("fetch", fetchMock);
     render(<PeopleWhoCanHelp jobId="7" />);
-    fireEvent.click(await screen.findByRole("button", { name: /Draft outreach/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Draft LinkedIn message/ }));
     expect(await screen.findByRole("dialog", { name: "Review outreach draft" })).toBeInTheDocument();
     expect(screen.getByText(/never sends this message automatically/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Outreach draft")).toHaveValue(
       "Hi Rita,\\n\\nI’m applying for the role."
     );
+    expect(screen.getByLabelText("Draft tone")).toHaveValue("concise");
+    expect(screen.getByRole("button", { name: "Regenerate draft" })).toBeInTheDocument();
   });
 });
 

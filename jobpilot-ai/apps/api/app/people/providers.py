@@ -384,6 +384,11 @@ def _normalize_apollo(
     linkedin_url = row.get("linkedin_url")
     if isinstance(linkedin_url, str) and linkedin_url.startswith("http://"):
         linkedin_url = f"https://{linkedin_url.removeprefix('http://')}"
+    employment_checked = _provider_datetime(
+        row.get("employment_verified_at")
+        or row.get("last_refreshed_at")
+        or row.get("updated_at")
+    )
     return ProviderPerson(
         provider="apollo", provider_person_id=identifier, full_name=name,
         current_company_name=company,
@@ -396,10 +401,21 @@ def _normalize_apollo(
         location=", ".join(str(row.get(k)) for k in ("city", "state", "country") if row.get(k)) or None,
         linkedin_url=safe_profile_url(linkedin_url),
         source_profile_url=safe_profile_url(linkedin_url),
-        employment_verified_at=datetime.now(UTC),
+        source_last_updated_at=employment_checked,
+        employment_verified_at=employment_checked,
         education=[str(v.get("school_name")) for v in row.get("education", []) if isinstance(v, dict) and v.get("school_name")],
         previous_employers=[str(v.get("organization_name")) for v in row.get("employment_history", [])[1:] if isinstance(v, dict) and v.get("organization_name")],
-        evidence={"employment_source": "provider_current_employment"},
+        evidence={
+            "employment_source": "provider_current_employment",
+            "current_company_name": company,
+            "current_company_domain": (
+                str(organization.get("primary_domain") or "").lower() or None
+            ),
+            "current_title": title,
+            "employment_verified_at": (
+                employment_checked.isoformat() if employment_checked else None
+            ),
+        },
         field_provenance={"name": "apollo", "title": "apollo", "company": "apollo"},
     )
 
@@ -413,17 +429,44 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
     identifier = str(row.get("id") or "").strip()
     if not all((name, title, company, identifier)):
         return None
+    employment_checked = _provider_datetime(
+        row.get("job_last_changed")
+        or row.get("last_updated")
+        or row.get("updated_at")
+    )
+    company_domain = str(row.get("job_company_website") or "").lower() or None
     return ProviderPerson(
         provider="pdl", provider_person_id=identifier, full_name=name,
-        current_company_name=company, current_company_domain=str(row.get("job_company_website") or "").lower() or None,
+        current_company_name=company, current_company_domain=company_domain,
         current_title=title, department=str(row.get("job_title_role") or "") or None,
         seniority=str(row.get("job_title_levels", [""])[0] if row.get("job_title_levels") else "") or None,
         location=str(row.get("location_name") or "") or None,
         linkedin_url=safe_profile_url(row.get("linkedin_url")),
         source_profile_url=safe_profile_url(row.get("linkedin_url")),
-        source_last_updated_at=datetime.now(UTC),
+        source_last_updated_at=employment_checked,
+        employment_verified_at=employment_checked,
         education=[str(v.get("school", {}).get("name")) for v in row.get("education", []) if isinstance(v, dict) and isinstance(v.get("school"), dict) and v["school"].get("name")],
         previous_employers=[str(v.get("company", {}).get("name")) for v in row.get("experience", [])[1:] if isinstance(v, dict) and isinstance(v.get("company"), dict) and v["company"].get("name")],
-        evidence={"employment_source": "provider_current_employment"},
+        evidence={
+            "employment_source": "provider_current_employment",
+            "current_company_name": company,
+            "current_company_domain": company_domain,
+            "current_title": title,
+            "employment_verified_at": (
+                employment_checked.isoformat() if employment_checked else None
+            ),
+        },
         field_provenance={"name": "pdl", "title": "pdl", "company": "pdl"},
     )
+
+
+def _provider_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

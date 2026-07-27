@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 PeopleCategory = Literal["likely_recruiter", "potential_hiring_manager", "potential_referrer"]
 EmailStatus = Literal[
     "not_requested", "searching", "verified", "accept_all", "risky", "unknown",
-    "not_found", "provider_error",
+    "not_found", "employment_conflict", "identity_uncertain", "rate_limited",
+    "budget_exceeded", "provider_unavailable", "provider_error",
 ]
 
 
@@ -123,6 +124,12 @@ class OutreachDraftRequest(BaseModel):
     draft_type: Literal[
         "recruiter_introduction", "referral_request", "shared_school",
         "shared_previous_employer", "potential_hiring_manager_introduction",
-        "follow_up", "thank_you",
+        "referrer_introduction", "direct_referral_request", "follow_up",
+        "thank_you",
     ]
     user_details: str | None = Field(default=None, max_length=1000)
+    message_type: Literal[
+        "email", "linkedin_connection_note", "linkedin_message"
+    ] = "linkedin_message"
+    tone: Literal["concise", "warm", "direct"] = "concise"
+    user_guidance: str | None = Field(default=None, max_length=500)

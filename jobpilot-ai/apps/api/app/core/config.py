@@ -102,11 +102,15 @@ class Settings(BaseSettings):
     people_pdl_fallback_enabled: bool = False
     people_outreach_drafting_enabled: bool = False
     people_network_matching_enabled: bool = False
+    people_employment_secondary_verification_enabled: bool = False
+    people_employment_comparison_mode: bool = False
     apollo_api_key: str | None = None
     hunter_api_key: str | None = None
     pdl_api_key: str | None = None
     people_data_encryption_key: str | None = None
     people_result_ttl_days: int = 30
+    people_employment_freshness_days: int = 180
+    people_email_result_ttl_days: int = 30
     people_max_discovery_results_per_category: int = 20
     people_max_displayed_recruiters: int = 2
     people_max_displayed_managers: int = 2
@@ -114,6 +118,8 @@ class Settings(BaseSettings):
     people_max_enrichments_per_job: int = 8
     people_daily_credit_budget: int = 0
     people_per_user_daily_limit: int = 0
+    people_email_daily_credit_budget: int = 0
+    people_email_per_user_daily_limit: int = 0
     people_provider_timeout_seconds: float = 8.0
     people_provider_response_max_bytes: int = 1_000_000
     people_min_relevance_score: float = 60.0

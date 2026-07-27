@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -446,6 +447,12 @@ class ProfessionalPerson(Base):
     )
     email_verified_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
     employment_last_verified_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    employment_revalidation_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    employment_conflict_detected_at: Mapped[DateTimeValue | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[DateTimeValue] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -491,6 +498,15 @@ class JobPeopleCandidate(Base):
     category_score: Mapped[float] = mapped_column(Float, nullable=False)
     data_confidence: Mapped[float] = mapped_column(Float, nullable=False)
     current_employment_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    employment_validation_status: Mapped[str] = mapped_column(
+        String(40), default="insufficient_evidence", server_default="legacy"
+    )
+    employment_validation_version: Mapped[str] = mapped_column(
+        String(40), default="legacy", server_default="legacy", index=True
+    )
+    employment_validation_checked_at: Mapped[DateTimeValue | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     recommendation_reasons: Mapped[list] = mapped_column(JsonType, default=list)
     recommendation_limitations: Mapped[list] = mapped_column(JsonType, default=list)
     scoring_version: Mapped[str] = mapped_column(String(40), index=True)

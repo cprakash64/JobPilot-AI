@@ -11,6 +11,11 @@ const basePerson = {
   category_label: "Likely recruiter",
   relevance_score: 88,
   confidence: "high",
+  current_employment_confidence: 0.95,
+  employment_validation_status: "confirmed_exact_company",
+  employment_last_verified_at: "2026-07-25T12:00:00Z",
+  employment_warning: null,
+  email_lookup_allowed: true,
   reasons: ["Currently listed by a professional data source at the hiring company."],
   limitations: ["Recruiting responsibility for this specific opening has not been confirmed."],
   last_checked_at: "2026-07-25T12:00:00Z",
@@ -273,8 +278,14 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
     }
     if (path.endsWith("/outreach-draft")) {
       return json(route, {
-        draft: "Hi Rita,\n\nI’m applying for the Machine Learning Engineer role at Acme AI.",
-        requires_user_review: true,
+        message_type: "linkedin_message",
+        subject: null,
+        body: "Hi Rita,\n\nI’m applying for the Machine Learning Engineer role at Acme AI.",
+        facts_used: ["job:Machine Learning Engineer", "company:Acme AI"],
+        assumptions: [],
+        omitted_uncertain_facts: ["recruiter_assignment_unconfirmed"],
+        character_count: 75,
+        requires_manual_review: true,
         sent: false
       });
     }
@@ -303,7 +314,7 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
   await page.getByRole("button", { name: /Find work email/ }).click();
   await expect(page.getByText(/Verified work email: rita@acme.example/)).toBeVisible();
 
-  await page.getByRole("button", { name: /Draft outreach/ }).click();
+  await page.getByRole("button", { name: /Draft LinkedIn message/ }).click();
   const dialog = page.getByRole("dialog", { name: "Review outreach draft" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(/never sends this message automatically/i)).toBeVisible();

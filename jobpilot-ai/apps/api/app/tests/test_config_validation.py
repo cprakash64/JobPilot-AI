@@ -33,6 +33,7 @@ def make_settings(**overrides):
         demographics_encryption_key="k" * 32,
         demographics_encryption_required=False,
         workday_credentials_encryption_key="w" * 32,
+        people_email_discovery_enabled=False,
         cors_origins=["https://app.jobpilot.example"],
         cors_allow_credentials=True,
         database_url=SAFE_DB,
@@ -116,6 +117,40 @@ def test_encryption_key_is_required_only_when_encryption_is_enabled() -> None:
 def test_workday_credentials_use_a_dedicated_production_key() -> None:
     findings = collect_findings(make_settings(workday_credentials_encryption_key=None))
     assert any(f.setting == "WORKDAY_CREDENTIALS_ENCRYPTION_KEY" for f in findings)
+
+
+def test_people_email_requires_separate_provider_and_positive_budgets() -> None:
+    findings = collect_findings(make_settings(
+        people_email_discovery_enabled=True,
+        people_data_encryption_key="e" * 32,
+        hunter_api_key=None,
+        people_email_daily_credit_budget=0,
+        people_email_per_user_daily_limit=0,
+        people_email_result_ttl_days=0,
+    ))
+    names = {finding.setting for finding in findings}
+    assert {
+        "HUNTER_API_KEY",
+        "PEOPLE_EMAIL_DAILY_CREDIT_BUDGET",
+        "PEOPLE_EMAIL_PER_USER_DAILY_LIMIT",
+        "PEOPLE_EMAIL_RESULT_TTL_DAYS",
+    } <= names
+
+
+def test_people_email_configuration_accepts_separate_positive_limits() -> None:
+    findings = collect_findings(make_settings(
+        people_email_discovery_enabled=True,
+        people_data_encryption_key="e" * 32,
+        hunter_api_key="configured-secret",
+        people_email_daily_credit_budget=100,
+        people_email_per_user_daily_limit=5,
+        people_email_result_ttl_days=30,
+    ))
+    assert not any(
+        finding.setting.startswith("PEOPLE_EMAIL")
+        or finding.setting == "HUNTER_API_KEY"
+        for finding in findings
+    )
 
 
 # --------------------------------------------------------------------------- #
