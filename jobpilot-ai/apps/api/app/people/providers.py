@@ -72,7 +72,7 @@ class _HttpProvider:
         _CIRCUITS[self.provider_name] = (failures, opened)
 
     async def _request(self, method: str, url: str, **kwargs) -> dict:
-        failures, opened = _CIRCUITS.get(self.provider_name, (0, None))
+        _, opened = _CIRCUITS.get(self.provider_name, (0, None))
         if opened and opened > datetime.now(UTC):
             raise ProviderUnavailable(
                 "provider_circuit_open", provider=self.provider_name, duration_ms=0
@@ -80,7 +80,6 @@ class _HttpProvider:
         if opened:
             # Allow one clean half-open attempt after the reset interval.
             _CIRCUITS[self.provider_name] = (0, None)
-            failures = 0
         self.requests += 1
         timeout = httpx.Timeout(settings.people_provider_timeout_seconds)
         started = time.monotonic()
@@ -184,10 +183,13 @@ class ApolloPeopleProvider(_HttpProvider):
             "q_organization_domains_list": (
                 [query.company_domain] if query.company_domain else []
             ),
-            "person_locations": [query.location] if query.location else [],
             "per_page": query.limit,
             "page": 1,
         }
+        if query.seniorities:
+            payload["person_seniorities"] = query.seniorities
+        if query.location and query.location_filter_mode == "hard":
+            payload["person_locations"] = [query.location]
         data = await self._request(
             "POST", "https://api.apollo.io/api/v1/mixed_people/api_search",
             headers=self._headers(), json=payload,

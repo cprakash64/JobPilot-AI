@@ -545,6 +545,8 @@ class PeopleDiscoveryRun(Base):
     records_searched: Mapped[int] = mapped_column(Integer, default=0)
     records_enriched: Mapped[int] = mapped_column(Integer, default=0)
     provider_credits_used: Mapped[int] = mapped_column(Integer, default=0)
+    company_context: Mapped[dict] = mapped_column(JsonType, default=dict)
+    category_diagnostics: Mapped[dict] = mapped_column(JsonType, default=dict)
     failure_code: Mapped[str | None] = mapped_column(String(60))
     safe_failure_message: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())

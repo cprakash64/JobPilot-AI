@@ -33,6 +33,13 @@ function response(overrides = {}) {
       potential_referrers: []
     },
     warnings: [],
+    generated_at: "2026-07-26T12:00:00Z",
+    search_scope: {
+      company_scope: "Hiring company only",
+      location_filter: "soft",
+      parent_company_matches_included: false,
+      refresh_eligible: false
+    },
     controls: { email_discovery: true, outreach_drafting: true },
     ...overrides
   };
@@ -262,10 +269,15 @@ describe("PeopleWhoCanHelp", () => {
     }));
     render(<PeopleWhoCanHelp jobId="7" />);
     expect(await screen.findByRole("heading", { name: "People Who Can Help" })).toBeInTheDocument();
-    expect(screen.getByText("Beta")).toBeInTheDocument();
+    expect(await screen.findByText("Beta")).toBeInTheDocument();
     expect(screen.getByText("Rita Recruiter")).toBeInTheDocument();
     expect(screen.getByText(/responsibility for this opening has not been confirmed/i)).toBeInTheDocument();
-    expect(screen.getAllByText("No sufficiently reliable matches in this category.")).toHaveLength(2);
+    expect(screen.getByText("No potential manager met JobPilot’s confidence threshold.")).toBeInTheDocument();
+    expect(screen.getByText("No sufficiently reliable referral candidate was found yet.")).toBeInTheDocument();
+    expect(screen.getByText("Scope: Hiring company only")).toBeInTheDocument();
+    expect(screen.getByText("Location used as a soft signal")).toBeInTheDocument();
+    expect(screen.getByText("Related-company matches were not included")).toBeInTheDocument();
+    expect(screen.getByText("Using current cached search")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /LinkedIn profile/ })).toHaveAttribute(
       "rel", "noopener noreferrer"
     );

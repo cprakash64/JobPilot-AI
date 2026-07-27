@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     people_provider_timeout_seconds: float = 8.0
     people_provider_response_max_bytes: int = 1_000_000
     people_min_relevance_score: float = 60.0
+    people_min_recruiter_relevance: float = 60.0
+    people_min_manager_relevance: float = 60.0
+    people_min_referrer_relevance: float = 60.0
+    people_min_data_confidence: float = 0.5
+    people_recruiter_enrichment_reserve: int = 3
+    people_manager_enrichment_reserve: int = 3
+    people_referrer_enrichment_reserve: int = 2
     people_discovery_rate_limit_per_hour: int = 10
     people_email_rate_limit_per_hour: int = 10
 

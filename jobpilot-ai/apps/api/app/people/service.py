@@ -50,6 +50,7 @@ from app.people.schemas import (
 )
 from app.people.scoring import (
     SCORING_VERSION,
+    candidate_rejection_reasons,
     confidence,
     confidence_label,
     explanations,
@@ -62,6 +63,11 @@ from app.people.security import (
     encrypt_email,
     is_professional_email,
     safe_profile_url,
+)
+from app.people.title_ontology import (
+    is_early_career_job,
+    manager_title_groups,
+    recruiter_title_groups,
 )
 
 logger = logging.getLogger("jobpilot.people")
@@ -336,6 +342,122 @@ def _budget_check(db: Session, user_id: int) -> None:
         )
 
 
+_PEOPLE_CATEGORIES: tuple[PeopleCategory, ...] = (
+    "likely_recruiter",
+    "potential_hiring_manager",
+    "potential_referrer",
+)
+
+
+def _category_threshold(category: PeopleCategory) -> float:
+    return {
+        "likely_recruiter": settings.people_min_recruiter_relevance,
+        "potential_hiring_manager": settings.people_min_manager_relevance,
+        "potential_referrer": settings.people_min_referrer_relevance,
+    }[category]
+
+
+def _score_distribution(scores: list[float]) -> dict[str, int | float | None]:
+    buckets = {"0_39": 0, "40_59": 0, "60_79": 0, "80_100": 0}
+    for score in scores:
+        if score < 40:
+            buckets["0_39"] += 1
+        elif score < 60:
+            buckets["40_59"] += 1
+        elif score < 80:
+            buckets["60_79"] += 1
+        else:
+            buckets["80_100"] += 1
+    return {
+        "minimum": min(scores) if scores else None,
+        "maximum": max(scores) if scores else None,
+        "buckets": buckets,
+    }
+
+
+def build_category_search_queries(
+    profile, category: PeopleCategory, *, related_company: bool = False
+) -> list[PeopleSearchQuery]:
+    domain = profile.parent_company_domain if related_company else profile.company_domain
+    company_kind = "related" if related_company else "canonical"
+    if category == "likely_recruiter":
+        groups = recruiter_title_groups(
+            early_career=is_early_career_job(profile.job_title)
+        )
+        location_mode = "soft"
+    elif category == "potential_hiring_manager":
+        groups = manager_title_groups(profile.role_family, profile.job_title)
+        location_mode = "soft"
+    else:
+        midpoint = max(1, len(profile.team_member_titles) // 2)
+        from app.people.title_ontology import TitleGroup
+
+        groups = [
+            TitleGroup("exact_role_family", profile.team_member_titles[:midpoint], []),
+            TitleGroup("adjacent_role_family", profile.team_member_titles[midpoint:], []),
+        ]
+        location_mode = "soft"
+    return [
+        PeopleSearchQuery(
+            category=category,
+            company_name=profile.company_name,
+            company_domain=domain,
+            company_aliases=profile.company_aliases,
+            titles=group.titles,
+            title_group=group.name,
+            seniorities=group.seniorities,
+            role_family=profile.role_family,
+            department=profile.department,
+            location=profile.location,
+            location_filter_mode=location_mode,
+            company_match_kind=company_kind,
+            limit=settings.people_max_discovery_results_per_category,
+        )
+        for group in groups
+        if group.titles and domain
+    ]
+
+
+PreliminaryCandidate = tuple[
+    float, PeopleCategory, ProviderPerson, str | None, str | None
+]
+
+
+def allocate_enrichment_targets(
+    candidates: dict[PeopleCategory, list[PreliminaryCandidate]],
+    *,
+    total: int,
+    reservations: dict[PeopleCategory, int],
+) -> list[PreliminaryCandidate]:
+    selected: list[PreliminaryCandidate] = []
+    selected_keys: set[tuple[PeopleCategory, str, str]] = set()
+    for category in _PEOPLE_CATEGORIES:
+        rows = sorted(candidates.get(category, []), key=lambda item: item[0], reverse=True)
+        for item in rows[: max(0, reservations.get(category, 0))]:
+            key = (category, item[2].provider, item[2].provider_person_id)
+            if key not in selected_keys and len(selected) < total:
+                selected.append(item)
+                selected_keys.add(key)
+    remaining = sorted(
+        (
+            item
+            for category in _PEOPLE_CATEGORIES
+            for item in candidates.get(category, [])
+            if (category, item[2].provider, item[2].provider_person_id) not in selected_keys
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    for item in remaining:
+        if len(selected) >= total:
+            break
+        key = (item[1], item[2].provider, item[2].provider_person_id)
+        if key not in selected_keys:
+            selected.append(item)
+            selected_keys.add(key)
+    return selected
+
+
 @contextmanager
 def _redis_lock(job_id: int, fingerprint: str) -> Iterator[bool]:
     client = None
@@ -400,6 +522,12 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                 "beta": is_beta(user),
                 "categories": _empty_categories(),
                 "warnings": [],
+                "search_scope": {
+                    "company_scope": "Hiring company only",
+                    "location_filter": "soft",
+                    "parent_company_matches_included": False,
+                    "refresh_eligible": False,
+                },
                 "controls": {
                     "email_discovery": settings.people_email_discovery_enabled,
                     "outreach_drafting": settings.people_outreach_drafting_enabled,
@@ -408,67 +536,128 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
         # Recheck after lock acquisition.
         if _fresh_candidates(db, job_id):
             return recommendations_payload(db, user, job_id)
-        profile = extract_job_people_profile(job)
+        profile = extract_job_people_profile(job, db)
         provider = get_people_provider()
+        company_context = {
+            "canonical_company_name": profile.company_name,
+            "canonical_company_domain": profile.company_domain,
+            "aliases": profile.company_aliases,
+            "parent_company": profile.parent_company_name,
+            "parent_domain": profile.parent_company_domain,
+            "domain_confidence": profile.domain_confidence,
+            "evidence_source": profile.company_evidence_source,
+        }
         run = PeopleDiscoveryRun(
             job_id=job_id, user_id=user.id, status="running",
             provider=settings.people_primary_provider, query_fingerprint=fingerprint,
+            company_context=company_context, category_diagnostics={},
         )
         db.add(run)
         db.commit()
         categories: dict[PeopleCategory, list[ProviderPerson]] = {}
+        diagnostics: dict[str, dict] = {
+            category: {
+                "search_queries": [],
+                "title_groups": [],
+                "company_domain_used": profile.company_domain,
+                "company_aliases_considered": profile.company_aliases,
+                "seniorities_used": [],
+                "location_filter_mode": "soft",
+                "raw_search_result_count": 0,
+                "unique_candidate_count": 0,
+                "preliminary_score_distribution": _score_distribution([]),
+                "selected_for_enrichment": 0,
+                "enrichment_matches": 0,
+                "enrichment_misses": 0,
+                "candidates_rejected": 0,
+                "rejection_reason_counts": {},
+                "final_displayed_count": 0,
+                "related_company_search_used": False,
+            }
+            for category in _PEOPLE_CATEGORIES
+        }
         failures: list[str] = []
-        query_specs: list[tuple[PeopleCategory, list[str]]] = [
-            ("likely_recruiter", profile.recruiter_titles),
-            ("potential_hiring_manager", profile.hiring_manager_titles),
-            ("potential_referrer", profile.team_member_titles),
-        ]
         searched = 0
         try:
-            for category, titles in query_specs:
-                query = PeopleSearchQuery(
-                    category=category,
-                    company_name=profile.company_name,
-                    company_domain=profile.company_domain,
-                    titles=titles,
-                    role_family=profile.role_family,
-                    department=profile.department,
-                    location=profile.location,
-                    limit=settings.people_max_discovery_results_per_category,
+            for category in _PEOPLE_CATEGORIES:
+                category_rows: list[ProviderPerson] = []
+                queries = build_category_search_queries(profile, category)
+                for query in queries:
+                    diagnostics[category]["search_queries"].append({
+                        "title_group": query.title_group,
+                        "titles": query.titles,
+                        "company_match_kind": query.company_match_kind,
+                    })
+                    diagnostics[category]["title_groups"].append(query.title_group)
+                    diagnostics[category]["seniorities_used"].extend(query.seniorities)
+                    try:
+                        rows = await provider.search_people(query)
+                    except ProviderUnavailable as exc:
+                        failures.append(exc.reason)
+                        _log_provider_failure(exc, run.id)
+                        rows = []
+                    category_rows.extend(rows)
+                    searched += len(rows)
+                    diagnostics[category]["raw_search_result_count"] += len(rows)
+                canonical_unique = deduplicate(category_rows)
+                if (
+                    not canonical_unique
+                    and profile.parent_company_domain
+                    and profile.domain_confidence >= 0.8
+                ):
+                    diagnostics[category]["related_company_search_used"] = True
+                    for query in build_category_search_queries(
+                        profile, category, related_company=True
+                    ):
+                        diagnostics[category]["search_queries"].append({
+                            "title_group": query.title_group,
+                            "titles": query.titles,
+                            "company_match_kind": query.company_match_kind,
+                        })
+                        diagnostics[category]["title_groups"].append(query.title_group)
+                        diagnostics[category]["seniorities_used"].extend(query.seniorities)
+                        try:
+                            rows = await provider.search_people(query)
+                        except ProviderUnavailable as exc:
+                            failures.append(exc.reason)
+                            _log_provider_failure(exc, run.id)
+                            rows = []
+                        category_rows.extend(rows)
+                        searched += len(rows)
+                        diagnostics[category]["raw_search_result_count"] += len(rows)
+                categories[category] = deduplicate(category_rows)
+                diagnostics[category]["unique_candidate_count"] = len(categories[category])
+                duplicate_count = max(
+                    0,
+                    diagnostics[category]["raw_search_result_count"]
+                    - diagnostics[category]["unique_candidate_count"],
                 )
-                try:
-                    rows = await provider.search_people(query)
-                except ProviderUnavailable as exc:
-                    failures.append(exc.reason)
-                    _log_provider_failure(exc, run.id)
-                    rows = []
-                searched += len(rows)
+                if duplicate_count:
+                    diagnostics[category]["rejection_reason_counts"]["duplicate_person"] = duplicate_count
+                if not category_rows:
+                    diagnostics[category]["rejection_reason_counts"]["no_search_results"] = 1
                 metric(
                     "people_discovery_candidates_found",
-                    len(rows),
+                    len(categories[category]),
                     provider=settings.people_primary_provider,
                     category=category,
                     scoring_version=SCORING_VERSION,
                 )
-                categories[category] = deduplicate(rows)
             if not any(categories.values()) and settings.people_pdl_fallback_enabled:
                 fallback = PDLPeopleProvider()
-                for category, titles in query_specs:
-                    try:
-                        categories[category] = await fallback.search_people(
-                            PeopleSearchQuery(
-                                category=category, company_name=profile.company_name,
-                                company_domain=profile.company_domain, titles=titles,
-                                role_family=profile.role_family, department=profile.department,
-                                location=profile.location,
-                                limit=settings.people_max_discovery_results_per_category,
-                            )
-                        )
-                    except ProviderUnavailable as exc:
-                        failures.append(exc.reason)
-                        _log_provider_failure(exc, run.id)
+                for category in _PEOPLE_CATEGORIES:
+                    fallback_rows: list[ProviderPerson] = []
+                    for query in build_category_search_queries(profile, category):
+                        try:
+                            fallback_rows.extend(await fallback.search_people(query))
+                        except ProviderUnavailable as exc:
+                            failures.append(exc.reason)
+                            _log_provider_failure(exc, run.id)
+                    categories[category] = deduplicate(fallback_rows)
 
-            preliminary: list[tuple[float, PeopleCategory, ProviderPerson, str | None, str | None]] = []
+            preliminary_by_category: dict[PeopleCategory, list[PreliminaryCandidate]] = {
+                category: [] for category in _PEOPLE_CATEGORIES
+            }
             for category, rows in categories.items():
                 for person in rows:
                     school, employer = _shared_evidence(db, user.id, person)
@@ -476,14 +665,31 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                         category, person, profile,
                         shared_school=bool(school), shared_employer=bool(employer),
                     )
-                    preliminary.append((score, category, person, school, employer))
-            preliminary.sort(key=lambda item: item[0], reverse=True)
-            enrich_targets = preliminary[: settings.people_max_enrichments_per_job]
+                    preliminary_by_category[category].append(
+                        (score, category, person, school, employer)
+                    )
+                diagnostics[category]["preliminary_score_distribution"] = _score_distribution(
+                    [item[0] for item in preliminary_by_category[category]]
+                )
+            enrich_targets = allocate_enrichment_targets(
+                preliminary_by_category,
+                total=settings.people_max_enrichments_per_job,
+                reservations={
+                    "likely_recruiter": settings.people_recruiter_enrichment_reserve,
+                    "potential_hiring_manager": settings.people_manager_enrichment_reserve,
+                    "potential_referrer": settings.people_referrer_enrichment_reserve,
+                },
+            )
+            for _score, category, _person, _school, _employer in enrich_targets:
+                diagnostics[category]["selected_for_enrichment"] += 1
+            unique_enrichment_requests = list(dict.fromkeys(
+                item[2].provider_person_id for item in enrich_targets
+            ))
             try:
                 enriched = await provider.enrich_people(
                     [
-                        PersonEnrichmentRequest(provider_person_id=item[2].provider_person_id)
-                        for item in enrich_targets
+                        PersonEnrichmentRequest(provider_person_id=provider_person_id)
+                        for provider_person_id in unique_enrichment_requests
                     ]
                 )
             except ProviderUnavailable as exc:
@@ -497,10 +703,30 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                 )
             metric(
                 "people_enrichment_requests_total",
-                len(enrich_targets),
+                len(unique_enrichment_requests),
                 provider=settings.people_primary_provider,
             )
             enriched_by_id = {item.provider_person_id: item for item in enriched}
+            for _score, category, initial, _school, _employer in enrich_targets:
+                key = (
+                    "enrichment_matches"
+                    if initial.provider_person_id in enriched_by_id
+                    else "enrichment_misses"
+                )
+                diagnostics[category][key] += 1
+                if key == "enrichment_misses":
+                    counts = diagnostics[category]["rejection_reason_counts"]
+                    counts["enrichment_not_found"] = counts.get("enrichment_not_found", 0) + 1
+            for category in _PEOPLE_CATEGORIES:
+                not_selected = max(
+                    0,
+                    len(preliminary_by_category[category])
+                    - diagnostics[category]["selected_for_enrichment"],
+                )
+                diagnostics[category]["candidates_rejected"] += not_selected
+                if not_selected:
+                    counts = diagnostics[category]["rejection_reason_counts"]
+                    counts["enrichment_not_selected"] = not_selected
             expires = _now() + timedelta(days=settings.people_result_ttl_days)
             caps = {
                 "likely_recruiter": settings.people_max_displayed_recruiters,
@@ -508,16 +734,39 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                 "potential_referrer": settings.people_max_displayed_referrers,
             }
             displayed: dict[str, int] = defaultdict(int)
-            for _, category, initial, school, employer in preliminary:
+            for _, category, initial, school, employer in enrich_targets:
                 if displayed[category] >= caps[category]:
                     continue
-                person = enriched_by_id.get(initial.provider_person_id, initial)
+                person = enriched_by_id.get(initial.provider_person_id)
+                if person is None:
+                    diagnostics[category]["candidates_rejected"] += 1
+                    continue
                 score = score_candidate(
                     category, person, profile,
                     shared_school=bool(school), shared_employer=bool(employer),
                 )
                 data_confidence = confidence(person)
-                if score < settings.people_min_relevance_score or data_confidence < 0.5:
+                threshold = _category_threshold(category)
+                rejection_reasons = candidate_rejection_reasons(
+                    category,
+                    person,
+                    profile,
+                    relevance=score,
+                    data_confidence=data_confidence,
+                    relevance_threshold=threshold,
+                    confidence_threshold=settings.people_min_data_confidence,
+                )
+                if (
+                    rejection_reasons == ["weak_company_confidence"]
+                    and category != "potential_referrer"
+                    and score >= threshold + 15
+                ):
+                    rejection_reasons = []
+                if rejection_reasons:
+                    diagnostics[category]["candidates_rejected"] += 1
+                    counts = diagnostics[category]["rejection_reason_counts"]
+                    for reason in rejection_reasons:
+                        counts[reason] = counts.get(reason, 0) + 1
                     continue
                 reasons, limitations = explanations(
                     category, person, profile, shared_school=school, shared_employer=employer
@@ -550,6 +799,7 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                     candidate.expires_at = expires
                 _ensure_recommendation(db, user.id, candidate, school, employer)
                 displayed[category] += 1
+                diagnostics[category]["final_displayed_count"] += 1
                 metric(
                     "people_discovery_candidates_displayed",
                     provider=settings.people_primary_provider,
@@ -566,6 +816,15 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
             run.records_searched = searched
             run.records_enriched = len(enriched)
             run.provider_credits_used = usage.credits_used
+            for category in _PEOPLE_CATEGORIES:
+                diagnostics[category]["seniorities_used"] = list(dict.fromkeys(
+                    diagnostics[category]["seniorities_used"]
+                ))
+                diagnostics[category]["title_groups"] = list(dict.fromkeys(
+                    diagnostics[category]["title_groups"]
+                ))
+            run.company_context = company_context
+            run.category_diagnostics = diagnostics
             run.completed_at = _now()
             db.commit()
             metric(
@@ -614,6 +873,7 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             UserJobPeopleRecommendation.user_id == user.id,
             UserJobPeopleRecommendation.job_id == job_id,
             UserJobPeopleRecommendation.suppressed_at.is_(None),
+            JobPeopleCandidate.scoring_version == SCORING_VERSION,
         )
         .order_by(JobPeopleCandidate.category_score.desc())
     ).all()
@@ -698,11 +958,58 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         "expires_at": expires_at,
         "categories": categories,
         "coverage": {key: bool(value) for key, value in categories.items()},
+        "search_scope": {
+            "company_scope": (
+                "Hiring company and evidence-backed related domain"
+                if latest_run
+                and any(
+                    bool(value.get("related_company_search_used"))
+                    for value in (latest_run.category_diagnostics or {}).values()
+                    if isinstance(value, dict)
+                )
+                else "Hiring company only"
+            ),
+            "location_filter": "soft",
+            "parent_company_matches_included": bool(
+                latest_run
+                and any(
+                    bool(value.get("related_company_search_used"))
+                    for value in (latest_run.category_diagnostics or {}).values()
+                    if isinstance(value, dict)
+                )
+            ),
+            "refresh_eligible": response_status
+            in {"provider_unavailable", "no_reliable_matches", "stale"},
+        },
         "warnings": warnings,
         "controls": {
             "email_discovery": settings.people_email_discovery_enabled,
             "outreach_drafting": settings.people_outreach_drafting_enabled,
         },
+    }
+
+
+def diagnostics_payload(db: Session, user: User, job_id: int) -> dict:
+    if settings.app_env != "development":
+        raise HTTPException(status_code=404, detail="Not found")
+    _job_or_404(db, job_id)
+    run = db.scalar(
+        select(PeopleDiscoveryRun)
+        .where(
+            PeopleDiscoveryRun.job_id == job_id,
+            PeopleDiscoveryRun.user_id == user.id,
+        )
+        .order_by(PeopleDiscoveryRun.started_at.desc())
+    )
+    if run is None:
+        return {"discovery_run_id": None, "company_context": {}, "categories": {}}
+    return {
+        "discovery_run_id": run.id,
+        "status": run.status,
+        "company_context": run.company_context or {},
+        "categories": run.category_diagnostics or {},
+        "credits_consumed": run.provider_credits_used,
+        "completed_at": run.completed_at,
     }
 
 

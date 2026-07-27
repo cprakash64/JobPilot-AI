@@ -218,3 +218,73 @@ Validation in progress:
   `0020_people_who_can_help`; runtime services healthy.
 - [x] Complete API: 599 passed. Complete web: lint, typecheck, production build, and 192 tests
   passed. Chromium People E2E: 2 passed. Compose validation and `git diff --check`: passed.
+
+## Precision-preserving recall improvement (2026-07-27)
+
+Status: implementation and offline validation complete; live provider validation is pending
+separate approval.
+
+### Diagnosis
+
+The previous orchestrator issued one broad title list per category, treated location as an Apollo
+filter for every category, ranked all categories in one global list, and let the highest global
+scores consume the enrichment cap. Recruiter and manager recall could therefore fail at search,
+filtering, or enrichment allocation without enough aggregate evidence to distinguish the stage.
+The company-name matcher divided token overlap by the smaller name, so a one-token parent brand
+could score as a perfect match for a multi-token subsidiary. The persisted Toshiba Commerce
+referral demonstrates that failure mode: the hiring domain is a subsidiary domain, while the
+candidate is recorded only at the parent domain.
+
+### Architecture and decisions
+
+- Migration `0021_people_funnel_diagnostics` adds only two safe JSONB aggregates to each discovery
+  run: resolved company context and category funnel diagnostics. It is reversible and contains no
+  provider payloads or person identifiers.
+- Company identity resolution uses the persisted JobPilot company-branding record first, then a
+  non-aggregator application hostname, normalized names, and structured aliases/parent evidence.
+  A three-label employer domain can identify a controlled related-domain scope, but does not assert
+  legal ownership. Exact-domain searches always run before a related-domain fallback.
+- Title ontology `people-title-v2` deterministically normalizes abbreviations and semantic variants
+  and supplies bounded recruiter, early-career, manager, and role-family title groups. Model
+  assistance is not introduced.
+- Recruiters, managers, and referrers use separate staged searches. Recruiter and manager location
+  is soft by default. Managers use explicit manager/director/head/VP seniorities.
+- Enrichment allocation reserves configurable category capacity (default 3/3/2), then reallocates
+  unused slots by preliminary score. Only enriched candidates can be displayed.
+- Scoring `people-v2` separates category relevance thresholds from data confidence. Parent-domain
+  matches receive lower company confidence; weak generic parent-company referrers are suppressed.
+- Development-only, user-scoped diagnostics are available at
+  `GET /jobs/{job_id}/people/diagnostics`. Ordinary recommendation responses expose only safe
+  search scope, freshness, related-company inclusion, and refresh eligibility.
+- The manual review builder creates at least 20 labelable, identifier-minimized job cases from
+  persisted data without calling providers. Metrics remain unclaimed until humans label live
+  cases.
+
+### Rollout and rollback
+
+Deploy the additive migration before application code. Existing candidates are naturally
+invalidated because the scoring version changed. Roll back by deploying the prior application,
+then downgrading `0021`; the downgrade removes diagnostics only and does not remove people or
+recommendations. Keep existing relevance thresholds until the 20-job manual review has labels.
+
+### Validation checklist
+
+- [x] Focused ontology, company resolver, category search, allocation, threshold, diagnostics, and
+  parent-company suppression tests added.
+- [x] Focused People backend: 22 passed; focused People frontend: 25 passed.
+- [x] Migration upgrade/downgrade/re-upgrade passed against the rebuilt API image; database ends
+  at `0021_people_funnel_diagnostics`.
+- [x] Complete API: 612 passed. Complete web: lint, typecheck, production build, and 192 tests
+  passed. The offline two-case synthetic evaluation runner completed, but is not live accuracy
+  evidence.
+- [x] Compose configuration passed; API, worker, PostgreSQL, and Redis are healthy, with scheduler
+  and web running on rebuilt images.
+- [x] Twenty-job safe manual-review report generated; human labels intentionally pending. Only two
+  jobs have persisted pre-change discovery runs and none has post-change funnel diagnostics, so
+  no real precision or recall improvement is claimed.
+- [ ] Chromium People E2E is environment-blocked: sandboxed Chromium cannot register its macOS
+  Mach-port service, and the required out-of-sandbox approval could not be granted.
+- [x] Focused Python Ruff and `git diff --check` passed. Repository-wide Ruff still reports
+  pre-existing style debt in `models/entities.py` and import ordering in `core/config.py`; the
+  changed People implementation and migration are clean.
+- [ ] Live validation pending explicit approval; maximum three jobs.

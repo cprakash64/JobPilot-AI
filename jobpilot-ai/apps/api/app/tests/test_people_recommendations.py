@@ -17,14 +17,15 @@ from app.core.security import create_access_token, hash_password
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models.entities import JobPosting, User
+from app.models.entities import CompanyBranding, JobPosting, PeopleDiscoveryRun, User
+from app.people import providers
 from app.people.feature_flags import configuration_summary
 from app.people.intelligence import (
     expand_titles,
     extract_job_people_profile,
+    resolve_company_identity,
     validate_company_domain,
 )
-from app.people import providers
 from app.people.providers import ApolloPeopleProvider, MockPeopleProvider, ProviderUnavailable
 from app.people.schemas import (
     EmailVerificationResult,
@@ -33,8 +34,18 @@ from app.people.schemas import (
     ProviderPerson,
     WorkEmailResult,
 )
-from app.people.scoring import confidence, explanations, score_candidate
+from app.people.scoring import (
+    candidate_rejection_reasons,
+    confidence,
+    explanations,
+    score_candidate,
+)
 from app.people.security import is_professional_email, safe_profile_url
+from app.people.service import (
+    allocate_enrichment_targets,
+    build_category_search_queries,
+)
+from app.people.title_ontology import normalize_title, title_similarity
 
 
 @pytest.fixture
@@ -121,6 +132,182 @@ def test_job_intelligence_title_expansion_and_domain_validation() -> None:
     assert validate_company_domain("gmail.com") is None
     recruiters, managers, team = expand_titles(job.title, profile.role_family)
     assert recruiters and managers and team
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "expected_family"),
+    [
+        ("Software Engineer Intern", "Build APIs.", "software_engineering"),
+        ("Applied AI Engineer", "Build machine learning systems.", "machine_learning"),
+        ("Embedded Firmware Engineer", "Develop RTOS software.", "embedded_systems"),
+        ("Senior Product Manager", "Own product strategy.", "product"),
+        ("Financial Analyst", "Support accounting and finance.", "finance"),
+        ("Clinical Systems Engineer", "Improve healthcare devices.", "healthcare"),
+    ],
+)
+def test_versioned_title_ontology_role_family_regressions(
+    title: str, description: str, expected_family: str
+) -> None:
+    job = _job()
+    job.title = title
+    job.description_clean = description
+    assert extract_job_people_profile(job).role_family == expected_family
+
+
+def test_title_ontology_normalizes_semantic_variants() -> None:
+    assert normalize_title("Sr. Software Development Mgr") == "senior software engineering manager"
+    assert title_similarity("Campus Talent Partner", ["University Recruiter"]) >= 0.5
+    assert title_similarity("Agentic AI Engineering Manager", ["Applied AI Manager"]) >= 0.6
+
+
+def test_category_queries_are_staged_and_use_correct_filters() -> None:
+    job = _job()
+    job.title = "Agentic Software Engineer Intern"
+    profile = extract_job_people_profile(job)
+    recruiter_queries = build_category_search_queries(profile, "likely_recruiter")
+    manager_queries = build_category_search_queries(profile, "potential_hiring_manager")
+    referrer_queries = build_category_search_queries(profile, "potential_referrer")
+    assert {query.title_group for query in recruiter_queries} == {
+        "specialist", "broad", "early_career"
+    }
+    assert all(query.location_filter_mode == "soft" for query in recruiter_queries)
+    assert all(query.location_filter_mode == "soft" for query in manager_queries)
+    assert {value for query in manager_queries for value in query.seniorities} == {
+        "manager", "director", "head", "vp"
+    }
+    assert not (
+        {title for query in recruiter_queries for title in query.titles}
+        & {title for query in referrer_queries for title in query.titles}
+    )
+
+
+def test_company_resolver_ignores_aggregator_and_requires_parent_evidence(db: Session) -> None:
+    job = _job()
+    job.company = "Acme Robotics"
+    job.company_domain = None
+    job.application_url = "https://simplify.jobs/p/acme-role"
+    job.raw_json = {"company_url": "https://simplify.jobs/c/acme"}
+    identity = resolve_company_identity(db, job)
+    assert identity.canonical_domain is None
+    assert identity.parent_domain is None
+    profile = extract_job_people_profile(job, db)
+    assert build_category_search_queries(
+        profile, "likely_recruiter", related_company=True
+    ) == []
+
+    db.add(CompanyBranding(
+        normalized_key="acme robotics",
+        canonical_name="Acme Robotics",
+        domain="robotics.acme.example",
+        source="catalog",
+        resolution_status="resolved",
+    ))
+    db.flush()
+    identity = resolve_company_identity(db, job)
+    assert identity.canonical_domain == "robotics.acme.example"
+    assert identity.parent_domain == "acme.example"
+    assert identity.evidence_source == "company_branding_catalog"
+
+
+def test_category_enrichment_reservations_and_reallocation() -> None:
+    records = _records()
+    candidates = {
+        "likely_recruiter": [(90.0, "likely_recruiter", records[0], None, None)],
+        "potential_hiring_manager": [
+            (89.0, "potential_hiring_manager", records[1], None, None)
+        ],
+        "potential_referrer": [
+            (score, "potential_referrer", ProviderPerson(
+                **records[2].model_dump(exclude={"provider_person_id"}),
+                provider_person_id=f"referrer-{index}",
+            ), None, None)
+            for index, score in enumerate((88.0, 87.0, 86.0, 85.0), start=1)
+        ],
+    }
+    selected = allocate_enrichment_targets(
+        candidates,
+        total=4,
+        reservations={
+            "likely_recruiter": 2,
+            "potential_hiring_manager": 1,
+            "potential_referrer": 1,
+        },
+    )
+    assert [item[1] for item in selected].count("likely_recruiter") == 1
+    assert [item[1] for item in selected].count("potential_hiring_manager") == 1
+    assert [item[1] for item in selected].count("potential_referrer") == 2
+
+
+def test_startup_with_few_employees_reallocates_only_available_candidates() -> None:
+    job = _job()
+    job.company = "Small Startup"
+    job.company_domain = "small-startup.example"
+    profile = extract_job_people_profile(job)
+    assert profile.parent_company_domain is None
+    assert build_category_search_queries(
+        profile, "likely_recruiter", related_company=True
+    ) == []
+
+    sparse = {
+        "likely_recruiter": [],
+        "potential_hiring_manager": [],
+        "potential_referrer": [
+            (75.0, "potential_referrer", _records()[2], None, None)
+        ],
+    }
+    selected = allocate_enrichment_targets(
+        sparse,
+        total=8,
+        reservations={
+            "likely_recruiter": 3,
+            "potential_hiring_manager": 3,
+            "potential_referrer": 2,
+        },
+    )
+    assert [item[1] for item in selected] == ["potential_referrer"]
+
+
+def test_category_thresholds_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.people import service
+
+    monkeypatch.setattr(settings, "people_min_recruiter_relevance", 71.0)
+    monkeypatch.setattr(settings, "people_min_manager_relevance", 72.0)
+    monkeypatch.setattr(settings, "people_min_referrer_relevance", 73.0)
+    assert service._category_threshold("likely_recruiter") == 71.0
+    assert service._category_threshold("potential_hiring_manager") == 72.0
+    assert service._category_threshold("potential_referrer") == 73.0
+
+
+def test_generic_related_parent_employee_is_suppressed() -> None:
+    job = _job()
+    job.company = "Acme Commerce Solutions"
+    job.company_domain = "commerce.acme.example"
+    profile = extract_job_people_profile(job)
+    person = ProviderPerson(
+        provider="mock",
+        provider_person_id="parent-generic",
+        full_name="Generic Employee",
+        current_company_name="Acme",
+        current_company_domain="acme.example",
+        current_title="Software Test Engineer",
+        employment_verified_at=datetime.now(UTC),
+        linkedin_url="https://www.linkedin.com/in/generic-employee",
+    )
+    relevance = score_candidate("potential_referrer", person, profile)
+    reasons = candidate_rejection_reasons(
+        "potential_referrer",
+        person,
+        profile,
+        relevance=relevance,
+        data_confidence=confidence(person),
+        relevance_threshold=60,
+        confidence_threshold=0.5,
+    )
+    assert "weak_company_confidence" in reasons
+    assert (
+        "weak_role_similarity" in reasons
+        or "below_relevance_threshold" in reasons
+    )
 
 
 def test_scoring_confidence_explanations_and_security() -> None:
@@ -304,6 +491,24 @@ def test_discovery_cache_actions_and_cross_user_denial(
     recommendation = body["categories"]["likely_recruiters"][0]
     assert recommendation["limitations"]
     assert recommendation["category_label"] == "Likely recruiter"
+    discovery_run = db.query(PeopleDiscoveryRun).filter(
+        PeopleDiscoveryRun.job_id == job.id,
+    ).order_by(PeopleDiscoveryRun.id.desc()).first()
+    assert discovery_run is not None
+    assert set(discovery_run.category_diagnostics) == {
+        "likely_recruiter", "potential_hiring_manager", "potential_referrer"
+    }
+    assert discovery_run.category_diagnostics["likely_recruiter"][
+        "selected_for_enrichment"
+    ] >= 1
+    assert discovery_run.company_context["canonical_company_domain"] == "acme.example"
+    monkeypatch.setattr(settings, "app_env", "development")
+    diagnostics = client.get(f"/jobs/{job.id}/people/diagnostics", headers=headers)
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()["discovery_run_id"] == discovery_run.id
+    assert "categories" in diagnostics.json()
+    monkeypatch.setattr(settings, "app_env", "production")
+    assert client.get(f"/jobs/{job.id}/people/diagnostics", headers=headers).status_code == 404
 
     request_count = provider.requests
     cached = client.post(f"/jobs/{job.id}/people/discover", headers=headers)

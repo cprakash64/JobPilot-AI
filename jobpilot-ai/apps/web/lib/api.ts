@@ -169,6 +169,12 @@ export type PeopleResponse = {
     potential_referrers: PeopleRecommendation[];
   };
   warnings: string[];
+  search_scope?: {
+    company_scope: string;
+    location_filter: "none" | "soft" | "hard";
+    parent_company_matches_included: boolean;
+    refresh_eligible: boolean;
+  };
   controls: { email_discovery: boolean; outreach_drafting: boolean };
 };
 

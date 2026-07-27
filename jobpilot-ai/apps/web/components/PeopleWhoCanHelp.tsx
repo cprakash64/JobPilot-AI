@@ -76,6 +76,14 @@ function confidenceText(value: PeopleRecommendation["confidence"]) {
   return `${value[0].toUpperCase()}${value.slice(1)} confidence`;
 }
 
+function checkedDate(value?: string | null): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? null
+    : parsed.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
 function hasResults(data: PeopleResponse | null): data is PeopleResponse {
   return Boolean(
     data &&
@@ -300,6 +308,20 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
         ) : null}
       </div>
 
+      {data?.search_scope && data.status !== "disabled" ? (
+        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--text-muted)]">
+          <span>Scope: {data.search_scope.company_scope}</span>
+          <span>Location used as a {data.search_scope.location_filter} signal</span>
+          {checkedDate(data.generated_at) ? <span>Last checked: {checkedDate(data.generated_at)}</span> : null}
+          <span>
+            {data.search_scope.parent_company_matches_included
+              ? "Related-company matches were considered"
+              : "Related-company matches were not included"}
+          </span>
+          <span>{data.search_scope.refresh_eligible ? "Refresh available" : "Using current cached search"}</span>
+        </div>
+      ) : null}
+
       {hasResults(data) ? (
         <div className="mt-5 space-y-6">
           {CATEGORY_HEADINGS.map(([key, heading]) => {
@@ -325,7 +347,11 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
                   </div>
                 ) : (
                   <p className="mt-2 text-sm text-[var(--text-muted)]">
-                    No sufficiently reliable matches in this category.
+                    {key === "likely_recruiters"
+                      ? "No sufficiently reliable recruiting contact was found yet."
+                      : key === "potential_hiring_managers"
+                        ? "No potential manager met JobPilot’s confidence threshold."
+                        : "No sufficiently reliable referral candidate was found yet."}
                   </p>
                 )}
               </section>

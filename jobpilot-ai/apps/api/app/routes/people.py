@@ -8,6 +8,7 @@ from app.models.entities import User
 from app.people.feature_flags import recommendations_availability, recommendations_enabled
 from app.people.schemas import FeedbackRequest, OutreachDraftRequest
 from app.people.service import (
+    diagnostics_payload,
     discover,
     find_email,
     mark_contacted,
@@ -48,6 +49,14 @@ async def discover_people(
 ) -> dict:
     _require_enabled(user)
     return await discover(db, user, job_id)
+
+
+@router.get("/diagnostics")
+def get_people_diagnostics(
+    job_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    _require_enabled(user)
+    return diagnostics_payload(db, user, job_id)
 
 
 @router.post("/{recommendation_id}/email")
