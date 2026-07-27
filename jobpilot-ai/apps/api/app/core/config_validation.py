@@ -125,6 +125,17 @@ def _check_workday_credentials_key(key: str | None) -> list[Finding]:
     ]
 
 
+def _check_people_encryption_key(key: str | None, *, email_enabled: bool) -> list[Finding]:
+    if not email_enabled or (key or "").strip():
+        return []
+    return [
+        Finding(
+            "PEOPLE_DATA_ENCRYPTION_KEY",
+            "is missing while professional-email discovery is enabled",
+        )
+    ]
+
+
 def _check_cors(origins: list[str] | None, *, allow_credentials: bool) -> list[Finding]:
     values = [o.strip() for o in (origins or []) if o and o.strip()]
     if not values:
@@ -201,6 +212,10 @@ def collect_findings(settings) -> list[Finding]:
     )
     findings += _check_workday_credentials_key(
         getattr(settings, "workday_credentials_encryption_key", None)
+    )
+    findings += _check_people_encryption_key(
+        getattr(settings, "people_data_encryption_key", None),
+        email_enabled=bool(getattr(settings, "people_email_discovery_enabled", False)),
     )
     findings += _check_cors(
         getattr(settings, "cors_origins", None),

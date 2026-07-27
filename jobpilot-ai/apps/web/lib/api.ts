@@ -104,6 +104,74 @@ export type Job = {
   eligibility?: JobEligibility | null;
 };
 
+export type PeopleStatus =
+  | "disabled"
+  | "not_started"
+  | "in_progress"
+  | "partial"
+  | "complete"
+  | "no_reliable_matches"
+  | "provider_unavailable"
+  | "stale";
+
+export type PeopleAvailabilityReason =
+  | "available"
+  | "globally_disabled"
+  | "not_in_rollout"
+  | "configuration_unavailable"
+  | "provider_not_configured"
+  | "provider_circuit_open"
+  | "provider_unauthorized"
+  | "provider_forbidden"
+  | "provider_rate_limited"
+  | "provider_timeout"
+  | "provider_network_error"
+  | "provider_schema_error"
+  | "provider_unavailable";
+
+export type PeopleRecommendation = {
+  recommendation_id: number;
+  full_name: string;
+  current_title: string;
+  current_company: string;
+  category: "likely_recruiter" | "potential_hiring_manager" | "potential_referrer";
+  category_label: string;
+  relevance_score: number;
+  confidence: "high" | "moderate" | "limited";
+  reasons: string[];
+  limitations: string[];
+  last_checked_at: string;
+  professional_profile_url: string | null;
+  email_status:
+    | "not_requested"
+    | "searching"
+    | "verified"
+    | "accept_all"
+    | "risky"
+    | "unknown"
+    | "not_found"
+    | "provider_error";
+  professional_email: string | null;
+  email_verified_at: string | null;
+  saved: boolean;
+  contacted: boolean;
+};
+
+export type PeopleResponse = {
+  status: PeopleStatus;
+  availability_reason?: PeopleAvailabilityReason;
+  beta: boolean;
+  generated_at?: string | null;
+  expires_at?: string | null;
+  categories: {
+    likely_recruiters: PeopleRecommendation[];
+    potential_hiring_managers: PeopleRecommendation[];
+    potential_referrers: PeopleRecommendation[];
+  };
+  warnings: string[];
+  controls: { email_discovery: boolean; outreach_drafting: boolean };
+};
+
 export type ProfileFilters = {
   target_roles: string[];
   target_levels: string[];
@@ -260,6 +328,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       } else if (typeof parsed.detail === "string") {
         // Legacy shape used by most routes.
         message = parsed.detail;
+      } else if (parsed.detail && typeof parsed.detail === "object") {
+        // Several guarded endpoints use FastAPI's structured `detail` object.
+        // Preserve its safe code/message just like the preferred envelope.
+        structured = parsed.detail as StructuredError;
+        if (typeof structured.message === "string") message = structured.message;
       }
     } catch {
       // Keep the raw body when the server does not return JSON.

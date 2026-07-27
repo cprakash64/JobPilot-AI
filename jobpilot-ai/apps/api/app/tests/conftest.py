@@ -42,5 +42,7 @@ def _reset_rate_limiter() -> None:
     bucket accumulates across tests and eventually trips the 20/60s limit. Clear
     it between tests so rate-limit state never leaks between unrelated cases."""
     from app.routes.applications import _RATE_BUCKETS
+    from app.people.service import _RATE_BUCKETS as people_rate_buckets
 
     _RATE_BUCKETS.clear()
+    people_rate_buckets.clear()

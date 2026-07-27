@@ -91,7 +91,43 @@ class Settings(BaseSettings):
     job_scoring_batch_size: int = 100
     job_scoring_max_attempts: int = 3
 
-    @field_validator("cors_origins", "job_source_companies", "job_discovery_source_packs", mode="before")
+    # --- People Who Can Help (all controls fail closed) ---
+    people_recommendations_enabled: bool = False
+    people_rollout_mode: str = "disabled"  # disabled|internal|beta|percentage|all
+    people_rollout_percentage: int = 0
+    people_internal_emails: list[str] = []
+    people_beta_user_ids: list[str] = []
+    people_primary_provider: str = "apollo"
+    people_email_discovery_enabled: bool = False
+    people_pdl_fallback_enabled: bool = False
+    people_outreach_drafting_enabled: bool = False
+    people_network_matching_enabled: bool = False
+    apollo_api_key: str | None = None
+    hunter_api_key: str | None = None
+    pdl_api_key: str | None = None
+    people_data_encryption_key: str | None = None
+    people_result_ttl_days: int = 30
+    people_max_discovery_results_per_category: int = 20
+    people_max_displayed_recruiters: int = 2
+    people_max_displayed_managers: int = 2
+    people_max_displayed_referrers: int = 5
+    people_max_enrichments_per_job: int = 8
+    people_daily_credit_budget: int = 0
+    people_per_user_daily_limit: int = 0
+    people_provider_timeout_seconds: float = 8.0
+    people_provider_response_max_bytes: int = 1_000_000
+    people_min_relevance_score: float = 60.0
+    people_discovery_rate_limit_per_hour: int = 10
+    people_email_rate_limit_per_hour: int = 10
+
+    @field_validator(
+        "cors_origins",
+        "job_source_companies",
+        "job_discovery_source_packs",
+        "people_internal_emails",
+        "people_beta_user_ids",
+        mode="before",
+    )
     @classmethod
     def parse_cors(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):

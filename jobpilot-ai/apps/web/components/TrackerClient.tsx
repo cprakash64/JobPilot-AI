@@ -49,9 +49,18 @@ export type TrackerApplication = {
   >;
 };
 
-type TrackerFilter = "all" | "applied" | "interview" | "offer" | "rejected";
+type TrackerFilter =
+  | "all"
+  | "saved"
+  | "applying"
+  | "applied"
+  | "interview"
+  | "offer"
+  | "rejected";
 
 const STATUS_OPTIONS: { value: TrackerStatus; label: string }[] = [
+  { value: "saved", label: "Saved" },
+  { value: "applying", label: "In progress" },
   { value: "applied", label: "Applied" },
   { value: "interview", label: "Interview" },
   { value: "offer", label: "Offer / selected" },
@@ -60,6 +69,8 @@ const STATUS_OPTIONS: { value: TrackerStatus; label: string }[] = [
 
 const FILTERS: { value: TrackerFilter; label: string }[] = [
   { value: "all", label: "All" },
+  { value: "saved", label: "Saved" },
+  { value: "applying", label: "In progress" },
   { value: "applied", label: "Applied" },
   { value: "interview", label: "Interviews" },
   { value: "offer", label: "Offers" },
@@ -143,6 +154,8 @@ export function TrackerClient() {
       const matchesFilter =
         filter === "all"
           ? true
+          : filter === "saved"
+            ? ["saved", "ready_to_apply"].includes(application.status)
           : application.status === filter;
       const matchesQuery =
         !normalizedQuery ||
@@ -241,7 +254,7 @@ export function TrackerClient() {
           </h2>
           <p className="mx-auto mt-1 max-w-md text-sm text-[var(--text-muted)]">
             {applications.length === 0
-              ? "Applications appear here after you confirm that you submitted them."
+              ? "Jobs you save or applications you start will appear here."
               : "Try another status or search term."}
           </p>
           {applications.length === 0 && (

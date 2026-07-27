@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "case_count": 2,
+  "metrics": {
+    "recruiter_precision_at_1": 1.0,
+    "recruiter_precision_at_3": 1.0,
+    "potential_hiring_manager_precision_at_1": 1.0,
+    "referral_precision_at_3": 1.0,
+    "referral_precision_at_5": 1.0,
+    "current_employment_accuracy": 1.0,
+    "duplicate_rate": 0.0,
+    "no_reliable_result_rate": 0.5,
+    "stale_record_rate": 0.0,
+    "verified_work_email_accuracy": 1.0,
+    "confidence_calibration_error": 0.155,
+    "unsupported_claim_rate": 0.0
+  },
+  "targets": {
+    "recruiter_precision_at_3": 0.85,
+    "referral_precision_at_5": 0.8,
+    "current_employment_accuracy": 0.9,
+    "verified_work_email_accuracy": 0.95,
+    "unsupported_claim_rate_max": 0.02
+  },
+  "passed": true,
+  "failures": [],
+  "false_positive_reports": []
+}

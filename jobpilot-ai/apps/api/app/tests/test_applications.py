@@ -420,16 +420,18 @@ def test_complete_requires_confirmation_and_updates_tracker(client: TestClient) 
     job_id = seed_job(client)
     session_id = create_session(client, headers, job_id)["session_id"]
 
-    # Preparing/opening is not an application. Nothing is tracked until the
-    # user explicitly confirms that they submitted it.
-    assert client.get("/jobs/tracker/all", headers=headers).json()["applications"] == []
+    # Preparing/opening alone creates neither a ledger row nor a submitted
+    # application; both views stay empty until explicit confirmation.
+    assert client.get("/jobs/tracker/submitted", headers=headers).json()["applications"] == []
+    ledger = client.get("/jobs/tracker/all", headers=headers).json()["applications"]
+    assert ledger == []
 
     # Unconfirmed completion is rejected — JobPilot never assumes submission.
     assert client.post(f"/application-sessions/{session_id}/complete", headers=headers, json={"confirmed": False}).status_code == 422
     done = client.post(f"/application-sessions/{session_id}/complete", headers=headers, json={"confirmed": True})
     assert done.status_code == 200 and done.json()["status"] == "completed"
 
-    tracker = client.get("/jobs/tracker/all", headers=headers).json()["applications"]
+    tracker = client.get("/jobs/tracker/submitted", headers=headers).json()["applications"]
     assert any(t["job_id"] == job_id and t["status"] == "applied" for t in tracker)
 
 

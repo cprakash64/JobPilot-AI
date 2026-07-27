@@ -11,6 +11,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -418,6 +419,153 @@ class JobMatch(Base):
     updated_at: Mapped[DateTimeValue] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ProfessionalPerson(Base):
+    """Provider-evidenced professional identity. Never populated by an LLM."""
+
+    __tablename__ = "professional_people"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    canonical_full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_full_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    current_company_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    current_company_domain: Mapped[str | None] = mapped_column(String(255), index=True)
+    current_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    department: Mapped[str | None] = mapped_column(String(120))
+    seniority: Mapped[str | None] = mapped_column(String(80))
+    professional_location: Mapped[str | None] = mapped_column(String(255))
+    linkedin_url: Mapped[str | None] = mapped_column(String(1000))
+    linkedin_url_normalized: Mapped[str | None] = mapped_column(String(1000), unique=True)
+    professional_email_ciphertext: Mapped[str | None] = mapped_column(String(2000))
+    professional_email_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    email_verification_status: Mapped[str] = mapped_column(
+        String(30), default="not_requested", server_default="not_requested"
+    )
+    email_verified_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    employment_last_verified_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[DateTimeValue] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ProfessionalPersonSource(Base):
+    __tablename__ = "professional_person_sources"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_person_id", name="uq_people_source_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("professional_people.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider_person_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_profile_url: Mapped[str | None] = mapped_column(String(1000))
+    source_last_updated_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    retrieved_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    normalized_evidence: Mapped[dict] = mapped_column(JsonType, default=dict)
+    field_provenance: Mapped[dict] = mapped_column(JsonType, default=dict)
+    # Only allowlisted, redacted diagnostics; full provider payloads are never stored.
+    redacted_payload: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+
+class JobPeopleCandidate(Base):
+    __tablename__ = "job_people_candidates"
+    __table_args__ = (
+        UniqueConstraint("job_id", "person_id", "candidate_category", name="uq_job_person_category"),
+        Index("ix_job_people_fresh", "job_id", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("job_postings.id", ondelete="CASCADE"), index=True
+    )
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("professional_people.id", ondelete="CASCADE"), index=True
+    )
+    candidate_category: Mapped[str] = mapped_column(String(40), index=True)
+    category_score: Mapped[float] = mapped_column(Float, nullable=False)
+    data_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    current_employment_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    recommendation_reasons: Mapped[list] = mapped_column(JsonType, default=list)
+    recommendation_limitations: Mapped[list] = mapped_column(JsonType, default=list)
+    scoring_version: Mapped[str] = mapped_column(String(40), index=True)
+    discovered_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class UserJobPeopleRecommendation(Base):
+    __tablename__ = "user_job_people_recommendations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "job_id", "job_people_candidate_id", name="uq_user_job_people_candidate"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("job_postings.id", ondelete="CASCADE"), index=True
+    )
+    job_people_candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("job_people_candidates.id", ondelete="CASCADE"), index=True
+    )
+    relationship_type: Mapped[str | None] = mapped_column(String(40))
+    shared_school: Mapped[str | None] = mapped_column(String(255))
+    shared_employer: Mapped[str | None] = mapped_column(String(255))
+    connection_strength: Mapped[float] = mapped_column(Float, default=0)
+    personalized_reasons: Mapped[list] = mapped_column(JsonType, default=list)
+    personalized_score: Mapped[float] = mapped_column(Float, default=0)
+    viewed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    saved_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    contacted_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    suppressed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[DateTimeValue] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PeopleDiscoveryRun(Base):
+    __tablename__ = "people_discovery_runs"
+    __table_args__ = (Index("ix_people_run_cache", "job_id", "query_fingerprint", "completed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("job_postings.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    query_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
+    records_searched: Mapped[int] = mapped_column(Integer, default=0)
+    records_enriched: Mapped[int] = mapped_column(Integer, default=0)
+    provider_credits_used: Mapped[int] = mapped_column(Integer, default=0)
+    failure_code: Mapped[str | None] = mapped_column(String(60))
+    safe_failure_message: Mapped[str | None] = mapped_column(String(255))
+    started_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+
+
+class PeopleRecommendationFeedback(Base):
+    __tablename__ = "people_recommendation_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    recommendation_id: Mapped[int] = mapped_column(
+        ForeignKey("user_job_people_recommendations.id", ondelete="CASCADE"), index=True
+    )
+    relevance_rating: Mapped[str | None] = mapped_column(String(30))
+    employment_current_rating: Mapped[str | None] = mapped_column(String(30))
+    information_correct_rating: Mapped[str | None] = mapped_column(String(30))
+    contacted: Mapped[bool] = mapped_column(Boolean, default=False)
+    received_response: Mapped[bool] = mapped_column(Boolean, default=False)
+    incorrect_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class IngestionRun(Base):

@@ -461,26 +461,39 @@ def _profile_filter_payload(profile: UserProfile | None) -> dict:
     }
 
 
-@router.get("/tracker/all")
-def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    submitted_statuses = [
-        ApplicationStatus.applied,
-        ApplicationStatus.interview,
-        ApplicationStatus.offer,
-        ApplicationStatus.rejected,
-    ]
+SUBMITTED_APPLICATION_STATUSES = (
+    ApplicationStatus.applied,
+    ApplicationStatus.interview,
+    ApplicationStatus.offer,
+    ApplicationStatus.rejected,
+)
+
+
+def _tracker_payload(
+    db: Session,
+    user_id: int,
+    *,
+    statuses: tuple[ApplicationStatus, ...] | None = None,
+) -> dict:
+    """Serialize the user-owned tracking ledger, optionally narrowed by status.
+
+    `/tracker/all` is an established dashboard contract and therefore includes
+    every lifecycle state: bookmarks, prepared/applying jobs, and confirmed
+    submissions. Callers that must distinguish an actual submission use the
+    explicit `/tracker/submitted` view instead of inferring from row existence.
+    """
+    filters = [ApplicationTracker.user_id == user_id]
+    if statuses is not None:
+        filters.append(ApplicationTracker.status.in_(statuses))
     rows = db.execute(
         select(ApplicationTracker, JobPosting)
         .join(JobPosting, JobPosting.id == ApplicationTracker.job_id)
-        .where(
-            (ApplicationTracker.user_id == user.id)
-            & (ApplicationTracker.status.in_(submitted_statuses))
-        )
+        .where(*filters)
         .order_by(ApplicationTracker.updated_at.desc(), ApplicationTracker.id.desc())
     ).all()
     matches = {
         match.job_id: match
-        for match in db.scalars(select(JobMatch).where(JobMatch.user_id == user.id)).all()
+        for match in db.scalars(select(JobMatch).where(JobMatch.user_id == user_id)).all()
     }
     sources = {source.id: source for source in db.scalars(select(JobSource)).all()}
     return {
@@ -503,6 +516,20 @@ def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(g
             for tracker, job in rows
         ]
     }
+
+
+@router.get("/tracker/all")
+def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Complete tracking ledger, including saved and in-progress jobs."""
+    return _tracker_payload(db, user.id)
+
+
+@router.get("/tracker/submitted")
+def list_submitted_tracker(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    """Only confirmed submissions and their downstream outcomes."""
+    return _tracker_payload(db, user.id, statuses=SUBMITTED_APPLICATION_STATUSES)
 
 
 def _tracker_job_payload(

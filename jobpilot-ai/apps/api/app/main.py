@@ -11,10 +11,15 @@ from app.core.config import settings
 from app.core.config_validation import enforce as enforce_production_config
 from app.core.log_redaction import install as install_log_redaction
 from app.db.session import SessionLocal
-from app.routes import applications, auth, debug, jobs, privacy, profile
+from app.people.feature_flags import configuration_summary as people_configuration_summary
+from app.routes import applications, auth, debug, jobs, people, privacy, profile
 from app.services.readiness import check_readiness
 
 logger = logging.getLogger("jobpilot")
+# Uvicorn configures its own named loggers but leaves application loggers at
+# the process default (WARNING). Keep JobPilot's secret-free startup and
+# operational diagnostics observable without changing third-party log levels.
+logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -36,6 +41,21 @@ async def lifespan(_app: FastAPI):
         status["smart_model"],
         status["fast_model"],
         status["provider_enabled"],
+    )
+    people_status = people_configuration_summary(settings)
+    logger.info(
+        "People config: recommendations_enabled=%s email_discovery_enabled=%s "
+        "primary_provider_configured=%s encryption_key_configured=%s "
+        "global_budget_configured=%s per_user_budget_configured=%s "
+        "rollout_mode=%s environment=%s",
+        people_status["recommendations_enabled"],
+        people_status["email_discovery_enabled"],
+        people_status["primary_provider_configured"],
+        people_status["encryption_key_configured"],
+        people_status["global_budget_configured"],
+        people_status["per_user_budget_configured"],
+        people_status["rollout_mode"],
+        people_status["environment"],
     )
     yield
 
@@ -108,6 +128,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(profile.router)
 app.include_router(jobs.router)
+app.include_router(people.router)
 app.include_router(privacy.router)
 app.include_router(debug.router)
 app.include_router(applications.router)

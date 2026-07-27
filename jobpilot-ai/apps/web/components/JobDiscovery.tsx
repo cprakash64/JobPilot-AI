@@ -37,6 +37,7 @@ import { Button } from "@/components/Button";
 import { GeneratedResumePreview } from "@/components/GeneratedResumePreview";
 import { GeneratedCoverLetterPreview } from "@/components/GeneratedCoverLetterPreview";
 import { AutoApplyModal } from "@/components/AutoApplyModal";
+import { PeopleWhoCanHelp, PeopleWhoCanHelpSummary } from "@/components/PeopleWhoCanHelp";
 
 type DocType = "resume" | "cover_letter";
 type JobSort = "newest" | "fit";
@@ -693,6 +694,8 @@ function JobCard({
         </div>
       )}
 
+      <PeopleWhoCanHelpSummary jobId={job.id} onViewAll={onDetails} />
+
       {/* Actions */}
       <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-line/70 pt-4">
         <AssistedApplyButton url={job.application_url} onApply={onApply} />
@@ -1134,14 +1137,17 @@ function JobDetailsModal({
   onApply: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-2 sm:p-4" onClick={onClose}>
       <div
-        className="mx-auto mt-4 flex max-h-[92vh] max-w-[820px] flex-col overflow-hidden rounded-lg bg-white shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="job-details-title"
+        className="flex max-h-[calc(100dvh-1rem)] w-full max-w-[820px] flex-col overflow-hidden rounded-lg bg-white shadow-xl sm:max-h-[calc(100dvh-2rem)]"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-line p-5">
-          <div>
-            <h3 className="text-xl font-semibold">{job.title}</h3>
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-line p-4 sm:p-5">
+          <div className="min-w-0">
+            <h3 id="job-details-title" className="text-xl font-semibold">{job.title}</h3>
             <p className="mt-1 text-sm text-[var(--text-muted)]">
               {job.company}
               {job.location ? ` · ${job.location}` : ""}
@@ -1151,7 +1157,7 @@ function JobDetailsModal({
             <X className="h-5 w-5" />
           </button>
         </div>
-        <div className="overflow-auto p-5">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5">
           <div className="flex flex-wrap items-center gap-2">
             <WorkplaceBadge type={job.workplace_type} />
             <PostedBadge postedAt={job.posted_at} />
@@ -1186,6 +1192,8 @@ function JobDetailsModal({
             </section>
           )}
 
+          <PeopleWhoCanHelp jobId={job.id} />
+
           {job.responsibilities && job.responsibilities.length > 0 && (
             <section className="mt-4">
               <h4 className="font-semibold">Responsibilities</h4>
@@ -1215,7 +1223,7 @@ function JobDetailsModal({
             </section>
           )}
         </div>
-        <div className="flex flex-wrap gap-2 border-t border-line p-4">
+        <div className="flex shrink-0 flex-wrap gap-2 border-t border-line bg-white p-3 sm:p-4">
           <AssistedApplyButton url={job.application_url} onApply={onApply} />
           <Button variant="secondary" type="button" onClick={onSave}><Save className="h-4 w-4" /> Save to tracker</Button>
         </div>

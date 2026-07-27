@@ -19,9 +19,11 @@ Important endpoints:
 - `POST /jobs/{job_id}/documents/{doc_type}`
 - `POST /jobs/documents/{document_id}/export/{fmt}`
 - `PUT /jobs/{job_id}/tracker`
-- `GET /jobs/tracker/all`
+- `GET /jobs/tracker/all` — complete user-owned tracking ledger, including saved,
+  ready-to-apply, applying, and submitted jobs.
+- `GET /jobs/tracker/submitted` — confirmed submissions only (`applied`,
+  `interview`, `offer`, or `rejected`).
 - `GET /privacy/export`
 - `DELETE /privacy/account`
 
 Authentication uses a bearer token returned by signup or login.
-

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JobDiscovery } from "../components/JobDiscovery";
+import { clearPeopleCache } from "../lib/peopleClient";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -47,7 +48,13 @@ function makeJob(overrides: Record<string, unknown> = {}) {
 }
 
 function mockJobsFetch(
-  options: { profileComplete?: boolean; existing?: unknown[]; discovered?: unknown[]; resumeWarnings?: string[] } = {}
+  options: {
+    profileComplete?: boolean;
+    existing?: unknown[];
+    discovered?: unknown[];
+    resumeWarnings?: string[];
+    peopleResponse?: unknown;
+  } = {}
 ) {
   const profileComplete = options.profileComplete ?? true;
   const resumeWarnings = options.resumeWarnings ?? [
@@ -56,6 +63,23 @@ function mockJobsFetch(
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+    if (url.match(/\/jobs\/\d+\/people$/) && method === "GET") {
+      return Promise.resolve(
+        jsonResponse(
+          options.peopleResponse ?? {
+            status: "disabled",
+            beta: false,
+            categories: {
+              likely_recruiters: [],
+              potential_hiring_managers: [],
+              potential_referrers: []
+            },
+            warnings: [],
+            controls: { email_discovery: false, outreach_drafting: false }
+          }
+        )
+      );
+    }
     if (url.includes("/jobs/discover")) {
       return Promise.resolve(
         jsonResponse({
@@ -142,6 +166,7 @@ function mockJobsFetch(
 describe("JobDiscovery", () => {
   beforeEach(() => {
     cleanup();
+    clearPeopleCache();
     localStorage.setItem("jobpilot_token", "token");
     vi.restoreAllMocks();
   });
@@ -171,6 +196,87 @@ describe("JobDiscovery", () => {
     expect(within(card).getByRole("button", { name: /Apply on official site/ })).toBeInTheDocument();
     // Source badge shows the ATS provider name.
     expect(within(card).getByText("Greenhouse")).toBeInTheDocument();
+    expect(within(card).getByRole("heading", { name: "People Who Can Help" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Find people" })).toBeInTheDocument();
+    expect(
+      vi.mocked(fetch).mock.calls.filter(([input]) => /\/jobs\/\d+\/people/.test(String(input)))
+    ).toHaveLength(0);
+  });
+
+  it("opens the real details modal, renders people below the match explanation, and uses the persisted job ID", async () => {
+    const persistedJob = makeJob({
+      id: 731,
+      title: "Persisted-ID Engineer",
+      source_job_id: "provider-9981",
+      requisition_id: "REQ-44"
+    });
+    mockJobsFetch({
+      existing: [persistedJob],
+      peopleResponse: {
+        status: "not_started",
+        beta: true,
+        categories: {
+          likely_recruiters: [],
+          potential_hiring_managers: [],
+          potential_referrers: []
+        },
+        warnings: [],
+        controls: { email_discovery: true, outreach_drafting: true }
+      }
+    });
+    render(React.createElement(JobDiscovery));
+
+    const card = (await screen.findByText("Persisted-ID Engineer")).closest("article") as HTMLElement;
+    await userEvent.click(within(card).getByRole("button", { name: "View details" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Persisted-ID Engineer" });
+    expect(within(dialog).getByRole("heading", { name: "Why this matches" })).toBeInTheDocument();
+    const peopleHeading = await within(dialog).findByRole("heading", { name: "People Who Can Help" });
+    const matchHeading = within(dialog).getByRole("heading", { name: "Why this matches" });
+    expect(
+      matchHeading.compareDocumentPosition(peopleHeading) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:8000/jobs/731/people",
+        expect.any(Object)
+      )
+    );
+    expect(fetch).not.toHaveBeenCalledWith(
+      expect.stringMatching(/provider-9981|REQ-44/),
+      expect.anything()
+    );
+  });
+
+  it("keeps disabled rollout visible and reloads status when details are closed and reopened", async () => {
+    mockJobsFetch({ existing: [makeJob({ id: 44, title: "Modal Lifecycle Role" })] });
+    render(React.createElement(JobDiscovery));
+
+    const openDetails = async () => {
+      const card = (await screen.findByText("Modal Lifecycle Role")).closest("article") as HTMLElement;
+      await userEvent.click(within(card).getByRole("button", { name: "View details" }));
+      return screen.getByRole("dialog", { name: "Modal Lifecycle Role" });
+    };
+
+    let dialog = await openDetails();
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/jobs/44/people"))
+      ).toHaveLength(1)
+    );
+    expect(within(dialog).getByText("People Who Can Help")).toBeInTheDocument();
+    expect(within(dialog).getByText("People recommendations are not enabled for this account.")).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close details" }));
+    expect(screen.queryByRole("dialog", { name: "Modal Lifecycle Role" })).not.toBeInTheDocument();
+
+    dialog = await openDetails();
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/jobs/44/people"))
+      ).toHaveLength(2)
+    );
+    expect(within(dialog).getByText("People Who Can Help")).toBeInTheDocument();
   });
 
   it("never renders demo jobs, 'via demo', or example.com apply links", async () => {
