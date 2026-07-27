@@ -127,6 +127,8 @@ export type PeopleAvailabilityReason =
   | "provider_timeout"
   | "provider_network_error"
   | "provider_schema_error"
+  | "provider_budget_exceeded"
+  | "provider_user_limit_exceeded"
   | "provider_unavailable";
 
 export type PeopleRecommendation = {
@@ -140,7 +142,8 @@ export type PeopleRecommendation = {
   confidence: "high" | "moderate" | "limited";
   current_employment_confidence: number;
   employment_validation_status:
-    | "confirmed_exact_company"
+    | "confirmed_exact_company_verified"
+    | "exact_company_current_but_unverified_freshness"
     | "confirmed_related_company"
     | "conflicting_current_employment"
     | "former_employee"
@@ -176,6 +179,8 @@ export type PeopleRecommendation = {
 export type PeopleResponse = {
   status: PeopleStatus;
   availability_reason?: PeopleAvailabilityReason;
+  retry_eligible?: boolean;
+  retry_after_seconds?: number | null;
   beta: boolean;
   generated_at?: string | null;
   expires_at?: string | null;

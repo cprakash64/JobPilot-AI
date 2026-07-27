@@ -47,7 +47,12 @@ def company_match_strength(person: ProviderPerson, profile: JobPeopleSearchProfi
 
 
 def _freshness(person: ProviderPerson) -> float:
-    checked = person.employment_verified_at or person.source_last_updated_at
+    checked = (
+        person.employment_verified_at
+        or person.provider_employment_updated_at
+        or person.provider_record_observed_at
+        or person.source_last_updated_at
+    )
     if not checked:
         return 0.35
     if checked.tzinfo is None:
@@ -183,8 +188,16 @@ def explanations(
     *,
     shared_school: str | None = None,
     shared_employer: str | None = None,
+    employment_validation_status: str | None = None,
 ) -> tuple[list[str], list[str]]:
-    reasons = ["Currently listed by a professional data source at the hiring company."]
+    reasons = [
+        (
+            "Current employment verified by multiple professional data sources."
+            if employment_validation_status
+            == "confirmed_exact_company_verified"
+            else "Currently listed by a professional data source at the hiring company."
+        )
+    ]
     limitations: list[str] = []
     if category == "likely_recruiter":
         reasons.append("Has a recruiting or talent-acquisition title relevant to this role.")
@@ -199,7 +212,7 @@ def explanations(
         reasons.append(f"Attended the same school: {shared_school}.")
     if shared_employer:
         reasons.append(f"Previously worked at the same employer: {shared_employer}.")
-    if not person.employment_verified_at:
+    if employment_validation_status != "confirmed_exact_company_verified":
         limitations.append("Current employment has not been independently re-verified.")
     _, company_kind = company_match_strength(person, profile)
     if company_kind == "related_parent_domain":

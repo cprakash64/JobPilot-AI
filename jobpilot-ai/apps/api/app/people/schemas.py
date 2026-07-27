@@ -79,7 +79,13 @@ class ProviderPerson(BaseModel):
     linkedin_url: str | None = None
     source_profile_url: str | None = None
     source_last_updated_at: datetime | None = None
+    provider_record_observed_at: datetime | None = None
+    provider_employment_updated_at: datetime | None = None
     employment_verified_at: datetime | None = None
+    employment_source: str | None = None
+    exact_company_match: bool | None = None
+    current_role_indicator: bool | None = None
+    conflicting_employer_observed_at: datetime | None = None
     education: list[str] = Field(default_factory=list)
     previous_employers: list[str] = Field(default_factory=list)
     evidence: dict[str, object] = Field(default_factory=dict)

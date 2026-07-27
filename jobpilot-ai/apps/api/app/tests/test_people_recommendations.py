@@ -24,6 +24,7 @@ from app.models.entities import (
     JobPeopleCandidate,
     JobPosting,
     PeopleDiscoveryRun,
+    PeopleEmploymentVerificationRun,
     ProfessionalPerson,
     User,
     UserJobPeopleRecommendation,
@@ -48,6 +49,7 @@ from app.people.schemas import (
     PeopleSearchQuery,
     PersonEnrichmentRequest,
     ProviderPerson,
+    ProviderUsage,
     WorkEmailResult,
 )
 from app.people.scoring import (
@@ -62,6 +64,7 @@ from app.people.service import (
     build_category_search_queries,
     find_email,
     outreach_draft,
+    recommendations_payload,
 )
 from app.people.title_ontology import normalize_title, title_similarity
 
@@ -296,6 +299,20 @@ def test_category_thresholds_are_independent(monkeypatch: pytest.MonkeyPatch) ->
     assert service._category_threshold("potential_referrer") == 73.0
 
 
+def test_secondary_verification_caps_are_independent_by_category(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    monkeypatch.setattr(settings, "people_employment_verification_max_recruiters", 1)
+    monkeypatch.setattr(settings, "people_employment_verification_max_managers", 2)
+    monkeypatch.setattr(settings, "people_employment_verification_max_referrers", 3)
+
+    assert service._employment_verification_cap("likely_recruiter") == 1
+    assert service._employment_verification_cap("potential_hiring_manager") == 2
+    assert service._employment_verification_cap("potential_referrer") == 3
+
+
 def test_generic_related_parent_employee_is_suppressed() -> None:
     job = _job()
     job.company = "Acme Commerce Solutions"
@@ -379,6 +396,24 @@ def test_stale_people_fingerprint_refresh_is_scoped_to_selected_job(
     assert current.query_fingerprint != legacy.query_fingerprint
     assert current.company_context["scoring_version"].startswith("people-v2")
     assert db.get(PeopleDiscoveryRun, other_run.id) is not None
+
+
+def test_secondary_verification_flag_invalidates_only_unresolved_run_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    job = _job()
+    monkeypatch.setattr(
+        settings, "people_employment_secondary_verification_enabled", False
+    )
+    without_secondary = service.query_fingerprint(job)
+    monkeypatch.setattr(
+        settings, "people_employment_secondary_verification_enabled", True
+    )
+    with_secondary = service.query_fingerprint(job)
+
+    assert without_secondary != with_secondary
 
 
 def test_current_no_match_and_controlled_broaden_are_each_idempotent(
@@ -501,6 +536,81 @@ def test_apollo_search_uses_current_endpoint_and_partial_search_schema(
     assert kwargs["json"]["person_seniorities"] == ["manager", "director"]
     assert "q_organization_domains" not in kwargs["json"]
     assert kwargs["headers"]["x-api-key"] == "configured-without-reading-runtime-secret"
+    assert rows[0].provider_record_observed_at is not None
+    assert rows[0].employment_verified_at is None
+    assert rows[0].employment_source == "provider_current_listing"
+
+
+def test_apollo_422_is_reported_as_provider_schema_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            return httpx.Response(
+                422,
+                request=httpx.Request(method, url),
+                json={"provider_payload": "must not be surfaced"},
+            )
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    providers._CIRCUITS.clear()
+    provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
+    query = PeopleSearchQuery(
+        category="likely_recruiter",
+        company_name="Acme",
+        company_domain="acme.example",
+        titles=["Technical Recruiter"],
+        limit=1,
+    )
+    for _ in range(4):
+        with pytest.raises(ProviderUnavailable) as raised:
+            asyncio.run(provider.search_people(query))
+        assert raised.value.reason == "provider_schema_error"
+        assert raised.value.http_status == 422
+    assert providers._CIRCUITS.get("apollo", (0, None)) == (0, None)
+
+
+def test_transient_failures_open_circuit_after_three_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class TimeoutClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise httpx.ReadTimeout("timed out", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: TimeoutClient())
+    providers._CIRCUITS.clear()
+    provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
+    query = PeopleSearchQuery(
+        category="likely_recruiter",
+        company_name="Acme",
+        company_domain="acme.example",
+        titles=["Technical Recruiter"],
+        limit=1,
+    )
+    for _ in range(3):
+        with pytest.raises(ProviderUnavailable) as raised:
+            asyncio.run(provider.search_people(query))
+        assert raised.value.reason == "provider_timeout"
+    with pytest.raises(ProviderUnavailable) as circuit:
+        asyncio.run(provider.search_people(query))
+    assert circuit.value.reason == "provider_circuit_open"
+    assert calls == 3
 
 
 def test_apollo_bulk_enrichment_and_specific_safe_failure_reasons(
@@ -760,10 +870,211 @@ def test_employment_validation_suppresses_newer_conflict_former_and_parent() -> 
     assert related_result.rejection_codes == ["related_company_only"]
 
 
+def test_provider_observation_is_current_listing_not_independent_verification() -> None:
+    profile = extract_job_people_profile(_job())
+    observed_at = datetime.now(UTC)
+    person = _records()[2].model_copy(update={
+        "employment_verified_at": None,
+        "provider_record_observed_at": observed_at,
+        "employment_source": "provider_current_listing",
+        "current_role_indicator": True,
+    })
+
+    result = validate_current_employment(person, profile, now=observed_at)
+
+    assert result.status == "exact_company_current_but_unverified_freshness"
+    assert result.verified_at is None
+    assert result.rejection_codes == []
+
+
+def test_secondary_verification_is_separately_budgeted_and_cached(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.people import service
+
+    user = User(email="verification@example.com", hashed_password=hash_password("password123"))
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    run = PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="running",
+        provider="apollo",
+        query_fingerprint="v" * 64,
+    )
+    db.add(run)
+    db.commit()
+    profile = extract_job_people_profile(job)
+    primary = _records()[2].model_copy(update={
+        "provider": "apollo",
+        "provider_person_id": "apollo-engineer-1",
+        "employment_verified_at": None,
+        "provider_record_observed_at": datetime.now(UTC),
+        "linkedin_url": "https://www.linkedin.com/in/erin-engineer",
+    })
+
+    class FakeSecondaryProvider:
+        calls = 0
+
+        async def search_people(self, _query):
+            self.calls += 1
+            return [primary.model_copy(update={
+                "provider": "pdl",
+                "provider_person_id": "pdl-engineer-1",
+                "provider_record_observed_at": datetime.now(UTC),
+            })]
+
+        async def get_usage(self):
+            return ProviderUsage(provider="pdl", credits_used=1, requests=1)
+
+    provider = FakeSecondaryProvider()
+    monkeypatch.setattr(service, "PDLPeopleProvider", lambda: provider)
+    monkeypatch.setattr(settings, "people_employment_verification_daily_credit_budget", 5)
+    monkeypatch.setattr(settings, "people_employment_verification_per_user_daily_limit", 5)
+
+    first = asyncio.run(service._secondary_employment_validation(
+        db, user.id, job.id, run.id, primary, profile, "potential_referrer"
+    ))
+    db.commit()
+    second = asyncio.run(service._secondary_employment_validation(
+        db, user.id, job.id, run.id, primary, profile, "potential_referrer"
+    ))
+
+    assert first is not None
+    assert first[0].status == "confirmed_exact_company_verified"
+    assert first[0].verified_at is not None
+    assert second is not None
+    assert second[0].status == "confirmed_exact_company_verified"
+    assert provider.calls == 1
+    verification = db.query(PeopleEmploymentVerificationRun).one()
+    assert verification.credits_used == 1
+    assert run.provider_credits_used == 0
+
+
+def test_secondary_verification_conflict_suppresses_candidate(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.people import service
+
+    user = User(
+        email="conflict-verification@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    run = PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="running",
+        provider="apollo",
+        query_fingerprint="c" * 64,
+    )
+    db.add(run)
+    db.commit()
+    profile = extract_job_people_profile(job)
+    primary = _records()[2].model_copy(update={
+        "provider": "apollo",
+        "provider_person_id": "apollo-conflict-1",
+        "employment_verified_at": None,
+        "provider_record_observed_at": datetime.now(UTC),
+        "linkedin_url": "https://www.linkedin.com/in/erin-engineer",
+    })
+
+    class ConflictingSecondaryProvider:
+        async def search_people(self, _query):
+            return [primary.model_copy(update={
+                "provider": "pdl",
+                "provider_person_id": "pdl-conflict-1",
+                "current_company_name": "Other Company",
+                "current_company_domain": "other.example",
+            })]
+
+        async def get_usage(self):
+            return ProviderUsage(provider="pdl", credits_used=1, requests=1)
+
+    monkeypatch.setattr(service, "PDLPeopleProvider", ConflictingSecondaryProvider)
+    monkeypatch.setattr(settings, "people_employment_verification_daily_credit_budget", 5)
+    monkeypatch.setattr(settings, "people_employment_verification_per_user_daily_limit", 5)
+
+    result = asyncio.run(service._secondary_employment_validation(
+        db, user.id, job.id, run.id, primary, profile, "potential_referrer"
+    ))
+
+    assert result is not None
+    assert result[0].status == "conflicting_current_employment"
+    assert result[0].rejection_codes == ["current_employment_conflict"]
+
+
+def test_provider_budget_block_is_non_retryable_and_not_persisted(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = User(email="budget-block@example.com", hashed_password=hash_password("password123"))
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    db.add(PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="complete",
+        provider="apollo",
+        query_fingerprint="old-budget-run",
+        provider_credits_used=1,
+        completed_at=datetime.now(UTC),
+    ))
+    db.commit()
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    monkeypatch.setattr(settings, "people_daily_credit_budget", 1)
+    monkeypatch.setattr(settings, "people_per_user_daily_limit", 10)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+    before = db.query(PeopleDiscoveryRun).count()
+
+    response = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+
+    assert response.status_code == 429
+    assert response.json()["detail"]["availability_reason"] == "provider_budget_exceeded"
+    assert response.json()["detail"]["retryable"] is False
+    assert db.query(PeopleDiscoveryRun).count() == before
+
+
+def test_provider_circuit_open_response_includes_retry_eligibility(
+    db: Session,
+) -> None:
+    from app.people import service
+
+    user = User(email="circuit-state@example.com", hashed_password=hash_password("password123"))
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    db.add(PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="provider_unavailable",
+        provider="apollo",
+        query_fingerprint=service.query_fingerprint(job, "exact"),
+        failure_code="provider_circuit_open",
+        safe_failure_message=(
+            "People search is temporarily paused after repeated provider failures."
+        ),
+        completed_at=datetime.now(UTC),
+    ))
+    db.commit()
+
+    payload = recommendations_payload(db, user, job.id)
+
+    assert payload["status"] == "provider_unavailable"
+    assert payload["availability_reason"] == "provider_circuit_open"
+    assert payload["retry_eligible"] is True
+    assert payload["retry_after_seconds"] == 60
+
+
 def _persist_recommendation(
     db: Session,
     *,
-    status: str = "confirmed_exact_company",
+    status: str = "confirmed_exact_company_verified",
     revalidation_required: bool = False,
     category: str = "likely_recruiter",
 ) -> tuple[User, JobPosting, ProfessionalPerson, UserJobPeopleRecommendation]:
@@ -936,7 +1247,7 @@ def test_grounded_drafts_differ_by_category_and_respect_linkedin_limit(
         category_score=90,
         data_confidence=0.9,
         current_employment_confidence=0.95,
-        employment_validation_status="confirmed_exact_company",
+        employment_validation_status="confirmed_exact_company_verified",
         employment_validation_version=EMPLOYMENT_VALIDATION_VERSION,
         employment_validation_checked_at=datetime.now(UTC),
         recommendation_reasons=[],
@@ -951,7 +1262,7 @@ def test_grounded_drafts_differ_by_category_and_respect_linkedin_limit(
         category_score=85,
         data_confidence=0.9,
         current_employment_confidence=0.95,
-        employment_validation_status="confirmed_exact_company",
+        employment_validation_status="confirmed_exact_company_verified",
         employment_validation_version=EMPLOYMENT_VALIDATION_VERSION,
         employment_validation_checked_at=datetime.now(UTC),
         recommendation_reasons=[],

@@ -442,3 +442,75 @@ pre-versioned rows. The provider circuit breaker and Redis coalescing must remai
 - [x] `git diff --check` and final status inspected; no commit created.
 - [ ] Separate live validation is still required before claiming current Apollo, PDL, Hunter, or
   model-backed behavior; this implementation made no external provider request.
+
+## Post-employment-v2 regression correction (2026-07-27)
+
+Status: offline implementation and full-stack validation complete. Live provider validation
+remains blocked pending explicit approval.
+
+### Diagnosis and decisions
+
+- Safe persisted diagnostics resolved Retell AI job `7600`, Huntington Ingalls job `7506`,
+  Vanderbilt Health job `7508`, and Cisco job `7509`. Retell's current-version exact and
+  broadened runs enriched candidates but suppressed every candidate, primarily because Apollo
+  records without provider employment timestamps became stale/insufficient under v2. Huntington
+  has only pre-current-version/circuit-open state, which exposed a missing `stale` summary-panel
+  branch. Vanderbilt and Cisco both received Apollo HTTP 422 during enrichment, but the adapter
+  collapsed that known response into generic provider unavailability. Discovery budgets were
+  non-zero and the in-process Apollo circuit was closed during diagnosis.
+- Provider retrieval time is now stored only as `provider_record_observed_at`. Provider-supplied
+  employment freshness, actual verification, evidence source, exact-company state, current-role
+  indicator, and conflicting-employer observation are separate typed fields. A fresh exact-company
+  provider listing may display as `exact_company_current_but_unverified_freshness` with “Currently
+  listed” language; only corroboration promotes it to
+  `confirmed_exact_company_verified` with multi-source verification language.
+- Additive migration `0023_people_evidence` stores explicit source evidence and creates a
+  separately versioned, hashed, identifier-minimized secondary-verification cache/credit ledger.
+  Optional PDL verification remains disabled by default and is bounded/configurable to one
+  recruiter, manager, and referrer by default. It requires exact company, category relevance, and
+  strong identity, suppresses contradictions, caches/coalesces requests, and never enables broad
+  PDL fallback.
+- Apollo HTTP 422 now maps to `provider_schema_error`. Permanent authentication, authorization,
+  and schema failures do not increment the transient circuit and therefore cannot become masked
+  by `provider_circuit_open`. Transient failures still open after three failures and half-open
+  after 60 seconds. Apollo's current official documentation still specifies
+  `POST /api/v1/people/bulk_match` with `details: [{"id": ...}]`, so the adapter endpoint/body
+  remains unchanged; the provider's safe 422 category is retained without storing or exposing its
+  raw response. Local reset remains a process/container restart; the breaker is not disabled.
+- Provider responses include safe retry eligibility. Daily global/user budget blocks are
+  non-retryable until reset and are not persisted. Circuit-open responses include a safe retry
+  interval. The summary card now renders explicit loading, stale/refresh, no-match, and
+  non-retryable provider states while preserving lazy per-card status loading and mutation
+  coalescing.
+- The secondary-verification flag participates in the no-result fingerprint, so enabling it
+  re-evaluates unresolved/no-match runs while existing fresh displayable results continue to use
+  the current cache.
+
+### Rollout and rollback
+
+Deploy migration `0023` before the rebuilt API, worker, scheduler, and web. Keep
+`PEOPLE_PDL_FALLBACK_ENABLED=false` and
+`PEOPLE_EMPLOYMENT_SECONDARY_VERIFICATION_ENABLED=false` until separate budgets and explicit live
+validation are approved. Roll back application code first, then downgrade `0023`; the downgrade
+removes only the new evidence columns and verification ledger. Do not disable the circuit breaker
+or restore pre-v2 candidates.
+
+### Validation checklist
+
+- [x] Focused People backend and production-config tests: 82 passed.
+- [x] Focused People frontend: 29 passed.
+- [x] Web lint and typecheck passed.
+- [x] Regression coverage includes retrieval-vs-verification semantics, Apollo 422 mapping,
+  permanent-vs-transient circuit behavior, secondary confirmation/contradiction, category caps,
+  separate verification credit ledger, non-persisted budget block, circuit retry metadata,
+  current no-result caching, stale panel rendering, explicit refresh, duplicate mutation
+  coalescing, cached reopen behavior, and zero mass requests from collapsed cards.
+- [x] Complete API: 635 passed. Complete web: 198 passed. Web lint, typecheck, and production
+  build passed. Chromium People E2E: 3 passed.
+- [x] Migration `0023` upgrade/downgrade/re-upgrade passed in an isolated PostgreSQL database,
+  which was removed afterward. The rebuilt API, worker, scheduler, and web are running; API,
+  worker, PostgreSQL, and Redis are healthy, readiness is at `0023_people_evidence`, and Compose
+  validation passed.
+- [x] Focused changed-code Ruff and `git diff --check` passed. Repository-wide Ruff retains
+  pre-existing formatting debt in `core/config.py` and `models/entities.py`.
+- [ ] Controlled Retell AI live validation, only after explicit approval.

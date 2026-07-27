@@ -24,6 +24,7 @@ from app.models.entities import (
     JobPeopleCandidate,
     JobPosting,
     PeopleDiscoveryRun,
+    PeopleEmploymentVerificationRun,
     PeopleRecommendationFeedback,
     ProfessionalPerson,
     ProfessionalPersonSource,
@@ -32,6 +33,7 @@ from app.models.entities import (
     UserProfile,
 )
 from app.people.employment_validation import (
+    EMPLOYMENT_EVIDENCE_VERSION,
     EMPLOYMENT_VALIDATION_VERSION,
     EmploymentValidationResult,
     validate_current_employment,
@@ -81,6 +83,12 @@ logger = logging.getLogger("jobpilot.people")
 
 DiscoveryStrategy = Literal["exact", "broadened"]
 DISCOVERY_STRATEGY_VERSION = "people-discovery-v3"
+DISPLAYABLE_EMPLOYMENT_STATUSES = frozenset(
+    {
+        "confirmed_exact_company_verified",
+        "exact_company_current_but_unverified_freshness",
+    }
+)
 
 _SAFE_PROVIDER_MESSAGES = {
     "provider_unauthorized": "The people data provider credentials could not be verified.",
@@ -136,6 +144,12 @@ def query_fingerprint(
     payload["discovery_strategy_version"] = DISCOVERY_STRATEGY_VERSION
     payload["discovery_strategy"] = strategy
     payload["employment_validation_version"] = EMPLOYMENT_VALIDATION_VERSION
+    payload["employment_evidence_version"] = EMPLOYMENT_EVIDENCE_VERSION
+    # Changing this flag invalidates cached no-match/unresolved runs. Existing
+    # fresh displayable candidates are still returned before fingerprint lookup.
+    payload["secondary_employment_verification_enabled"] = (
+        settings.people_employment_secondary_verification_enabled
+    )
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -159,8 +173,9 @@ def _fresh_candidates(db: Session, job_id: int) -> list[JobPeopleCandidate]:
                 JobPeopleCandidate.scoring_version == SCORING_VERSION,
                 JobPeopleCandidate.employment_validation_version
                 == EMPLOYMENT_VALIDATION_VERSION,
-                JobPeopleCandidate.employment_validation_status
-                == "confirmed_exact_company",
+                JobPeopleCandidate.employment_validation_status.in_(
+                    DISPLAYABLE_EMPLOYMENT_STATUSES
+                ),
             )
         )
     )
@@ -294,17 +309,23 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
             professional_location=(value.location or "")[:255] or None,
             linkedin_url=linkedin,
             linkedin_url_normalized=linkedin,
-            employment_last_verified_at=value.employment_verified_at or value.source_last_updated_at,
+            employment_last_verified_at=value.employment_verified_at,
         )
         db.add(canonical)
         db.flush()
     else:
         # Prefer fresher provider evidence; never overwrite with missing values.
-        incoming = value.employment_verified_at or value.source_last_updated_at
-        current = canonical.employment_last_verified_at
+        incoming = (
+            value.employment_verified_at
+            or value.provider_employment_updated_at
+            or value.provider_record_observed_at
+            or value.source_last_updated_at
+        )
+        current = canonical.updated_at
         if incoming and (
             not current or incoming.replace(tzinfo=UTC) >= current.replace(tzinfo=UTC)
         ):
+            prior_company_domain = canonical.current_company_domain
             canonical.current_company_name = value.current_company_name[:255]
             canonical.current_company_domain = value.current_company_domain or canonical.current_company_domain
             canonical.current_title = value.current_title[:255]
@@ -312,7 +333,16 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
             canonical.department = value.department or canonical.department
             canonical.seniority = value.seniority or canonical.seniority
             canonical.professional_location = value.location or canonical.professional_location
-            canonical.employment_last_verified_at = incoming
+            if value.employment_verified_at:
+                canonical.employment_last_verified_at = (
+                    value.employment_verified_at
+                )
+            elif (
+                prior_company_domain
+                and value.current_company_domain
+                and prior_company_domain != value.current_company_domain
+            ):
+                canonical.employment_last_verified_at = None
     source = db.scalar(
         select(ProfessionalPersonSource).where(
             ProfessionalPersonSource.provider == value.provider,
@@ -326,6 +356,15 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
             provider_person_id=value.provider_person_id[:255],
             source_profile_url=safe_profile_url(value.source_profile_url),
             source_last_updated_at=value.source_last_updated_at,
+            provider_record_observed_at=value.provider_record_observed_at,
+            provider_employment_updated_at=value.provider_employment_updated_at,
+            employment_verified_at=value.employment_verified_at,
+            employment_source=value.employment_source,
+            exact_company_match=value.exact_company_match,
+            current_role_indicator=value.current_role_indicator,
+            conflicting_employer_observed_at=(
+                value.conflicting_employer_observed_at
+            ),
             normalized_evidence=value.evidence,
             field_provenance=value.field_provenance,
             redacted_payload={},
@@ -339,12 +378,24 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
             "company_domain": prior.get("current_company_domain"),
             "title": prior.get("current_title"),
             "verified_at": prior.get("employment_verified_at"),
+            "provider_record_observed_at": prior.get(
+                "provider_record_observed_at"
+            ),
+            "provider_employment_updated_at": prior.get(
+                "provider_employment_updated_at"
+            ),
         }
         incoming_snapshot = {
             "company_name": value.evidence.get("current_company_name"),
             "company_domain": value.evidence.get("current_company_domain"),
             "title": value.evidence.get("current_title"),
             "verified_at": value.evidence.get("employment_verified_at"),
+            "provider_record_observed_at": value.evidence.get(
+                "provider_record_observed_at"
+            ),
+            "provider_employment_updated_at": value.evidence.get(
+                "provider_employment_updated_at"
+            ),
         }
         if any(previous_snapshot.values()) and previous_snapshot != incoming_snapshot:
             observations.append(previous_snapshot)
@@ -354,6 +405,17 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
         }
         source.field_provenance = value.field_provenance
         source.source_last_updated_at = value.source_last_updated_at
+        source.provider_record_observed_at = value.provider_record_observed_at
+        source.provider_employment_updated_at = (
+            value.provider_employment_updated_at
+        )
+        source.employment_verified_at = value.employment_verified_at
+        source.employment_source = value.employment_source
+        source.exact_company_match = value.exact_company_match
+        source.current_role_indicator = value.current_role_indicator
+        source.conflicting_employer_observed_at = (
+            value.conflicting_employer_observed_at
+        )
     return canonical
 
 
@@ -391,7 +453,22 @@ def _employment_observations(
             "company_name": evidence.get("current_company_name"),
             "company_domain": evidence.get("current_company_domain"),
             "title": evidence.get("current_title"),
-            "verified_at": evidence.get("employment_verified_at"),
+            "employment_verified_at": (
+                existing_source.employment_verified_at.isoformat()
+                if existing_source.employment_verified_at
+                else evidence.get("employment_verified_at")
+            ),
+            "provider_record_observed_at": (
+                existing_source.provider_record_observed_at.isoformat()
+                if existing_source.provider_record_observed_at
+                else evidence.get("provider_record_observed_at")
+            ),
+            "provider_employment_updated_at": (
+                existing_source.provider_employment_updated_at.isoformat()
+                if existing_source.provider_employment_updated_at
+                else evidence.get("provider_employment_updated_at")
+            ),
+            "provider": existing_source.provider,
         }
         if any(snapshot.values()):
             observations.append(snapshot)
@@ -423,62 +500,228 @@ def _validate_employment(
 
 
 async def _secondary_employment_validation(
+    db: Session,
+    user_id: int,
+    job_id: int,
+    discovery_run_id: int,
     person: ProviderPerson,
     profile,
     category: PeopleCategory,
-) -> tuple[EmploymentValidationResult, ProviderPerson] | None:
-    provider = PDLPeopleProvider()
-    try:
-        rows = await provider.search_people(
-            PeopleSearchQuery(
-                category=category,
-                company_name=profile.company_name,
-                company_domain=profile.company_domain,
-                company_aliases=profile.company_aliases,
-                titles=[person.current_title],
-                title_group="employment_verification",
-                seniorities=[],
-                role_family=profile.role_family,
-                department=profile.department,
-                location=profile.location,
-                location_filter_mode="none",
-                company_match_kind="canonical",
-                limit=5,
+) -> tuple[EmploymentValidationResult, ProviderPerson | None] | None:
+    cache_key = hashlib.sha256(
+        (
+            f"{person.provider}:{person.provider_person_id}:"
+            f"{profile.company_domain}:{EMPLOYMENT_EVIDENCE_VERSION}"
+        ).encode()
+    ).hexdigest()
+    cached = db.scalar(
+        select(PeopleEmploymentVerificationRun)
+        .where(
+            PeopleEmploymentVerificationRun.cache_key_hash == cache_key,
+            PeopleEmploymentVerificationRun.verification_version
+            == EMPLOYMENT_EVIDENCE_VERSION,
+            PeopleEmploymentVerificationRun.expires_at > _now(),
+        )
+        .order_by(PeopleEmploymentVerificationRun.completed_at.desc())
+    )
+    if cached is not None:
+        return _cached_verification_result(cached), None
+
+    budget_reason = _employment_verification_budget_reason(db, user_id)
+    if budget_reason is not None:
+        return None
+    with _redis_lock(job_id, cache_key, namespace="employment-verify") as acquired:
+        if not acquired:
+            return None
+        provider = PDLPeopleProvider()
+        result_status = "insufficient_evidence"
+        credits = 0
+        match: ProviderPerson | None = None
+        try:
+            rows = await provider.search_people(
+                PeopleSearchQuery(
+                    category=category,
+                    company_name=profile.company_name,
+                    company_domain=profile.company_domain,
+                    company_aliases=profile.company_aliases,
+                    titles=[person.current_title],
+                    title_group="employment_verification",
+                    seniorities=[],
+                    role_family=profile.role_family,
+                    department=profile.department,
+                    location=profile.location,
+                    location_filter_mode="none",
+                    company_match_kind="canonical",
+                    limit=5,
+                )
+            )
+            match = next(
+                (
+                    row
+                    for row in rows
+                    if (
+                        safe_profile_url(row.linkedin_url)
+                        and safe_profile_url(row.linkedin_url)
+                        == safe_profile_url(person.linkedin_url)
+                    )
+                    or (
+                        normalize_text(row.full_name)
+                        == normalize_text(person.full_name)
+                        and normalize_text(row.current_title)
+                        == normalize_text(person.current_title)
+                    )
+                ),
+                None,
+            )
+            usage = await provider.get_usage()
+            credits = usage.credits_used
+            if match is None:
+                result = EmploymentValidationResult(
+                    status="insufficient_evidence",
+                    confidence=0.3,
+                    identity_strong=True,
+                    rejection_codes=["insufficient_employment_evidence"],
+                )
+            elif match.current_company_domain != profile.company_domain:
+                match.conflicting_employer_observed_at = (
+                    match.provider_record_observed_at or _now()
+                )
+                result = EmploymentValidationResult(
+                    status="conflicting_current_employment",
+                    confidence=0.1,
+                    verified_at=match.conflicting_employer_observed_at,
+                    conflicting_employer=True,
+                    identity_strong=True,
+                    rejection_codes=["current_employment_conflict"],
+                )
+            else:
+                match.exact_company_match = True
+                base = validate_current_employment(match, profile)
+                if base.status in DISPLAYABLE_EMPLOYMENT_STATUSES:
+                    result = base.model_copy(
+                        update={
+                            "status": "confirmed_exact_company_verified",
+                            "confidence": 0.98,
+                            "verified_at": _now(),
+                            "rejection_codes": [],
+                        }
+                    )
+                else:
+                    result = base
+            result_status = result.status
+        except ProviderUnavailable as exc:
+            result = EmploymentValidationResult(
+                status="stale_or_uncertain",
+                confidence=0.3,
+                identity_strong=True,
+                rejection_codes=["insufficient_employment_evidence"],
+            )
+            result_status = exc.reason
+            _log_provider_failure(exc, discovery_run_id)
+        expires = _now() + timedelta(
+            seconds=(
+                _provider_retry_seconds(result_status)
+                if result_status.startswith("provider_")
+                else settings.people_employment_verification_ttl_days * 86400
             )
         )
-    except ProviderUnavailable:
-        return None
-    match = next(
-        (
-            row
-            for row in rows
-            if (
-                safe_profile_url(row.linkedin_url)
-                and safe_profile_url(row.linkedin_url)
-                == safe_profile_url(person.linkedin_url)
+        db.add(
+            PeopleEmploymentVerificationRun(
+                job_id=job_id,
+                user_id=user_id,
+                discovery_run_id=discovery_run_id,
+                category=category,
+                cache_key_hash=cache_key,
+                verification_version=EMPLOYMENT_EVIDENCE_VERSION,
+                status=result_status,
+                credits_used=credits,
+                completed_at=_now(),
+                expires_at=expires,
             )
-            or (
-                normalize_text(row.full_name) == normalize_text(person.full_name)
-                and row.current_company_domain == person.current_company_domain
-                and normalize_text(row.current_title)
-                == normalize_text(person.current_title)
+        )
+        return (
+            result.model_copy(
+                update={
+                    "verification_provider": "secondary_licensed_provider",
+                    "credits_consumed": credits,
+                }
+            ),
+            match,
+        )
+
+
+def _cached_verification_result(
+    cached: PeopleEmploymentVerificationRun,
+) -> EmploymentValidationResult:
+    if cached.status == "confirmed_exact_company_verified":
+        return EmploymentValidationResult(
+            status="confirmed_exact_company_verified",
+            confidence=0.98,
+            verified_at=cached.completed_at,
+            exact_company=True,
+            identity_strong=True,
+        )
+    if cached.status == "conflicting_current_employment":
+        return EmploymentValidationResult(
+            status="conflicting_current_employment",
+            confidence=0.1,
+            verified_at=cached.completed_at,
+            conflicting_employer=True,
+            identity_strong=True,
+            rejection_codes=["current_employment_conflict"],
+        )
+    return EmploymentValidationResult(
+        status="stale_or_uncertain",
+        confidence=0.3,
+        verified_at=cached.completed_at,
+        identity_strong=True,
+        rejection_codes=["insufficient_employment_evidence"],
+    )
+
+
+def _employment_verification_budget_reason(
+    db: Session, user_id: int
+) -> str | None:
+    start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    global_used = db.scalar(
+        select(
+            func.coalesce(
+                func.sum(PeopleEmploymentVerificationRun.credits_used), 0
             )
-        ),
-        None,
-    )
-    if match is None:
-        return None
-    result = validate_current_employment(match, profile)
-    usage = await provider.get_usage()
-    return (
-        result.model_copy(
-            update={
-                "verification_provider": "secondary_licensed_provider",
-                "credits_consumed": usage.credits_used,
-            }
-        ),
-        match,
-    )
+        ).where(PeopleEmploymentVerificationRun.started_at >= start)
+    ) or 0
+    user_used = db.scalar(
+        select(
+            func.coalesce(
+                func.sum(PeopleEmploymentVerificationRun.credits_used), 0
+            )
+        ).where(
+            PeopleEmploymentVerificationRun.user_id == user_id,
+            PeopleEmploymentVerificationRun.started_at >= start,
+        )
+    ) or 0
+    if (
+        settings.people_employment_verification_daily_credit_budget > 0
+        and global_used
+        >= settings.people_employment_verification_daily_credit_budget
+    ):
+        return "provider_budget_exceeded"
+    if (
+        settings.people_employment_verification_per_user_daily_limit > 0
+        and user_used
+        >= settings.people_employment_verification_per_user_daily_limit
+    ):
+        return "provider_user_limit_exceeded"
+    return None
+
+
+def _provider_retry_seconds(reason: str) -> int:
+    return {
+        "provider_circuit_open": 60,
+        "provider_rate_limited": 60,
+        "provider_timeout": 30,
+        "provider_network_error": 30,
+    }.get(reason, 300)
 
 
 def _ensure_recommendation(
@@ -538,7 +781,8 @@ def _budget_check(db: Session, user_id: int) -> None:
             detail={
                 "code": "PEOPLE_GLOBAL_BUDGET_EXCEEDED",
                 "message": "People discovery is temporarily unavailable because today's usage limit was reached.",
-                "retryable": True,
+                "availability_reason": "provider_budget_exceeded",
+                "retryable": False,
             },
         )
     if settings.people_per_user_daily_limit and user_used >= settings.people_per_user_daily_limit:
@@ -547,7 +791,8 @@ def _budget_check(db: Session, user_id: int) -> None:
             detail={
                 "code": "PEOPLE_USER_BUDGET_EXCEEDED",
                 "message": "People discovery is temporarily unavailable because your daily usage limit was reached.",
-                "retryable": True,
+                "availability_reason": "provider_user_limit_exceeded",
+                "retryable": False,
             },
         )
 
@@ -593,6 +838,20 @@ def _category_threshold(category: PeopleCategory) -> float:
         "likely_recruiter": settings.people_min_recruiter_relevance,
         "potential_hiring_manager": settings.people_min_manager_relevance,
         "potential_referrer": settings.people_min_referrer_relevance,
+    }[category]
+
+
+def _employment_verification_cap(category: PeopleCategory) -> int:
+    return {
+        "likely_recruiter": (
+            settings.people_employment_verification_max_recruiters
+        ),
+        "potential_hiring_manager": (
+            settings.people_employment_verification_max_managers
+        ),
+        "potential_referrer": (
+            settings.people_employment_verification_max_referrers
+        ),
     }[category]
 
 
@@ -919,6 +1178,10 @@ async def discover(
             "evidence_source": profile.company_evidence_source,
             "scoring_version": SCORING_VERSION,
             "employment_validation_version": EMPLOYMENT_VALIDATION_VERSION,
+            "employment_evidence_version": EMPLOYMENT_EVIDENCE_VERSION,
+            "secondary_employment_verification_enabled": (
+                settings.people_employment_secondary_verification_enabled
+            ),
             "discovery_strategy_version": DISCOVERY_STRATEGY_VERSION,
             "discovery_strategy": strategy,
         }
@@ -1101,69 +1364,16 @@ async def discover(
                 if person is None:
                     diagnostics[category]["candidates_rejected"] += 1
                     continue
+                person.exact_company_match = (
+                    bool(profile.company_domain)
+                    and person.current_company_domain == profile.company_domain
+                )
                 employment = _validate_employment(db, person, profile)
                 score = score_candidate(
                     category, person, profile,
                     shared_school=bool(school), shared_employer=bool(employer),
                 )
                 data_confidence = confidence(person)
-                should_secondary_verify = bool(
-                    settings.people_employment_secondary_verification_enabled
-                    and (
-                        employment.status
-                        in {
-                            "conflicting_current_employment",
-                            "stale_or_uncertain",
-                        }
-                        or (
-                            employment.status == "confirmed_exact_company"
-                            and score >= _category_threshold(category) + 15
-                        )
-                        or settings.people_employment_comparison_mode
-                    )
-                    and diagnostics[category][
-                        "employment_secondary_verification_attempts"
-                    ]
-                    == 0
-                )
-                if should_secondary_verify:
-                    diagnostics[category][
-                        "employment_secondary_verification_attempts"
-                    ] += 1
-                    secondary_match = await _secondary_employment_validation(
-                        person, profile, category
-                    )
-                    if secondary_match is not None:
-                        secondary_result, secondary_person = secondary_match
-                        diagnostics[category][
-                            "employment_secondary_verification_matches"
-                        ] += 1
-                        diagnostics[category][
-                            "employment_secondary_verification_credits"
-                        ] += secondary_result.credits_consumed
-                        _person_for_provider(db, secondary_person)
-                        db.flush()
-                        secondary = _validate_employment(
-                            db, secondary_person, profile
-                        ).model_copy(
-                            update={
-                                "verification_provider": (
-                                    "secondary_licensed_provider"
-                                ),
-                                "credits_consumed": (
-                                    secondary_result.credits_consumed
-                                ),
-                            }
-                        )
-                        if (
-                            secondary.status == "confirmed_exact_company"
-                            and secondary.verified_at is not None
-                            and (
-                                employment.verified_at is None
-                                or secondary.verified_at >= employment.verified_at
-                            )
-                        ):
-                            employment = secondary
                 threshold = _category_threshold(category)
                 rejection_reasons = candidate_rejection_reasons(
                     category,
@@ -1174,6 +1384,89 @@ async def discover(
                     relevance_threshold=threshold,
                     confidence_threshold=settings.people_min_data_confidence,
                 )
+                verification_blockers = {
+                    reason
+                    for reason in rejection_reasons
+                    if reason
+                    not in {"stale_employment", "below_confidence_threshold"}
+                }
+                verification_budget_reason = (
+                    _employment_verification_budget_reason(db, user.id)
+                )
+                if verification_budget_reason:
+                    diagnostics[category][
+                        "employment_secondary_verification_budget_reason"
+                    ] = verification_budget_reason
+                should_secondary_verify = bool(
+                    settings.people_employment_secondary_verification_enabled
+                    and person.exact_company_match
+                    and employment.identity_strong
+                    and not verification_blockers
+                    and verification_budget_reason is None
+                    and (
+                        employment.status
+                        in {
+                            "conflicting_current_employment",
+                            "stale_or_uncertain",
+                            "exact_company_current_but_unverified_freshness",
+                        }
+                        or settings.people_employment_comparison_mode
+                    )
+                    and diagnostics[category][
+                        "employment_secondary_verification_attempts"
+                    ]
+                    < _employment_verification_cap(category)
+                )
+                if should_secondary_verify:
+                    diagnostics[category][
+                        "employment_secondary_verification_attempts"
+                    ] += 1
+                    secondary_match = await _secondary_employment_validation(
+                        db,
+                        user.id,
+                        job_id,
+                        run.id,
+                        person,
+                        profile,
+                        category,
+                    )
+                    if secondary_match is not None:
+                        secondary_result, secondary_person = secondary_match
+                        diagnostics[category][
+                            "employment_secondary_verification_matches"
+                        ] += 1
+                        diagnostics[category][
+                            "employment_secondary_verification_credits"
+                        ] += secondary_result.credits_consumed
+                        if secondary_person is not None:
+                            if (
+                                secondary_result.status
+                                == "confirmed_exact_company_verified"
+                            ):
+                                secondary_person.employment_verified_at = (
+                                    secondary_result.verified_at
+                                )
+                                secondary_person.employment_source = (
+                                    "secondary_verification"
+                                )
+                            _person_for_provider(db, secondary_person)
+                            db.flush()
+                        if secondary_result.status in {
+                            "confirmed_exact_company_verified",
+                            "conflicting_current_employment",
+                        }:
+                            employment = secondary_result
+                if employment.status == "confirmed_exact_company_verified":
+                    data_confidence = max(data_confidence, 0.75)
+                    rejection_reasons = [
+                        reason
+                        for reason in rejection_reasons
+                        if reason
+                        not in {
+                            "stale_employment",
+                            "below_confidence_threshold",
+                        }
+                    ]
                 rejection_reasons.extend(employment.rejection_codes)
                 rejection_reasons = list(dict.fromkeys(rejection_reasons))
                 if (
@@ -1189,7 +1482,12 @@ async def discover(
                         counts[reason] = counts.get(reason, 0) + 1
                     continue
                 reasons, limitations = explanations(
-                    category, person, profile, shared_school=school, shared_employer=employer
+                    category,
+                    person,
+                    profile,
+                    shared_school=school,
+                    shared_employer=employer,
+                    employment_validation_status=employment.status,
                 )
                 canonical = _person_for_provider(db, person)
                 db.flush()
@@ -1244,11 +1542,9 @@ async def discover(
                 run.safe_failure_message = _safe_provider_message(failures[0])
             run.records_searched = searched
             run.records_enriched = len(enriched)
-            secondary_credits = sum(
-                int(value["employment_secondary_verification_credits"])
-                for value in diagnostics.values()
-            )
-            run.provider_credits_used = usage.credits_used + secondary_credits
+            # Secondary employment verification has its own ledger and budget.
+            # Do not fold those credits into the primary discovery run.
+            run.provider_credits_used = usage.credits_used
             for category in _PEOPLE_CATEGORIES:
                 diagnostics[category]["seniorities_used"] = list(dict.fromkeys(
                     diagnostics[category]["seniorities_used"]
@@ -1310,8 +1606,9 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             JobPeopleCandidate.scoring_version == SCORING_VERSION,
             JobPeopleCandidate.employment_validation_version
             == EMPLOYMENT_VALIDATION_VERSION,
-            JobPeopleCandidate.employment_validation_status
-            == "confirmed_exact_company",
+            JobPeopleCandidate.employment_validation_status.in_(
+                DISPLAYABLE_EMPLOYMENT_STATUSES
+            ),
             ProfessionalPerson.employment_revalidation_required.is_(False),
         )
         .order_by(JobPeopleCandidate.category_score.desc())
@@ -1334,7 +1631,8 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         if expires <= now:
             continue
         email_lookup_allowed = (
-            candidate.employment_validation_status == "confirmed_exact_company"
+            candidate.employment_validation_status
+            == "confirmed_exact_company_verified"
             and not person.employment_revalidation_required
         )
         email = (
@@ -1365,6 +1663,9 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
                 ),
                 "employment_last_verified_at": (
                     person.employment_last_verified_at
+                    if candidate.employment_validation_status
+                    == "confirmed_exact_company_verified"
+                    else None
                 ),
                 "employment_warning": None,
                 "email_lookup_allowed": email_lookup_allowed,
@@ -1414,6 +1715,21 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     if stale and not has_results:
         response_status = "stale"
         warnings.append("Previous results are stale. Refresh is available.")
+    availability_reason = (
+        latest_run.failure_code
+        if latest_run and latest_run.status == "provider_unavailable"
+        else "available"
+    )
+    retry_eligible = availability_reason in {
+        "provider_circuit_open",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_network_error",
+        "provider_unavailable",
+    }
+    retry_after_seconds = (
+        _provider_retry_seconds(availability_reason) if retry_eligible else None
+    )
     exact_no_match = _fresh_no_match_run(
         db,
         job_id=job_id,
@@ -1446,11 +1762,9 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     )
     return {
         "status": response_status,
-        "availability_reason": (
-            latest_run.failure_code
-            if latest_run and latest_run.status == "provider_unavailable"
-            else "available"
-        ),
+        "availability_reason": availability_reason,
+        "retry_eligible": retry_eligible,
+        "retry_after_seconds": retry_after_seconds,
         "beta": is_beta(user),
         "generated_at": latest_run.completed_at if latest_run else None,
         "expires_at": expires_at,
@@ -1530,7 +1844,8 @@ async def find_email(db: Session, user: User, job_id: int, recommendation_id: in
     )
     if (
         candidate.employment_validation_version != EMPLOYMENT_VALIDATION_VERSION
-        or candidate.employment_validation_status != "confirmed_exact_company"
+        or candidate.employment_validation_status
+        != "confirmed_exact_company_verified"
         or person.employment_revalidation_required
     ):
         status_value = (
@@ -1695,7 +2010,8 @@ def outreach_draft(
         recommendation.suppressed_at is not None
         or candidate.employment_validation_version
         != EMPLOYMENT_VALIDATION_VERSION
-        or candidate.employment_validation_status != "confirmed_exact_company"
+        or candidate.employment_validation_status
+        != "confirmed_exact_company_verified"
         or person.employment_revalidation_required
     ):
         raise HTTPException(

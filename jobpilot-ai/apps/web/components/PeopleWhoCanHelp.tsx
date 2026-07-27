@@ -67,6 +67,16 @@ function safePeopleError(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function peopleErrorCanRetry(error: unknown): boolean {
+  return !(
+    error instanceof ApiError &&
+    (
+      error.serverCode === "PEOPLE_GLOBAL_BUDGET_EXCEEDED" ||
+      error.serverCode === "PEOPLE_USER_BUDGET_EXCEEDED"
+    )
+  );
+}
+
 function availabilityMessage(data: PeopleResponse): string | null {
   if (data.status !== "disabled") return null;
   if (data.availability_reason === "not_in_rollout") {
@@ -87,8 +97,16 @@ function providerFailureMessage(data: PeopleResponse): string {
     provider_circuit_open: "People search is temporarily paused after repeated provider failures.",
     provider_schema_error: "The people provider returned an unsupported response."
   };
-  return messages[data.availability_reason ?? ""] ??
+  const message = messages[data.availability_reason ?? ""] ??
     "The professional data provider is temporarily unavailable. You can safely retry later.";
+  if (
+    data.availability_reason === "provider_circuit_open" &&
+    data.retry_eligible !== false &&
+    data.retry_after_seconds
+  ) {
+    return `${message} Retry is available in about ${data.retry_after_seconds} seconds.`;
+  }
+  return message;
 }
 
 function confidenceText(value: PeopleRecommendation["confidence"]) {
@@ -114,6 +132,7 @@ function hasResults(data: PeopleResponse | null): data is PeopleResponse {
 function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   const [data, setData] = useState<PeopleResponse | null>(() => getCachedPeople(jobId));
   const [error, setError] = useState("");
+  const [errorCanRetry, setErrorCanRetry] = useState(true);
   const [loading, setLoading] = useState(loadOnMount);
   const [discovering, setDiscovering] = useState(false);
   const [actionId, setActionId] = useState<number | null>(null);
@@ -129,6 +148,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
       setData(response);
       return response;
     } catch (loadError) {
+      setErrorCanRetry(peopleErrorCanRetry(loadError));
       setError(
         safePeopleError(
           loadError,
@@ -162,6 +182,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
       setData(response);
       return response;
     } catch (discoverError) {
+      setErrorCanRetry(peopleErrorCanRetry(discoverError));
       setError(
         safePeopleError(
           discoverError,
@@ -185,6 +206,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
       setData(response);
       return response;
     } catch (broadenError) {
+      setErrorCanRetry(peopleErrorCanRetry(broadenError));
       setError(
         safePeopleError(
           broadenError,
@@ -300,6 +322,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   return {
     data,
     error,
+    errorCanRetry,
     loading,
     discovering,
     actionId,
@@ -318,7 +341,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
 export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
   const titleId = useId();
   const controller = usePeopleController(jobId, true);
-  const { data, error, loading, discovering } = controller;
+  const { data, error, errorCanRetry, loading, discovering } = controller;
   const availableMessage = data ? availabilityMessage(data) : null;
   const canDiscover =
     data?.availability_reason !== "not_in_rollout" &&
@@ -326,7 +349,7 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
     (
       data?.status === "not_started" ||
       data?.status === "stale" ||
-      data?.status === "provider_unavailable"
+      (data?.status === "provider_unavailable" && data.retry_eligible !== false)
     );
   const canBroaden = Boolean(
     data?.status === "no_reliable_matches" &&
@@ -380,9 +403,11 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
         {error ? (
           <div>
             <p role="alert" className="text-sm text-red-700">{error}</p>
-            <Button variant="secondary" className="mt-3" onClick={() => void controller.load(true)}>
-              Retry
-            </Button>
+            {errorCanRetry ? (
+              <Button variant="secondary" className="mt-3" onClick={() => void controller.load(true)}>
+                Retry
+              </Button>
+            ) : null}
           </div>
         ) : null}
         {data?.status !== "provider_unavailable" ? data?.warnings.map((warning) => (
@@ -490,7 +515,7 @@ export function PeopleWhoCanHelpSummary({
   const titleId = useId();
   const [expanded, setExpanded] = useState(false);
   const controller = usePeopleController(jobId, false);
-  const { data, error, loading, discovering } = controller;
+  const { data, error, errorCanRetry, loading, discovering } = controller;
   const resultsAvailable = hasResults(data);
   const availableMessage = data ? availabilityMessage(data) : null;
 
@@ -566,16 +591,33 @@ export function PeopleWhoCanHelpSummary({
           {error ? (
             <div>
               <p role="alert" className="text-sm text-red-700">{error}</p>
-              <Button variant="secondary" className="mt-3" onClick={() => void loadAndMaybeDiscover(true)}>
-                Retry
-              </Button>
+              {errorCanRetry ? (
+                <Button variant="secondary" className="mt-3" onClick={() => void loadAndMaybeDiscover(true)}>
+                  Retry
+                </Button>
+              ) : null}
             </div>
           ) : null}
-          {data?.status === "provider_unavailable" ? (
+          {data?.status === "provider_unavailable" && data.retry_eligible !== false ? (
             <StateWithRetry
               text={providerFailureMessage(data)}
               onRetry={() => void controller.discover()}
             />
+          ) : null}
+          {data?.status === "provider_unavailable" && data.retry_eligible === false ? (
+            <p className="text-sm text-[var(--text-muted)]">
+              {providerFailureMessage(data)}
+            </p>
+          ) : null}
+          {data?.status === "stale" && !discovering ? (
+            <StateWithRetry
+              text="Saved people results need revalidation."
+              onRetry={() => void controller.discover()}
+              label="Refresh people"
+            />
+          ) : null}
+          {loading && !data ? (
+            <p className="text-sm text-[var(--text-muted)]">Checking for saved results…</p>
           ) : null}
           {data?.status === "no_reliable_matches" ? (
             <div>

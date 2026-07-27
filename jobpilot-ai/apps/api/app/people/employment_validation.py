@@ -10,10 +10,12 @@ from app.core.config import settings
 from app.people.schemas import JobPeopleSearchProfile, ProviderPerson
 from app.people.security import safe_profile_url
 
-EMPLOYMENT_VALIDATION_VERSION = "people-employment-v2"
+EMPLOYMENT_VALIDATION_VERSION = "people-employment-v2.1"
+EMPLOYMENT_EVIDENCE_VERSION = "people-employment-evidence-v1"
 
 EmploymentValidationStatus = Literal[
-    "confirmed_exact_company",
+    "confirmed_exact_company_verified",
+    "exact_company_current_but_unverified_freshness",
     "confirmed_related_company",
     "conflicting_current_employment",
     "former_employee",
@@ -26,6 +28,8 @@ class EmploymentValidationResult(BaseModel):
     status: EmploymentValidationStatus
     confidence: float = Field(ge=0, le=1)
     verified_at: datetime | None = None
+    provider_record_observed_at: datetime | None = None
+    provider_employment_updated_at: datetime | None = None
     verification_provider: str | None = None
     exact_company: bool = False
     conflicting_employer: bool = False
@@ -33,6 +37,7 @@ class EmploymentValidationResult(BaseModel):
     rejection_codes: list[str] = Field(default_factory=list)
     credits_consumed: int = 0
     version: str = EMPLOYMENT_VALIDATION_VERSION
+    evidence_version: str = EMPLOYMENT_EVIDENCE_VERSION
 
 
 def _normalize(value: str | None) -> str:
@@ -78,9 +83,10 @@ def validate_current_employment(
 ) -> EmploymentValidationResult:
     """Conservatively validate current employment without scraping profiles."""
     now = now or datetime.now(UTC)
-    checked_at = _aware(
-        person.employment_verified_at or person.source_last_updated_at
-    )
+    verified_at = _aware(person.employment_verified_at)
+    employment_updated_at = _aware(person.provider_employment_updated_at)
+    provider_observed_at = _aware(person.provider_record_observed_at)
+    evidence_at = verified_at or employment_updated_at or provider_observed_at
     identity_strong = _identity_is_strong(person)
     current_domain = (person.current_company_domain or "").lower().strip()
     expected_domain = (profile.company_domain or "").lower().strip()
@@ -90,21 +96,21 @@ def validate_current_employment(
         return EmploymentValidationResult(
             status="insufficient_evidence",
             confidence=0.2,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             identity_strong=False,
             rejection_codes=["identity_mismatch"],
         )
     revalidation_since = _aware(revalidation_required_since)
     if revalidation_required and (
-        checked_at is None
+        evidence_at is None
         or revalidation_since is None
-        or checked_at <= revalidation_since
+        or evidence_at <= revalidation_since
     ):
         return EmploymentValidationResult(
             status="conflicting_current_employment",
             confidence=0.1,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             conflicting_employer=True,
             identity_strong=True,
@@ -114,17 +120,22 @@ def validate_current_employment(
     newer_conflict = False
     for observation in prior_observations or []:
         observed_domain = str(observation.get("company_domain") or "").lower()
-        observed_at_raw = observation.get("verified_at")
+        observed_at_raw = (
+            observation.get("employment_verified_at")
+            or observation.get("provider_employment_updated_at")
+            or observation.get("provider_record_observed_at")
+            or observation.get("verified_at")
+        )
         try:
-            observed_at = _aware(datetime.fromisoformat(str(observed_at_raw)))
+            conflict_observed_at = _aware(datetime.fromisoformat(str(observed_at_raw)))
         except (TypeError, ValueError):
-            observed_at = None
+            conflict_observed_at = None
         if (
             observed_domain
             and expected_domain
             and observed_domain != expected_domain
-            and observed_at
-            and (checked_at is None or observed_at > checked_at)
+            and conflict_observed_at
+            and (evidence_at is None or conflict_observed_at > evidence_at)
         ):
             newer_conflict = True
             break
@@ -132,7 +143,7 @@ def validate_current_employment(
         return EmploymentValidationResult(
             status="conflicting_current_employment",
             confidence=0.15,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             conflicting_employer=True,
             identity_strong=True,
@@ -143,7 +154,7 @@ def validate_current_employment(
         return EmploymentValidationResult(
             status="insufficient_evidence",
             confidence=0.2,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             identity_strong=True,
             rejection_codes=["insufficient_employment_evidence"],
@@ -152,7 +163,7 @@ def validate_current_employment(
         return EmploymentValidationResult(
             status="confirmed_related_company",
             confidence=0.45,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             identity_strong=True,
             rejection_codes=["related_company_only"],
@@ -162,7 +173,7 @@ def validate_current_employment(
             return EmploymentValidationResult(
                 status="former_employee",
                 confidence=0.9,
-                verified_at=checked_at,
+                verified_at=evidence_at,
                 verification_provider=person.provider,
                 identity_strong=True,
                 rejection_codes=["former_employee"],
@@ -170,32 +181,51 @@ def validate_current_employment(
         return EmploymentValidationResult(
             status="insufficient_evidence",
             confidence=0.25,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             identity_strong=True,
             rejection_codes=["exact_company_not_confirmed"],
         )
 
-    if checked_at is None or checked_at < now - timedelta(
+    if person.current_role_indicator is False:
+        return EmploymentValidationResult(
+            status="former_employee",
+            confidence=0.9,
+            verified_at=evidence_at,
+            verification_provider=person.provider,
+            identity_strong=True,
+            rejection_codes=["former_employee"],
+        )
+    if evidence_at is None or evidence_at < now - timedelta(
         days=settings.people_employment_freshness_days
     ):
         return EmploymentValidationResult(
             status="stale_or_uncertain",
             confidence=0.35,
-            verified_at=checked_at,
+            verified_at=evidence_at,
             verification_provider=person.provider,
             exact_company=bool(expected_domain and current_domain == expected_domain),
             identity_strong=True,
             rejection_codes=[
                 "stale_employment_record"
-                if checked_at
+                if evidence_at
                 else "insufficient_employment_evidence"
             ],
         )
+    if verified_at is not None:
+        return EmploymentValidationResult(
+            status="confirmed_exact_company_verified",
+            confidence=0.98,
+            verified_at=verified_at,
+            verification_provider=person.provider,
+            exact_company=True,
+            identity_strong=True,
+        )
     return EmploymentValidationResult(
-        status="confirmed_exact_company",
-        confidence=0.95,
-        verified_at=checked_at,
+        status="exact_company_current_but_unverified_freshness",
+        confidence=0.78 if employment_updated_at else 0.68,
+        provider_record_observed_at=provider_observed_at,
+        provider_employment_updated_at=employment_updated_at,
         verification_provider=person.provider,
         exact_company=True,
         identity_strong=True,

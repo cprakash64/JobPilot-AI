@@ -115,9 +115,14 @@ class _HttpProvider:
             401: "provider_unauthorized",
             403: "provider_forbidden",
             429: "provider_rate_limited",
+            422: "provider_schema_error",
         }.get(response.status_code)
         if reason:
-            self._failure()
+            # Only transient failures contribute to the circuit. Permanent
+            # credentials/access/schema failures must keep their precise reason
+            # instead of being masked by provider_circuit_open on later calls.
+            if response.status_code == 429:
+                self._failure()
             raise ProviderUnavailable(
                 reason,
                 provider=self.provider_name,
@@ -384,7 +389,8 @@ def _normalize_apollo(
     linkedin_url = row.get("linkedin_url")
     if isinstance(linkedin_url, str) and linkedin_url.startswith("http://"):
         linkedin_url = f"https://{linkedin_url.removeprefix('http://')}"
-    employment_checked = _provider_datetime(
+    observed_at = datetime.now(UTC)
+    employment_updated = _provider_datetime(
         row.get("employment_verified_at")
         or row.get("last_refreshed_at")
         or row.get("updated_at")
@@ -401,8 +407,12 @@ def _normalize_apollo(
         location=", ".join(str(row.get(k)) for k in ("city", "state", "country") if row.get(k)) or None,
         linkedin_url=safe_profile_url(linkedin_url),
         source_profile_url=safe_profile_url(linkedin_url),
-        source_last_updated_at=employment_checked,
-        employment_verified_at=employment_checked,
+        source_last_updated_at=employment_updated,
+        provider_record_observed_at=observed_at,
+        provider_employment_updated_at=employment_updated,
+        employment_verified_at=None,
+        employment_source="provider_current_listing",
+        current_role_indicator=True,
         education=[str(v.get("school_name")) for v in row.get("education", []) if isinstance(v, dict) and v.get("school_name")],
         previous_employers=[str(v.get("organization_name")) for v in row.get("employment_history", [])[1:] if isinstance(v, dict) and v.get("organization_name")],
         evidence={
@@ -413,8 +423,13 @@ def _normalize_apollo(
             ),
             "current_title": title,
             "employment_verified_at": (
-                employment_checked.isoformat() if employment_checked else None
+                None
             ),
+            "provider_record_observed_at": observed_at.isoformat(),
+            "provider_employment_updated_at": (
+                employment_updated.isoformat() if employment_updated else None
+            ),
+            "current_role_indicator": True,
         },
         field_provenance={"name": "apollo", "title": "apollo", "company": "apollo"},
     )
@@ -429,7 +444,8 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
     identifier = str(row.get("id") or "").strip()
     if not all((name, title, company, identifier)):
         return None
-    employment_checked = _provider_datetime(
+    observed_at = datetime.now(UTC)
+    employment_updated = _provider_datetime(
         row.get("job_last_changed")
         or row.get("last_updated")
         or row.get("updated_at")
@@ -443,8 +459,12 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
         location=str(row.get("location_name") or "") or None,
         linkedin_url=safe_profile_url(row.get("linkedin_url")),
         source_profile_url=safe_profile_url(row.get("linkedin_url")),
-        source_last_updated_at=employment_checked,
-        employment_verified_at=employment_checked,
+        source_last_updated_at=employment_updated,
+        provider_record_observed_at=observed_at,
+        provider_employment_updated_at=employment_updated,
+        employment_verified_at=None,
+        employment_source="provider_current_listing",
+        current_role_indicator=True,
         education=[str(v.get("school", {}).get("name")) for v in row.get("education", []) if isinstance(v, dict) and isinstance(v.get("school"), dict) and v["school"].get("name")],
         previous_employers=[str(v.get("company", {}).get("name")) for v in row.get("experience", [])[1:] if isinstance(v, dict) and isinstance(v.get("company"), dict) and v["company"].get("name")],
         evidence={
@@ -453,8 +473,13 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
             "current_company_domain": company_domain,
             "current_title": title,
             "employment_verified_at": (
-                employment_checked.isoformat() if employment_checked else None
+                None
             ),
+            "provider_record_observed_at": observed_at.isoformat(),
+            "provider_employment_updated_at": (
+                employment_updated.isoformat() if employment_updated else None
+            ),
+            "current_role_indicator": True,
         },
         field_provenance={"name": "pdl", "title": "pdl", "company": "pdl"},
     )

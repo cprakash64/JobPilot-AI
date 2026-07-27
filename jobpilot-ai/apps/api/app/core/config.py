@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     people_network_matching_enabled: bool = False
     people_employment_secondary_verification_enabled: bool = False
     people_employment_comparison_mode: bool = False
+    people_employment_verification_daily_credit_budget: int = 0
+    people_employment_verification_per_user_daily_limit: int = 0
+    people_employment_verification_ttl_days: int = 30
+    people_employment_verification_max_recruiters: int = 1
+    people_employment_verification_max_managers: int = 1
+    people_employment_verification_max_referrers: int = 1
     apollo_api_key: str | None = None
     hunter_api_key: str | None = None
     pdl_api_key: str | None = None

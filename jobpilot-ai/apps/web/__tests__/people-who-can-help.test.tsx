@@ -13,7 +13,7 @@ const recommendation = {
   relevance_score: 88,
   confidence: "high",
   current_employment_confidence: 0.95,
-  employment_validation_status: "confirmed_exact_company",
+  employment_validation_status: "confirmed_exact_company_verified",
   employment_last_verified_at: "2026-07-25T12:00:00Z",
   employment_warning: null,
   email_lookup_allowed: true,
@@ -80,7 +80,9 @@ describe("PeopleWhoCanHelp", () => {
     }));
     render(<PeopleWhoCanHelp jobId="7" />);
     expect(await screen.findByRole("heading", { name: "People Who Can Help" })).toBeInTheDocument();
-    expect(screen.getByText("People recommendations are not enabled for this account.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("People recommendations are not enabled for this account.")
+    ).toBeInTheDocument();
   });
 
   it("shows a stable loading state while checking for prior discovery", () => {
@@ -620,6 +622,67 @@ describe("PeopleWhoCanHelpSummary", () => {
       text: async () => JSON.stringify(response())
     } as Response);
     expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
+  });
+
+  it("renders a stale persisted state and refreshes only after explicit action", async () => {
+    const stale = response({
+      status: "stale",
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => stale,
+        text: async () => JSON.stringify(stale)
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => response(),
+        text: async () => JSON.stringify(response())
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PeopleWhoCanHelpSummary jobId={7506} onViewAll={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
+    expect(
+      await screen.findByText("Saved people results need revalidation.")
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh people" }));
+    expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not offer Retry for a non-retryable provider account limitation", async () => {
+    const forbidden = response({
+      status: "provider_unavailable",
+      availability_reason: "provider_forbidden",
+      retry_eligible: false,
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => forbidden,
+      text: async () => JSON.stringify(forbidden)
+    }));
+    render(<PeopleWhoCanHelpSummary jobId={7508} onViewAll={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
+    expect(
+      await screen.findByText(
+        "The configured provider account does not have access to people search."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry discovery" })).not.toBeInTheDocument();
   });
 
   it.each([

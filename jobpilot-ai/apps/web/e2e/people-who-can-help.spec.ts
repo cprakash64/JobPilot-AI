@@ -12,7 +12,7 @@ const basePerson = {
   relevance_score: 88,
   confidence: "high",
   current_employment_confidence: 0.95,
-  employment_validation_status: "confirmed_exact_company",
+  employment_validation_status: "confirmed_exact_company_verified",
   employment_last_verified_at: "2026-07-25T12:00:00Z",
   employment_warning: null,
   email_lookup_allowed: true,

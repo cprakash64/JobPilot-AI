@@ -168,6 +168,43 @@ def _check_people_email_configuration(settings) -> list[Finding]:
     return findings
 
 
+def _check_people_employment_verification_configuration(settings) -> list[Finding]:
+    if not bool(
+        getattr(
+            settings,
+            "people_employment_secondary_verification_enabled",
+            False,
+        )
+    ):
+        return []
+    findings: list[Finding] = []
+    if not (getattr(settings, "pdl_api_key", None) or "").strip():
+        findings.append(
+            Finding(
+                "PDL_API_KEY",
+                "is missing while secondary employment verification is enabled",
+            )
+        )
+    for setting, attribute in (
+        (
+            "PEOPLE_EMPLOYMENT_VERIFICATION_DAILY_CREDIT_BUDGET",
+            "people_employment_verification_daily_credit_budget",
+        ),
+        (
+            "PEOPLE_EMPLOYMENT_VERIFICATION_PER_USER_DAILY_LIMIT",
+            "people_employment_verification_per_user_daily_limit",
+        ),
+    ):
+        if int(getattr(settings, attribute, 0) or 0) <= 0:
+            findings.append(
+                Finding(
+                    setting,
+                    "must be positive while secondary employment verification is enabled",
+                )
+            )
+    return findings
+
+
 def _check_cors(origins: list[str] | None, *, allow_credentials: bool) -> list[Finding]:
     values = [o.strip() for o in (origins or []) if o and o.strip()]
     if not values:
@@ -250,6 +287,7 @@ def collect_findings(settings) -> list[Finding]:
         email_enabled=bool(getattr(settings, "people_email_discovery_enabled", False)),
     )
     findings += _check_people_email_configuration(settings)
+    findings += _check_people_employment_verification_configuration(settings)
     findings += _check_cors(
         getattr(settings, "cors_origins", None),
         allow_credentials=bool(getattr(settings, "cors_allow_credentials", True)),

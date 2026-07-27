@@ -153,6 +153,35 @@ def test_people_email_configuration_accepts_separate_positive_limits() -> None:
     )
 
 
+def test_secondary_employment_verification_requires_provider_and_own_budgets() -> None:
+    findings = collect_findings(make_settings(
+        people_employment_secondary_verification_enabled=True,
+        pdl_api_key=None,
+        people_employment_verification_daily_credit_budget=0,
+        people_employment_verification_per_user_daily_limit=0,
+    ))
+    names = {finding.setting for finding in findings}
+    assert {
+        "PDL_API_KEY",
+        "PEOPLE_EMPLOYMENT_VERIFICATION_DAILY_CREDIT_BUDGET",
+        "PEOPLE_EMPLOYMENT_VERIFICATION_PER_USER_DAILY_LIMIT",
+    } <= names
+
+
+def test_secondary_employment_verification_accepts_separate_positive_limits() -> None:
+    findings = collect_findings(make_settings(
+        people_employment_secondary_verification_enabled=True,
+        pdl_api_key="configured-secret",
+        people_employment_verification_daily_credit_budget=30,
+        people_employment_verification_per_user_daily_limit=3,
+    ))
+    assert not any(
+        finding.setting == "PDL_API_KEY"
+        or finding.setting.startswith("PEOPLE_EMPLOYMENT_VERIFICATION")
+        for finding in findings
+    )
+
+
 # --------------------------------------------------------------------------- #
 # CORS
 # --------------------------------------------------------------------------- #

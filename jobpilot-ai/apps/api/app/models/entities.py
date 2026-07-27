@@ -473,11 +473,61 @@ class ProfessionalPersonSource(Base):
     provider_person_id: Mapped[str] = mapped_column(String(255), nullable=False)
     source_profile_url: Mapped[str | None] = mapped_column(String(1000))
     source_last_updated_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    provider_record_observed_at: Mapped[DateTimeValue | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    provider_employment_updated_at: Mapped[DateTimeValue | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    employment_verified_at: Mapped[DateTimeValue | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    employment_source: Mapped[str | None] = mapped_column(String(80))
+    exact_company_match: Mapped[bool | None] = mapped_column(Boolean)
+    current_role_indicator: Mapped[bool | None] = mapped_column(Boolean)
+    conflicting_employer_observed_at: Mapped[DateTimeValue | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     retrieved_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
     normalized_evidence: Mapped[dict] = mapped_column(JsonType, default=dict)
     field_provenance: Mapped[dict] = mapped_column(JsonType, default=dict)
     # Only allowlisted, redacted diagnostics; full provider payloads are never stored.
     redacted_payload: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+
+class PeopleEmploymentVerificationRun(Base):
+    """Identifier-minimized, separately budgeted secondary verification cache."""
+
+    __tablename__ = "people_employment_verification_runs"
+    __table_args__ = (
+        Index(
+            "ix_people_employment_verification_cache",
+            "cache_key_hash",
+            "verification_version",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("job_postings.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    discovery_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("people_discovery_runs.id", ondelete="SET NULL"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    cache_key_hash: Mapped[str] = mapped_column(String(64), index=True)
+    verification_version: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(60), index=True)
+    credits_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    started_at: Mapped[DateTimeValue] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    completed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class JobPeopleCandidate(Base):
