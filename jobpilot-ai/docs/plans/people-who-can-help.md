@@ -482,9 +482,10 @@ remains blocked pending explicit approval.
   interval. The summary card now renders explicit loading, stale/refresh, no-match, and
   non-retryable provider states while preserving lazy per-card status loading and mutation
   coalescing.
-- The secondary-verification flag participates in the no-result fingerprint, so enabling it
-  re-evaluates unresolved/no-match runs while existing fresh displayable results continue to use
-  the current cache.
+- Secondary-verification state is evaluated when reusing unresolved/no-match runs rather than
+  changing the scoring/evidence fingerprint. Enabling it re-evaluates unresolved no-match runs,
+  successful current candidates remain reusable, and a controlled run does not become stale when
+  the flag returns to its disabled default.
 
 ### Rollout and rollback
 
@@ -513,4 +514,62 @@ or restore pre-v2 candidates.
   validation passed.
 - [x] Focused changed-code Ruff and `git diff --check` passed. Repository-wide Ruff retains
   pre-existing formatting debt in `core/config.py` and `models/entities.py`.
-- [ ] Controlled Retell AI live validation, only after explicit approval.
+- [x] Controlled Retell AI job `7600` live validation completed after explicit approval:
+  one exact discovery operation issued six Apollo search requests and one bulk-enrichment
+  request. Search returned 16 raw records at zero credits; enrichment returned HTTP 422
+  (`provider_schema_error`) before any candidate could be enriched or sent to PDL. PDL calls and
+  credits were zero. The current-version run persisted with zero displayed candidates, and two
+  read-only reopen checks created no discovery or verification rows. Normal UI state is the
+  non-retryable safe provider-schema message; no pre-version recommendation is visible. Live
+  secondary confirmation/contradiction and retrieval-time behavior were not exercised because
+  Apollo enrichment failed, and remain supported only by offline regression tests.
+
+## Apollo bulk-enrichment adapter v2 (2026-07-27)
+
+Status: offline implementation and regression validation complete. No live provider request was
+authorized or performed by this phase.
+
+### Diagnosis and decisions
+
+- The broken adapter selected the People Search result's `id` field for enrichment. Apollo's
+  current enrichment contract identifies the documented reusable search identity as
+  `person_id`; `contact_id` and the search-result `id` are not treated as interchangeable.
+  Because the earlier 422 response body was deliberately not retained or logged, its exact
+  sanitized field path cannot be recovered offline. Adapter v2 records only allowlisted
+  validation error types, field paths, expected types, and required-field state on a future
+  approved request.
+- Search normalization now accepts only a 24-character hexadecimal `person_id`. Null, blank,
+  non-string, malformed, and obfuscated values are rejected before any provider call; valid IDs
+  are deduplicated and chunked into batches of at most ten. Category attribution remains in the
+  discovery target rather than being encoded into provider identity.
+- Bulk enrichment uses `POST /api/v1/people/bulk_match`, JSON transport, the sole top-level
+  `details` key, and sole per-record `id` key. Headers are exactly `x-api-key`, `Content-Type`,
+  and `Accept`; reveal options are false query parameters and never enter the JSON body.
+- A bulk 422 does not repeat the same request or affect the transient circuit. It performs at
+  most one `POST /api/v1/people/match` isolation request per original valid batch item, suppresses
+  only single-item validation failures or missing records, and never promotes partial search
+  data. Success wrappers are normalized conservatively and a returned enrichment must correlate
+  by the requested Apollo ID; output ordering follows the request ordering.
+- `apollo-enrichment-v2` is included only in Apollo discovery fingerprints. This makes cached
+  schema-error/no-match state from the broken adapter refreshable without flushing Redis or
+  invalidating unrelated providers and successful recommendations.
+
+### Rollout and rollback
+
+Deploy the adapter with the existing provider budgets, circuit breaker, and Redis coalescing
+unchanged. Keep PDL fallback, secondary PDL employment verification, Hunter/email discovery, and
+network matching disabled for the eventual controlled Apollo validation. Roll back the code to
+adapter v1 if needed; no database migration or destructive cache operation is required.
+
+### Validation checklist
+
+- [x] Focused People backend: 42 passed. Complete API: 640 passed.
+- [x] Focused People frontend: 58 passed. Complete web: 198 passed. Web lint, typecheck, and
+  production build passed. Two unrelated five-second tests timed out only during concurrent
+  resource-heavy runs and passed both in isolation and in clean full-suite reruns.
+- [x] Extension typecheck/build and 284 tests passed. Focused changed-code Ruff, Docker Compose
+  configuration, and `git diff --check` passed.
+- [x] Database is at `0023_people_evidence (head)` and this adapter requires no migration.
+  `alembic check` continues to report the repository's pre-existing broad model/migration drift
+  across unrelated tables; this change adds no model/schema operation.
+- [ ] One-job live validation requires a new explicit approval after every offline check passes.

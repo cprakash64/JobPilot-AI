@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # ruff: noqa: E501
+import logging
 import re
 import time
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,11 @@ from app.people.schemas import (
 )
 from app.people.security import safe_profile_url
 
+logger = logging.getLogger("jobpilot.people.provider")
+
+APOLLO_ENRICHMENT_ADAPTER_VERSION = "apollo-enrichment-v2"
+_APOLLO_PERSON_ID = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
+
 
 class ProviderUnavailable(RuntimeError):
     def __init__(
@@ -29,12 +35,14 @@ class ProviderUnavailable(RuntimeError):
         provider: str = "unknown",
         http_status: int | None = None,
         duration_ms: float | None = None,
+        safe_metadata: dict[str, object] | None = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.provider = provider
         self.http_status = http_status
         self.duration_ms = duration_ms
+        self.safe_metadata = safe_metadata or {}
 
 
 _CIRCUITS: dict[str, tuple[int, datetime | None]] = {}
@@ -103,14 +111,6 @@ class _HttpProvider:
         duration_ms = (time.monotonic() - started) * 1000
         self.last_http_status = response.status_code
         self.last_duration_ms = duration_ms
-        if len(response.content) > settings.people_provider_response_max_bytes:
-            self._failure()
-            raise ProviderUnavailable(
-                "provider_schema_error",
-                provider=self.provider_name,
-                http_status=response.status_code,
-                duration_ms=duration_ms,
-            )
         reason = {
             401: "provider_unauthorized",
             403: "provider_forbidden",
@@ -125,6 +125,24 @@ class _HttpProvider:
                 self._failure()
             raise ProviderUnavailable(
                 reason,
+                provider=self.provider_name,
+                http_status=response.status_code,
+                duration_ms=duration_ms,
+                safe_metadata=(
+                    (
+                        {"error_types": ["validation_response_too_large"]}
+                        if len(response.content)
+                        > settings.people_provider_response_max_bytes
+                        else _safe_apollo_validation_metadata(response)
+                    )
+                    if response.status_code == 422
+                    else None
+                ),
+            )
+        if len(response.content) > settings.people_provider_response_max_bytes:
+            self._failure()
+            raise ProviderUnavailable(
+                "provider_schema_error",
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
@@ -171,6 +189,8 @@ class ApolloPeopleProvider(_HttpProvider):
     def __init__(self, api_key: str | None = None) -> None:
         super().__init__("apollo")
         self.api_key = api_key or settings.apollo_api_key
+        self.enrichment_rejection_reasons: dict[str, str] = {}
+        self.enrichment_safe_metrics: dict[str, int] = {}
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -178,8 +198,7 @@ class ApolloPeopleProvider(_HttpProvider):
         return {
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
-            "accept": "application/json",
-            "Cache-Control": "no-cache",
+            "Accept": "application/json",
         }
 
     async def search_people(self, query: PeopleSearchQuery) -> list[ProviderPerson]:
@@ -213,7 +232,9 @@ class ApolloPeopleProvider(_HttpProvider):
             for row in rows
             if (
                 person := _normalize_apollo(
-                    row, fallback_company_domain=query.company_domain
+                    row,
+                    fallback_company_domain=query.company_domain,
+                    identifier_kind="search",
                 )
             )
         ]
@@ -230,33 +251,167 @@ class ApolloPeopleProvider(_HttpProvider):
     async def enrich_people(self, people: list[PersonEnrichmentRequest]) -> list[ProviderPerson]:
         if not people:
             return []
-        data = await self._request(
+        self.enrichment_rejection_reasons = {}
+        self.enrichment_safe_metrics = {}
+        identifiers: list[str] = []
+        seen: set[str] = set()
+        for item in people:
+            raw_identifier = item.provider_person_id
+            identifier = _valid_apollo_person_id(raw_identifier)
+            if identifier is None:
+                self.enrichment_rejection_reasons[raw_identifier] = (
+                    "invalid_provider_person_id"
+                )
+                self._increment_enrichment_metric("invalid_provider_person_id")
+                self._increment_enrichment_metric(
+                    _invalid_apollo_person_id_shape(raw_identifier)
+                )
+                continue
+            if identifier in seen:
+                self._increment_enrichment_metric("duplicate_provider_person_id")
+                continue
+            seen.add(identifier)
+            identifiers.append(identifier)
+
+        enriched: list[ProviderPerson] = []
+        for offset in range(0, len(identifiers), 10):
+            batch = identifiers[offset : offset + 10]
+            try:
+                data = await self._bulk_enrichment_request(batch)
+            except ProviderUnavailable as exc:
+                if exc.reason != "provider_schema_error" or exc.http_status != 422:
+                    raise
+                self._increment_enrichment_metric("bulk_payload_validation_failed")
+                _log_safe_apollo_validation(
+                    endpoint="/api/v1/people/bulk_match",
+                    metadata=exc.safe_metadata,
+                )
+                for identifier in batch:
+                    person = await self._single_enrichment_after_bulk_422(identifier)
+                    if person is not None:
+                        enriched.append(person)
+                continue
+            enriched.extend(self._normalize_bulk_matches(data, batch))
+        return enriched
+
+    def enrichment_rejection_reason(self, provider_person_id: str) -> str | None:
+        return self.enrichment_rejection_reasons.get(provider_person_id)
+
+    async def _bulk_enrichment_request(self, identifiers: list[str]) -> dict:
+        headers = self._headers()
+        params = {
+            "reveal_personal_emails": "false",
+            "reveal_phone_number": "false",
+        }
+        payload = {"details": [{"id": identifier} for identifier in identifiers]}
+        logger.info(
+            "apollo_enrichment_request method=POST endpoint=/api/v1/people/bulk_match "
+            "header_names=%s content_type=application/json json_transport=true "
+            "top_level_keys=%s detail_count=%s detail_keys=%s query_param_names=%s "
+            "adapter_version=%s",
+            sorted(headers),
+            sorted(payload),
+            len(payload["details"]),
+            ["id"],
+            sorted(params),
+            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+        )
+        return await self._request(
             "POST",
             "https://api.apollo.io/api/v1/people/bulk_match",
-            headers=self._headers(),
-            params={"reveal_personal_emails": "false", "reveal_phone_number": "false"},
-            json={
-                "details": [
-                    {"id": item.provider_person_id}
-                    for item in people[:10]
-                ]
-            },
+            headers=headers,
+            params=params,
+            json=payload,
         )
-        rows = data.get("matches")
-        if not isinstance(rows, list):
-            self._failure()
+
+    async def _single_enrichment_after_bulk_422(
+        self, identifier: str
+    ) -> ProviderPerson | None:
+        try:
+            data = await self._request(
+                "POST",
+                "https://api.apollo.io/api/v1/people/match",
+                headers=self._headers(),
+                params={
+                    "id": identifier,
+                    "reveal_personal_emails": "false",
+                    "reveal_phone_number": "false",
+                },
+            )
+        except ProviderUnavailable as exc:
+            if exc.reason == "provider_schema_error" and exc.http_status == 422:
+                self.enrichment_rejection_reasons[identifier] = (
+                    "single_enrichment_validation_failed"
+                )
+                self._increment_enrichment_metric(
+                    "single_enrichment_validation_failed"
+                )
+                _log_safe_apollo_validation(
+                    endpoint="/api/v1/people/match",
+                    metadata=exc.safe_metadata,
+                )
+                return None
+            raise
+        self._record_credits(data)
+        row = _single_apollo_person(data)
+        if row is None:
+            self.enrichment_rejection_reasons[identifier] = (
+                "enrichment_record_not_found"
+            )
+            self._increment_enrichment_metric("enrichment_record_not_found")
+            return None
+        person = _normalize_apollo(row, identifier_kind="enrichment")
+        if person is None or person.provider_person_id != identifier:
+            self.enrichment_rejection_reasons[identifier] = (
+                "enrichment_correlation_failed"
+            )
+            self._increment_enrichment_metric("enrichment_correlation_failed")
+            return None
+        return person
+
+    def _normalize_bulk_matches(
+        self, data: dict, requested_identifiers: list[str]
+    ) -> list[ProviderPerson]:
+        rows = _bulk_apollo_matches(data)
+        if rows is None:
             raise ProviderUnavailable(
                 "provider_schema_error",
                 provider=self.provider_name,
                 http_status=self.last_http_status,
                 duration_ms=self.last_duration_ms,
             )
+        self._record_credits(data)
+        requested = set(requested_identifiers)
+        matched: dict[str, ProviderPerson] = {}
+        for row in rows:
+            person = _normalize_apollo(row, identifier_kind="enrichment")
+            if (
+                person is None
+                or person.provider_person_id not in requested
+                or person.provider_person_id in matched
+            ):
+                self._increment_enrichment_metric("enrichment_correlation_failed")
+                continue
+            matched[person.provider_person_id] = person
+        for identifier in requested_identifiers:
+            if identifier not in matched:
+                self.enrichment_rejection_reasons[identifier] = (
+                    "enrichment_record_not_found"
+                )
+                self._increment_enrichment_metric("enrichment_record_not_found")
+        return [matched[value] for value in requested_identifiers if value in matched]
+
+    def _record_credits(self, data: dict) -> None:
         credits = data.get("credits_consumed")
-        if isinstance(credits, int) and credits >= 0:
+        if credits is None and isinstance(data.get("data"), dict):
+            credits = data["data"].get("credits_consumed")
+        if isinstance(credits, int) and not isinstance(credits, bool) and credits >= 0:
             self.credits += credits
-        return [
-            person for row in rows if (person := _normalize_apollo(row))
-        ]
+
+    def _increment_enrichment_metric(self, reason: str) -> None:
+        self.enrichment_safe_metrics[reason] = (
+            self.enrichment_safe_metrics.get(reason, 0) + 1
+        )
 
     async def get_usage(self) -> ProviderUsage:
         return ProviderUsage(provider="apollo", credits_used=self.credits, requests=self.requests)
@@ -365,8 +520,136 @@ def get_email_provider() -> WorkEmailProvider:
     return HunterEmailProvider()
 
 
+def _valid_apollo_person_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    identifier = value.strip()
+    if not identifier or not _APOLLO_PERSON_ID.fullmatch(identifier):
+        return None
+    return identifier.lower()
+
+
+def _invalid_apollo_person_id_shape(value: object) -> str:
+    if value is None:
+        return "null_provider_person_id"
+    if not isinstance(value, str):
+        return "non_string_provider_person_id"
+    if not value.strip():
+        return "blank_provider_person_id"
+    if "*" in value:
+        return "obfuscated_provider_person_id"
+    return "malformed_provider_person_id"
+
+
+def _apollo_person_id(row: dict, *, identifier_kind: str) -> str | None:
+    if identifier_kind == "search":
+        # Apollo's current People Enrichment contract explicitly directs callers
+        # to use People Search's person_id. Search-result id/contact_id values
+        # are different identities and must not be sent to enrichment.
+        return _valid_apollo_person_id(row.get("person_id"))
+    return _valid_apollo_person_id(row.get("id"))
+
+
+def _bulk_apollo_matches(data: dict) -> list[object] | None:
+    candidates = [
+        data.get("matches"),
+        data.get("people"),
+    ]
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        candidates.extend([nested.get("matches"), nested.get("people")])
+    for value in candidates:
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _single_apollo_person(data: dict) -> object | None:
+    candidates = [data.get("person"), data.get("match")]
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        candidates.extend([nested.get("person"), nested.get("match")])
+    return next((value for value in candidates if isinstance(value, dict)), None)
+
+
+def _safe_validation_token(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = re.sub(r"[^A-Za-z0-9_.-]", "", value)[:80]
+    return token or None
+
+
+def _safe_apollo_validation_metadata(
+    response: httpx.Response,
+) -> dict[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"error_types": ["unparseable_validation_response"]}
+    if not isinstance(payload, dict):
+        return {"error_types": ["unsupported_validation_response"]}
+    values = payload.get("detail") or payload.get("errors") or []
+    if isinstance(values, dict):
+        values = [values]
+    if not isinstance(values, list):
+        values = []
+    error_types: set[str] = set()
+    field_paths: set[str] = set()
+    expected_types: set[str] = set()
+    missing_required = False
+    for item in values[:10]:
+        if not isinstance(item, dict):
+            continue
+        for key in ("type", "code", "error_code"):
+            if token := _safe_validation_token(item.get(key)):
+                error_types.add(token)
+                missing_required = missing_required or "missing" in token.lower()
+        location = item.get("loc") or item.get("path") or item.get("field")
+        if isinstance(location, list):
+            parts = [
+                "*" if isinstance(part, int) else _safe_validation_token(part)
+                for part in location
+            ]
+            if parts and all(parts):
+                field_paths.add(".".join(str(part) for part in parts))
+        elif token := _safe_validation_token(location):
+            field_paths.add(token)
+        context = item.get("ctx")
+        expected = (
+            context.get("expected")
+            if isinstance(context, dict)
+            else item.get("expected")
+        )
+        if token := _safe_validation_token(expected):
+            expected_types.add(token)
+    result: dict[str, object] = {
+        "error_types": sorted(error_types) or ["validation_error"],
+        "field_paths": sorted(field_paths),
+        "expected_types": sorted(expected_types),
+        "missing_required": missing_required,
+    }
+    return result
+
+
+def _log_safe_apollo_validation(
+    *, endpoint: str, metadata: dict[str, object]
+) -> None:
+    logger.warning(
+        "apollo_enrichment_validation endpoint=%s http_status=422 error_types=%s "
+        "field_paths=%s expected_types=%s missing_required=%s",
+        endpoint,
+        metadata.get("error_types", []),
+        metadata.get("field_paths", []),
+        metadata.get("expected_types", []),
+        bool(metadata.get("missing_required")),
+    )
+
+
 def _normalize_apollo(
-    row: object, *, fallback_company_domain: str | None = None
+    row: object,
+    *,
+    fallback_company_domain: str | None = None,
+    identifier_kind: str = "enrichment",
 ) -> ProviderPerson | None:
     if not isinstance(row, dict):
         return None
@@ -383,7 +666,7 @@ def _normalize_apollo(
         )
     title = str(row.get("title") or "").strip()
     company = str(organization.get("name") or "").strip()
-    identifier = str(row.get("id") or "").strip()
+    identifier = _apollo_person_id(row, identifier_kind=identifier_kind)
     if not all((name, title, company, identifier)):
         return None
     linkedin_url = row.get("linkedin_url")

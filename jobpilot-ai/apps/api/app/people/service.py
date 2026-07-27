@@ -42,6 +42,7 @@ from app.people.feature_flags import is_beta
 from app.people.intelligence import extract_job_people_profile
 from app.people.observability import metric
 from app.people.providers import (
+    APOLLO_ENRICHMENT_ADAPTER_VERSION,
     PDLPeopleProvider,
     ProviderUnavailable,
     get_email_provider,
@@ -145,11 +146,8 @@ def query_fingerprint(
     payload["discovery_strategy"] = strategy
     payload["employment_validation_version"] = EMPLOYMENT_VALIDATION_VERSION
     payload["employment_evidence_version"] = EMPLOYMENT_EVIDENCE_VERSION
-    # Changing this flag invalidates cached no-match/unresolved runs. Existing
-    # fresh displayable candidates are still returned before fingerprint lookup.
-    payload["secondary_employment_verification_enabled"] = (
-        settings.people_employment_secondary_verification_enabled
-    )
+    if settings.people_primary_provider == "apollo":
+        payload["provider_adapter_version"] = APOLLO_ENRICHMENT_ADAPTER_VERSION
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -189,7 +187,7 @@ def _fresh_no_match_run(
     fingerprint: str,
 ) -> PeopleDiscoveryRun | None:
     cutoff = _now() - timedelta(days=settings.people_result_ttl_days)
-    return db.scalar(
+    runs = db.scalars(
         select(PeopleDiscoveryRun)
         .where(
             PeopleDiscoveryRun.job_id == job_id,
@@ -201,6 +199,20 @@ def _fresh_no_match_run(
         )
         .order_by(PeopleDiscoveryRun.completed_at.desc())
     )
+    for run in runs:
+        if (
+            settings.people_employment_secondary_verification_enabled
+            and not bool(
+                (run.company_context or {}).get(
+                    "secondary_employment_verification_enabled"
+                )
+            )
+        ):
+            # Enabling secondary verification re-evaluates unresolved/no-match
+            # runs, while successful current candidates remain reusable.
+            continue
+        return run
+    return None
 
 
 def _latest_run(
@@ -1179,6 +1191,11 @@ async def discover(
             "scoring_version": SCORING_VERSION,
             "employment_validation_version": EMPLOYMENT_VALIDATION_VERSION,
             "employment_evidence_version": EMPLOYMENT_EVIDENCE_VERSION,
+            "provider_adapter_version": (
+                APOLLO_ENRICHMENT_ADAPTER_VERSION
+                if settings.people_primary_provider == "apollo"
+                else "provider-neutral-v1"
+            ),
             "secondary_employment_verification_enabled": (
                 settings.people_employment_secondary_verification_enabled
             ),
@@ -1216,6 +1233,7 @@ async def discover(
                 "employment_secondary_verification_attempts": 0,
                 "employment_secondary_verification_matches": 0,
                 "employment_secondary_verification_credits": 0,
+                "employment_unresolved_candidates": 0,
             }
             for category in _PEOPLE_CATEGORIES
         }
@@ -1330,6 +1348,9 @@ async def discover(
                 provider=settings.people_primary_provider,
             )
             enriched_by_id = {item.provider_person_id: item for item in enriched}
+            rejection_reason_for = getattr(
+                provider, "enrichment_rejection_reason", lambda _value: None
+            )
             for _score, category, initial, _school, _employer in enrich_targets:
                 key = (
                     "enrichment_matches"
@@ -1339,7 +1360,11 @@ async def discover(
                 diagnostics[category][key] += 1
                 if key == "enrichment_misses":
                     counts = diagnostics[category]["rejection_reason_counts"]
-                    counts["enrichment_not_found"] = counts.get("enrichment_not_found", 0) + 1
+                    reason = (
+                        rejection_reason_for(initial.provider_person_id)
+                        or "enrichment_record_not_found"
+                    )
+                    counts[reason] = counts.get(reason, 0) + 1
             for category in _PEOPLE_CATEGORIES:
                 not_selected = max(
                     0,
@@ -1397,12 +1422,11 @@ async def discover(
                     diagnostics[category][
                         "employment_secondary_verification_budget_reason"
                     ] = verification_budget_reason
-                should_secondary_verify = bool(
+                secondary_verification_candidate = bool(
                     settings.people_employment_secondary_verification_enabled
                     and person.exact_company_match
                     and employment.identity_strong
                     and not verification_blockers
-                    and verification_budget_reason is None
                     and (
                         employment.status
                         in {
@@ -1412,6 +1436,12 @@ async def discover(
                         }
                         or settings.people_employment_comparison_mode
                     )
+                )
+                if secondary_verification_candidate:
+                    diagnostics[category]["employment_unresolved_candidates"] += 1
+                should_secondary_verify = bool(
+                    secondary_verification_candidate
+                    and verification_budget_reason is None
                     and diagnostics[category][
                         "employment_secondary_verification_attempts"
                     ]
@@ -1552,7 +1582,13 @@ async def discover(
                 diagnostics[category]["title_groups"] = list(dict.fromkeys(
                     diagnostics[category]["title_groups"]
                 ))
-            run.company_context = company_context
+            run.company_context = {
+                **company_context,
+                "provider_request_count": usage.requests,
+                "provider_enrichment_safe_metrics": getattr(
+                    provider, "enrichment_safe_metrics", {}
+                ),
+            }
             run.category_diagnostics = diagnostics
             run.completed_at = _now()
             db.commit()
