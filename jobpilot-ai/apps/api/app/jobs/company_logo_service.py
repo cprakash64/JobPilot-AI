@@ -19,14 +19,22 @@ logo never breaks a card.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from typing import Literal, TypedDict
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.jobs.safe_fetch import (
+    FetchFailedError,
+    UnsafeUrlError,
+    safe_fetch_html,
+    safe_fetch_image,
+)
 from app.models.entities import CompanyBranding
 
 Confidence = Literal["high", "medium", "low"]
@@ -36,6 +44,7 @@ class LogoResolution(TypedDict):
     company_domain: str
     company_logo_url: str
     confidence: Confidence
+    provenance: str
 
 
 # Curated, verified employer -> primary domain map. Only companies we are
@@ -282,6 +291,104 @@ def is_untrusted_simplify_logo_url(value: str | None) -> bool:
     )
 
 
+def is_safe_logo_url(value: str | None) -> bool:
+    """Structural allowlist for externally supplied logo URLs.
+
+    DNS/IP validation still happens in ``safe_fetch_image`` before the backend
+    fetches anything. This check prevents unsafe or non-HTTPS URLs from being
+    persisted or handed directly to the browser.
+    """
+    try:
+        parsed = urlparse(value or "")
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or hostname == "localhost"
+        or hostname.endswith((".localhost", ".local", ".internal"))
+        or is_untrusted_simplify_logo_url(value)
+    ):
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+class _OfficialLogoParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.logo_images: list[str] = []
+        self.icons: list[str] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        values = {key.lower(): (value or "") for key, value in attrs}
+        if tag.lower() == "img" and values.get("src"):
+            identity = " ".join(
+                (
+                    values.get("alt", ""),
+                    values.get("class", ""),
+                    values.get("id", ""),
+                )
+            ).lower()
+            if "logo" in identity or "brand" in identity:
+                self.logo_images.append(values["src"])
+        if tag.lower() == "link" and values.get("href"):
+            rel = values.get("rel", "").lower()
+            if "icon" in rel:
+                self.icons.append(values["href"])
+
+
+def discover_official_logo_url(domain: str) -> str:
+    """Resolve and verify one raster logo from the canonical employer site.
+
+    Candidates must be declared by the official site, remain on the canonical
+    host/subdomains, use HTTPS, and pass the SSRF-safe image fetch. The result
+    is intended for persisted CompanyBranding metadata, never per-card fetches.
+    """
+    clean_domain = _clean_domain(domain)
+    if not clean_domain:
+        return ""
+    homepage = f"https://{clean_domain}/"
+    try:
+        page = safe_fetch_html(homepage)
+    except (UnsafeUrlError, FetchFailedError):
+        return ""
+    parser = _OfficialLogoParser()
+    parser.feed(page.content.decode("utf-8", errors="replace"))
+    for raw_candidate in [*parser.logo_images, *parser.icons]:
+        candidate = urljoin(page.final_url, raw_candidate)
+        parsed = urlparse(candidate)
+        hostname = (parsed.hostname or "").lower()
+        if not (
+            is_safe_logo_url(candidate)
+            and (
+                hostname == clean_domain
+                or hostname.endswith(f".{clean_domain}")
+            )
+        ):
+            continue
+        try:
+            verified = safe_fetch_image(candidate)
+        except (UnsafeUrlError, FetchFailedError):
+            continue
+        return verified.final_url
+    return ""
+
+
 def resolve_company_logo(
     company_name: str,
     *,
@@ -300,14 +407,16 @@ def resolve_company_logo(
             "company_domain": _clean_domain(catalog_domain) or known,
             "company_logo_url": official_logo,
             "confidence": "high",
+            "provenance": "curated",
         }
-    if ats_logo_url:
+    if is_safe_logo_url(ats_logo_url):
         return {
             "company_domain": _clean_domain(catalog_domain) or _known_domain(company_name),
             "company_logo_url": ats_logo_url,
             "confidence": "high",
+            "provenance": "ats",
         }
-    if catalog_logo_url and not (
+    if is_safe_logo_url(catalog_logo_url) and not (
         source_type == "simplifyjobs"
         and is_untrusted_simplify_logo_url(catalog_logo_url)
     ):
@@ -315,6 +424,7 @@ def resolve_company_logo(
             "company_domain": _clean_domain(catalog_domain) or _known_domain(company_name),
             "company_logo_url": catalog_logo_url,
             "confidence": "high",
+            "provenance": "catalog_asset",
         }
     catalog = _clean_domain(catalog_domain)
     if catalog:
@@ -322,12 +432,14 @@ def resolve_company_logo(
             "company_domain": catalog,
             "company_logo_url": logo_url_for_domain(catalog),
             "confidence": "high",
+            "provenance": "domain_favicon",
         }
     if known:
         return {
             "company_domain": known,
             "company_logo_url": logo_url_for_domain(known),
             "confidence": "medium",
+            "provenance": "domain_favicon",
         }
     # A direct employer-owned application URL is useful evidence, but shared ATS
     # hosts (Workday, Greenhouse, Lever, etc.) are deliberately excluded: using
@@ -338,8 +450,14 @@ def resolve_company_logo(
             "company_domain": direct,
             "company_logo_url": logo_url_for_domain(direct),
             "confidence": "medium",
+            "provenance": "domain_favicon",
         }
-    return {"company_domain": "", "company_logo_url": "", "confidence": "low"}
+    return {
+        "company_domain": "",
+        "company_logo_url": "",
+        "confidence": "low",
+        "provenance": "none",
+    }
 
 
 def logo_url_for_domain(domain: str) -> str:
@@ -481,16 +599,7 @@ def get_or_create_company_branding(
         ats_logo_url=ats_logo_url,
         application_url=application_url,
     )
-    if COMPANY_LOGO_URLS.get(key):
-        source = "curated"
-    elif ats_logo_url:
-        source = "ats"
-    elif catalog_domain or catalog_logo_url:
-        source = "catalog"
-    elif resolved["company_logo_url"]:
-        source = "curated"
-    else:
-        source = "none"
+    source = resolved["provenance"]
     now = datetime.now(UTC)
     if existing is None:
         existing = CompanyBranding(normalized_key=key, canonical_name=company_name or key)
@@ -503,6 +612,36 @@ def get_or_create_company_branding(
     existing.last_verified_at = now
     db.flush()
     return existing
+
+
+def refresh_official_company_logo(
+    db: Session,
+    branding: CompanyBranding,
+    *,
+    force: bool = False,
+) -> CompanyBranding:
+    """Upgrade derived favicon metadata from the canonical official website.
+
+    This is called by the existing backend backfill process, not by card
+    rendering. A fresh verified official-site result is reused.
+    """
+    if (
+        not force
+        and branding.source == "official_site"
+        and branding.resolution_status == "resolved"
+        and not _is_stale(branding.last_verified_at)
+    ):
+        return branding
+    if not branding.domain:
+        return branding
+    logo_url = discover_official_logo_url(branding.domain)
+    branding.last_verified_at = datetime.now(UTC)
+    if logo_url:
+        branding.logo_url = logo_url
+        branding.source = "official_site"
+        branding.resolution_status = "resolved"
+    db.flush()
+    return branding
 
 
 def _is_stale(last_verified_at: datetime | None, *, hours: int = 24) -> bool:

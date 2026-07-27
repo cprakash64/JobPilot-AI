@@ -124,7 +124,19 @@ def resolve_company_identity(db: Session | None, job: JobPosting) -> CompanyIden
         branding_domain = validate_company_domain(branding.domain)
         if branding_domain:
             domain = branding_domain
-            confidence = 0.96 if branding.source in {"catalog", "ats", "curated"} else 0.82
+            confidence = (
+                0.96
+                if branding.source
+                in {
+                    "catalog",
+                    "catalog_asset",
+                    "ats",
+                    "curated",
+                    "domain_favicon",
+                    "official_site",
+                }
+                else 0.82
+            )
             evidence = f"company_branding_{branding.source}"
 
     official_application_domain = _url_domain(job.application_url)

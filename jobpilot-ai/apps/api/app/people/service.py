@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Lock
+from typing import Literal
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
@@ -65,12 +66,16 @@ from app.people.security import (
     safe_profile_url,
 )
 from app.people.title_ontology import (
+    TitleGroup,
     is_early_career_job,
     manager_title_groups,
     recruiter_title_groups,
 )
 
 logger = logging.getLogger("jobpilot.people")
+
+DiscoveryStrategy = Literal["exact", "broadened"]
+DISCOVERY_STRATEGY_VERSION = "people-discovery-v3"
 
 _SAFE_PROVIDER_MESSAGES = {
     "provider_unauthorized": "The people data provider credentials could not be verified.",
@@ -117,10 +122,14 @@ def rate_limit(key: str, limit: int, window_seconds: int = 3600) -> None:
         bucket.append(now)
 
 
-def query_fingerprint(job: JobPosting) -> str:
+def query_fingerprint(
+    job: JobPosting, strategy: DiscoveryStrategy = "exact"
+) -> str:
     profile = extract_job_people_profile(job)
     payload = profile.model_dump(mode="json")
     payload["scoring_version"] = SCORING_VERSION
+    payload["discovery_strategy_version"] = DISCOVERY_STRATEGY_VERSION
+    payload["discovery_strategy"] = strategy
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -143,6 +152,51 @@ def _fresh_candidates(db: Session, job_id: int) -> list[JobPeopleCandidate]:
                 JobPeopleCandidate.expires_at > _now(),
                 JobPeopleCandidate.scoring_version == SCORING_VERSION,
             )
+        )
+    )
+
+
+def _fresh_no_match_run(
+    db: Session,
+    *,
+    job_id: int,
+    user_id: int,
+    fingerprint: str,
+) -> PeopleDiscoveryRun | None:
+    cutoff = _now() - timedelta(days=settings.people_result_ttl_days)
+    return db.scalar(
+        select(PeopleDiscoveryRun)
+        .where(
+            PeopleDiscoveryRun.job_id == job_id,
+            PeopleDiscoveryRun.user_id == user_id,
+            PeopleDiscoveryRun.query_fingerprint == fingerprint,
+            PeopleDiscoveryRun.status == "complete",
+            PeopleDiscoveryRun.completed_at.is_not(None),
+            PeopleDiscoveryRun.completed_at > cutoff,
+        )
+        .order_by(PeopleDiscoveryRun.completed_at.desc())
+    )
+
+
+def _latest_run(
+    db: Session,
+    *,
+    job_id: int,
+    user_id: int,
+    fingerprints: list[str] | None = None,
+) -> PeopleDiscoveryRun | None:
+    statement = select(PeopleDiscoveryRun).where(
+        PeopleDiscoveryRun.job_id == job_id,
+        PeopleDiscoveryRun.user_id == user_id,
+    )
+    if fingerprints is not None:
+        statement = statement.where(
+            PeopleDiscoveryRun.query_fingerprint.in_(fingerprints)
+        )
+    return db.scalar(
+        statement.order_by(
+            PeopleDiscoveryRun.started_at.desc(),
+            PeopleDiscoveryRun.id.desc(),
         )
     )
 
@@ -390,8 +444,6 @@ def build_category_search_queries(
         location_mode = "soft"
     else:
         midpoint = max(1, len(profile.team_member_titles) // 2)
-        from app.people.title_ontology import TitleGroup
-
         groups = [
             TitleGroup("exact_role_family", profile.team_member_titles[:midpoint], []),
             TitleGroup("adjacent_role_family", profile.team_member_titles[midpoint:], []),
@@ -416,6 +468,88 @@ def build_category_search_queries(
         for group in groups
         if group.titles and domain
     ]
+
+
+def build_broadened_search_queries(
+    profile, category: PeopleCategory
+) -> list[PeopleSearchQuery]:
+    """Return only bounded secondary queries.
+
+    The exact strategy already ran the primary title groups. A user-triggered
+    broaden therefore adds new canonical-title groups plus the normal groups
+    against an evidence-backed related domain, without automatically repeating
+    the paid exact-company search.
+    """
+    if category == "likely_recruiter":
+        broader_groups = [
+            TitleGroup(
+                "broader_recruiting",
+                [
+                    "Recruiter",
+                    "Talent Acquisition Specialist",
+                    "Recruiting Lead",
+                    "Early Talent Partner",
+                ],
+                [],
+            )
+        ]
+    elif category == "potential_hiring_manager":
+        broader_groups = [
+            TitleGroup(
+                "broader_engineering_leadership",
+                [
+                    "Engineering Director",
+                    "Technical Director",
+                    "VP Engineering",
+                ],
+                ["director", "head", "vp"],
+            ),
+            TitleGroup(
+                "broader_technical_leadership",
+                ["Technical Lead", "Engineering Lead"],
+                ["manager"],
+            ),
+        ]
+    else:
+        broader_groups = [
+            TitleGroup(
+                "broader_role_family",
+                [
+                    "Software Engineer",
+                    "Software Developer",
+                    "Data Scientist",
+                    "Platform Engineer",
+                ],
+                [],
+            )
+        ]
+
+    queries = [
+        PeopleSearchQuery(
+            category=category,
+            company_name=profile.company_name,
+            company_domain=profile.company_domain,
+            company_aliases=profile.company_aliases,
+            titles=group.titles,
+            title_group=group.name,
+            seniorities=group.seniorities,
+            role_family=profile.role_family,
+            department=profile.department,
+            location=profile.location,
+            location_filter_mode="soft",
+            company_match_kind="canonical",
+            limit=settings.people_max_discovery_results_per_category,
+        )
+        for group in broader_groups
+        if profile.company_domain
+    ]
+    if profile.parent_company_domain and profile.domain_confidence >= 0.8:
+        queries.extend(
+            build_category_search_queries(
+                profile, category, related_company=True
+            )
+        )
+    return queries
 
 
 PreliminaryCandidate = tuple[
@@ -484,7 +618,12 @@ def _redis_lock(job_id: int, fingerprint: str) -> Iterator[bool]:
                 pass
 
 
-async def discover(db: Session, user: User, job_id: int) -> dict:
+async def discover(
+    db: Session,
+    user: User,
+    job_id: int,
+    strategy: DiscoveryStrategy = "exact",
+) -> dict:
     started = time.monotonic()
     metric(
         "people_discovery_requests_total",
@@ -511,9 +650,47 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
         logger.info("people_discovery cache_hit=true job_id=%s scoring_version=%s", job_id, SCORING_VERSION)
         return recommendations_payload(db, user, job_id)
 
+    fingerprint = query_fingerprint(job, strategy)
+    cached_no_match = _fresh_no_match_run(
+        db,
+        job_id=job_id,
+        user_id=user.id,
+        fingerprint=fingerprint,
+    )
+    if cached_no_match is not None:
+        metric(
+            "people_discovery_cache_hits_total",
+            provider="database_no_match",
+            scoring_version=SCORING_VERSION,
+        )
+        logger.info(
+            "people_discovery cache_hit=true no_match=true job_id=%s strategy=%s scoring_version=%s",
+            job_id,
+            strategy,
+            SCORING_VERSION,
+        )
+        return recommendations_payload(db, user, job_id)
+
+    if strategy == "broadened":
+        exact_fingerprint = query_fingerprint(job, "exact")
+        if _fresh_no_match_run(
+            db,
+            job_id=job_id,
+            user_id=user.id,
+            fingerprint=exact_fingerprint,
+        ) is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "PEOPLE_BROADEN_NOT_ELIGIBLE",
+                    "message": (
+                        "Complete an exact-company search before broadening."
+                    ),
+                },
+            )
+
     rate_limit(f"discover:{user.id}", settings.people_discovery_rate_limit_per_hour)
     _budget_check(db, user.id)
-    fingerprint = query_fingerprint(job)
     with _redis_lock(job_id, fingerprint) as acquired:
         if not acquired:
             return {
@@ -536,6 +713,13 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
         # Recheck after lock acquisition.
         if _fresh_candidates(db, job_id):
             return recommendations_payload(db, user, job_id)
+        if _fresh_no_match_run(
+            db,
+            job_id=job_id,
+            user_id=user.id,
+            fingerprint=fingerprint,
+        ) is not None:
+            return recommendations_payload(db, user, job_id)
         profile = extract_job_people_profile(job, db)
         provider = get_people_provider()
         company_context = {
@@ -546,6 +730,9 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
             "parent_domain": profile.parent_company_domain,
             "domain_confidence": profile.domain_confidence,
             "evidence_source": profile.company_evidence_source,
+            "scoring_version": SCORING_VERSION,
+            "discovery_strategy_version": DISCOVERY_STRATEGY_VERSION,
+            "discovery_strategy": strategy,
         }
         run = PeopleDiscoveryRun(
             job_id=job_id, user_id=user.id, status="running",
@@ -573,6 +760,8 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                 "rejection_reason_counts": {},
                 "final_displayed_count": 0,
                 "related_company_search_used": False,
+                "broadened_title_search_used": strategy == "broadened",
+                "discovery_strategy": strategy,
             }
             for category in _PEOPLE_CATEGORIES
         }
@@ -581,7 +770,11 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
         try:
             for category in _PEOPLE_CATEGORIES:
                 category_rows: list[ProviderPerson] = []
-                queries = build_category_search_queries(profile, category)
+                queries = (
+                    build_category_search_queries(profile, category)
+                    if strategy == "exact"
+                    else build_broadened_search_queries(profile, category)
+                )
                 for query in queries:
                     diagnostics[category]["search_queries"].append({
                         "title_group": query.title_group,
@@ -590,6 +783,8 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                     })
                     diagnostics[category]["title_groups"].append(query.title_group)
                     diagnostics[category]["seniorities_used"].extend(query.seniorities)
+                    if query.company_match_kind == "related":
+                        diagnostics[category]["related_company_search_used"] = True
                     try:
                         rows = await provider.search_people(query)
                     except ProviderUnavailable as exc:
@@ -599,32 +794,6 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                     category_rows.extend(rows)
                     searched += len(rows)
                     diagnostics[category]["raw_search_result_count"] += len(rows)
-                canonical_unique = deduplicate(category_rows)
-                if (
-                    not canonical_unique
-                    and profile.parent_company_domain
-                    and profile.domain_confidence >= 0.8
-                ):
-                    diagnostics[category]["related_company_search_used"] = True
-                    for query in build_category_search_queries(
-                        profile, category, related_company=True
-                    ):
-                        diagnostics[category]["search_queries"].append({
-                            "title_group": query.title_group,
-                            "titles": query.titles,
-                            "company_match_kind": query.company_match_kind,
-                        })
-                        diagnostics[category]["title_groups"].append(query.title_group)
-                        diagnostics[category]["seniorities_used"].extend(query.seniorities)
-                        try:
-                            rows = await provider.search_people(query)
-                        except ProviderUnavailable as exc:
-                            failures.append(exc.reason)
-                            _log_provider_failure(exc, run.id)
-                            rows = []
-                        category_rows.extend(rows)
-                        searched += len(rows)
-                        diagnostics[category]["raw_search_result_count"] += len(rows)
                 categories[category] = deduplicate(category_rows)
                 diagnostics[category]["unique_candidate_count"] = len(categories[category])
                 duplicate_count = max(
@@ -726,7 +895,7 @@ async def discover(db: Session, user: User, job_id: int) -> dict:
                 diagnostics[category]["candidates_rejected"] += not_selected
                 if not_selected:
                     counts = diagnostics[category]["rejection_reason_counts"]
-                    counts["enrichment_not_selected"] = not_selected
+                    counts["enrichment_budget_exhausted"] = not_selected
             expires = _now() + timedelta(days=settings.people_result_ttl_days)
             caps = {
                 "likely_recruiter": settings.people_max_displayed_recruiters,
@@ -864,7 +1033,7 @@ def _empty_categories() -> dict[str, list]:
 
 
 def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
-    _job_or_404(db, job_id)
+    job = _job_or_404(db, job_id)
     rows = db.execute(
         select(UserJobPeopleRecommendation, JobPeopleCandidate, ProfessionalPerson)
         .join(JobPeopleCandidate, UserJobPeopleRecommendation.job_people_candidate_id == JobPeopleCandidate.id)
@@ -924,15 +1093,25 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
                 "contacted": recommendation.contacted_at is not None,
             }
         )
-    latest_run = db.scalar(
-        select(PeopleDiscoveryRun)
-        .where(PeopleDiscoveryRun.job_id == job_id, PeopleDiscoveryRun.user_id == user.id)
-        .order_by(PeopleDiscoveryRun.started_at.desc())
+    exact_fingerprint = query_fingerprint(job, "exact")
+    broadened_fingerprint = query_fingerprint(job, "broadened")
+    current_fingerprints = [exact_fingerprint, broadened_fingerprint]
+    latest_current_run = _latest_run(
+        db,
+        job_id=job_id,
+        user_id=user.id,
+        fingerprints=current_fingerprints,
     )
+    latest_any_run = _latest_run(db, job_id=job_id, user_id=user.id)
+    latest_run = latest_current_run or latest_any_run
+    stale_version = latest_any_run is not None and latest_current_run is None
     has_results = any(categories.values())
     response_status = "complete" if has_results else "not_started"
     warnings: list[str] = []
-    if latest_run and latest_run.status in {"running"}:
+    if stale_version:
+        response_status = "stale"
+        warnings.append("Previous search results used an older search version. Refresh is available.")
+    elif latest_run and latest_run.status in {"running"}:
         response_status = "in_progress"
     elif latest_run and latest_run.status == "provider_unavailable":
         response_status = "provider_unavailable"
@@ -942,10 +1121,39 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         warnings.append("Some professional data sources were unavailable; showing reliable partial results.")
     elif latest_run and not has_results:
         response_status = "no_reliable_matches"
-        warnings.append("No sufficiently reliable people were found.")
     if stale and not has_results:
         response_status = "stale"
         warnings.append("Previous results are stale. Refresh is available.")
+    exact_no_match = _fresh_no_match_run(
+        db,
+        job_id=job_id,
+        user_id=user.id,
+        fingerprint=exact_fingerprint,
+    )
+    broadened_no_match = _fresh_no_match_run(
+        db,
+        job_id=job_id,
+        user_id=user.id,
+        fingerprint=broadened_fingerprint,
+    )
+    broaden_eligible = bool(
+        not has_results
+        and exact_no_match is not None
+        and broadened_no_match is None
+    )
+    broaden_attempted = bool(
+        latest_current_run
+        and (latest_current_run.company_context or {}).get("discovery_strategy")
+        == "broadened"
+    )
+    related_company_search_attempted = bool(
+        latest_current_run
+        and any(
+            bool(value.get("related_company_search_used"))
+            for value in (latest_current_run.category_diagnostics or {}).values()
+            if isinstance(value, dict)
+        )
+    )
     return {
         "status": response_status,
         "availability_reason": (
@@ -961,25 +1169,18 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         "search_scope": {
             "company_scope": (
                 "Hiring company and evidence-backed related domain"
-                if latest_run
-                and any(
-                    bool(value.get("related_company_search_used"))
-                    for value in (latest_run.category_diagnostics or {}).values()
-                    if isinstance(value, dict)
-                )
+                if related_company_search_attempted
                 else "Hiring company only"
             ),
             "location_filter": "soft",
-            "parent_company_matches_included": bool(
-                latest_run
-                and any(
-                    bool(value.get("related_company_search_used"))
-                    for value in (latest_run.category_diagnostics or {}).values()
-                    if isinstance(value, dict)
-                )
-            ),
+            "parent_company_matches_included": related_company_search_attempted,
             "refresh_eligible": response_status
-            in {"provider_unavailable", "no_reliable_matches", "stale"},
+            in {"provider_unavailable", "stale"},
+            "exact_company_search_completed": exact_no_match is not None
+            or bool(has_results and latest_current_run),
+            "related_company_search_attempted": related_company_search_attempted,
+            "broaden_eligible": broaden_eligible,
+            "broaden_attempted": broaden_attempted,
         },
         "warnings": warnings,
         "controls": {

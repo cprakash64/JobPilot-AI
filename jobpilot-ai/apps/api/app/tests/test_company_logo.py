@@ -1,6 +1,12 @@
 """Company logo resolution: curated map, explicit catalog, and safe fallback."""
 
-from app.jobs.company_logo_service import logo_url_for_domain, resolve_company_logo
+from app.jobs.company_logo_service import (
+    discover_official_logo_url,
+    is_safe_logo_url,
+    logo_url_for_domain,
+    resolve_company_logo,
+)
+from app.jobs.safe_fetch import SafeFetchResult
 
 
 def test_resolves_known_company_from_curated_map():
@@ -38,6 +44,56 @@ def test_explicit_catalog_domain_wins():
 def test_explicit_catalog_logo_url_used_verbatim():
     result = resolve_company_logo("Acme", catalog_logo_url="https://cdn.example.com/acme.png")
     assert result["company_logo_url"] == "https://cdn.example.com/acme.png"
+
+
+def test_invalid_and_unsafe_explicit_logo_urls_are_rejected():
+    for value in (
+        "http://cdn.example.com/acme.png",
+        "https://127.0.0.1/acme.png",
+        "https://assets.internal/acme.png",
+        "file:///tmp/acme.png",
+        "https://storage.googleapis.com/simplify-imgs/companies/id/logo.png",
+    ):
+        assert not is_safe_logo_url(value)
+        assert (
+            resolve_company_logo("Unknown Employer", catalog_logo_url=value)[
+                "company_logo_url"
+            ]
+            == ""
+        )
+
+
+def test_official_site_logo_discovery_uses_canonical_domain_and_verifies_image(
+    monkeypatch,
+):
+    html = (
+        b'<html><img src="/assets/company-logo.png" alt="Company logo">'
+        b'<link rel="icon" href="/favicon.ico"></html>'
+    )
+    monkeypatch.setattr(
+        "app.jobs.company_logo_service.safe_fetch_html",
+        lambda url: SafeFetchResult(
+            content=html,
+            content_type="text/html",
+            final_url="https://commerce.example/",
+        ),
+    )
+    checked: list[str] = []
+
+    def image(url: str) -> SafeFetchResult:
+        checked.append(url)
+        return SafeFetchResult(
+            content=b"png",
+            content_type="image/png",
+            final_url=url,
+        )
+
+    monkeypatch.setattr("app.jobs.company_logo_service.safe_fetch_image", image)
+    assert (
+        discover_official_logo_url("commerce.example")
+        == "https://commerce.example/assets/company-logo.png"
+    )
+    assert checked == ["https://commerce.example/assets/company-logo.png"]
 
 
 def test_unknown_company_falls_back_to_empty():

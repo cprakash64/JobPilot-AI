@@ -174,6 +174,10 @@ export type PeopleResponse = {
     location_filter: "none" | "soft" | "hard";
     parent_company_matches_included: boolean;
     refresh_eligible: boolean;
+    exact_company_search_completed?: boolean;
+    related_company_search_attempted?: boolean;
+    broaden_eligible?: boolean;
+    broaden_attempted?: boolean;
   };
   controls: { email_discovery: boolean; outreach_drafting: boolean };
 };

@@ -12,6 +12,8 @@ onto every job row for that company.
 Usage:
     python -m app.jobs.backfill_company_logos           # fill only missing logos
     python -m app.jobs.backfill_company_logos --force   # re-resolve every company
+    python -m app.jobs.backfill_company_logos --company "Example Corp" \
+        --discover-official --force
 
 Only companies we can confidently tie to a domain are updated; unknown
 companies are left for the neutral placeholder. Prints a summary of
@@ -33,6 +35,7 @@ from app.db.session import SessionLocal
 from app.jobs.company_logo_service import (
     get_or_create_company_branding,
     is_untrusted_simplify_logo_url,
+    refresh_official_company_logo,
 )
 from app.jobs.sources.simplifyjobs import fetch_verified_company_domain
 from app.models.entities import JobPosting
@@ -63,9 +66,17 @@ class BackfillSummary:
         )
 
 
-def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSummary:
+def backfill_company_logos(
+    db: Session,
+    *,
+    force: bool = False,
+    company_names: set[str] | None = None,
+    discover_official: bool = False,
+) -> BackfillSummary:
     summary = BackfillSummary()
     companies = sorted({c for (c,) in db.execute(select(JobPosting.company)).all() if c})
+    if company_names is not None:
+        companies = [company for company in companies if company in company_names]
     simplify_urls: dict[str, object] = {}
     for company, raw_json in db.execute(
         select(JobPosting.company, JobPosting.raw_json).where(
@@ -79,6 +90,12 @@ def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSumma
             and raw_json.get("company_url")
         ):
             simplify_urls[company] = raw_json["company_url"]
+    if company_names is not None:
+        simplify_urls = {
+            company: url
+            for company, url in simplify_urls.items()
+            if company in company_names
+        }
 
     # Profile pages are independent fixed-host reads. Resolve them concurrently
     # before touching ORM state; workers never share the SQLAlchemy session.
@@ -124,6 +141,10 @@ def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSumma
                 application_url=application_hint,
                 source_type="simplifyjobs" if simplify_company_url else None,
             )
+            if discover_official:
+                branding = refresh_official_company_logo(
+                    db, branding, force=force
+                )
         except Exception:  # noqa: BLE001 - never let one bad company abort the whole run
             logger.exception("logo backfill failed for company=%s", company)
             summary.failed += 1
@@ -139,7 +160,10 @@ def backfill_company_logos(db: Session, *, force: bool = False) -> BackfillSumma
     # Copy each company's resolved branding onto every job row for that
     # company — idempotent (a row already matching is simply rewritten to the
     # same value) and safe to rerun.
-    jobs = db.scalars(select(JobPosting)).all()
+    jobs_statement = select(JobPosting)
+    if company_names is not None:
+        jobs_statement = jobs_statement.where(JobPosting.company.in_(company_names))
+    jobs = db.scalars(jobs_statement).all()
     for job in jobs:
         domain, logo_url = resolved_by_company.get(job.company or "", (None, None))
         if force:
@@ -164,10 +188,26 @@ def main() -> None:
     parser.add_argument(
         "--force", action="store_true", help="Overwrite existing logo URLs, not just missing ones."
     )
+    parser.add_argument(
+        "--company",
+        action="append",
+        default=None,
+        help="Limit resolution to this exact company name; may be supplied more than once.",
+    )
+    parser.add_argument(
+        "--discover-official",
+        action="store_true",
+        help="Inspect the canonical official site once for a verified raster logo.",
+    )
     args = parser.parse_args()
     db = SessionLocal()
     try:
-        summary = backfill_company_logos(db, force=args.force)
+        summary = backfill_company_logos(
+            db,
+            force=args.force,
+            company_names=set(args.company) if args.company else None,
+            discover_official=args.discover_official,
+        )
     finally:
         db.close()
     print(summary)

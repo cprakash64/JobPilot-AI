@@ -310,6 +310,116 @@ def test_generic_related_parent_employee_is_suppressed() -> None:
     )
 
 
+def test_stale_people_fingerprint_refresh_is_scoped_to_selected_job(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.people import service
+
+    job = _job()
+    other_job = _job()
+    other_job.external_id = "people-job-2"
+    other_job.hash_for_deduplication = "b" * 64
+    user = User(email="refresh@example.com", hashed_password=hash_password("password123"))
+    db.add_all([job, other_job, user])
+    db.commit()
+    legacy = PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="complete",
+        provider="cache",
+        query_fingerprint="legacy-v1-fingerprint",
+        company_context={"scoring_version": "people-v1"},
+        completed_at=datetime.now(UTC),
+    )
+    other_run = PeopleDiscoveryRun(
+        job_id=other_job.id,
+        user_id=user.id,
+        status="complete",
+        provider="cache",
+        query_fingerprint="other-job-fingerprint",
+        completed_at=datetime.now(UTC),
+    )
+    db.add_all([legacy, other_run])
+    db.commit()
+
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    provider = MockPeopleProvider([])
+    monkeypatch.setattr(service, "get_people_provider", lambda: provider)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    before = client.get(f"/jobs/{job.id}/people", headers=headers)
+    assert before.json()["status"] == "stale"
+    refreshed = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+    assert refreshed.status_code == 200
+    assert refreshed.json()["status"] == "no_reliable_matches"
+    current = db.query(PeopleDiscoveryRun).filter(
+        PeopleDiscoveryRun.job_id == job.id
+    ).order_by(PeopleDiscoveryRun.id.desc()).first()
+    assert current is not None
+    assert current.query_fingerprint != legacy.query_fingerprint
+    assert current.company_context["scoring_version"].startswith("people-v2")
+    assert db.get(PeopleDiscoveryRun, other_run.id) is not None
+
+
+def test_current_no_match_and_controlled_broaden_are_each_idempotent(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.people import service
+
+    job = _job()
+    user = User(email="broaden@example.com", hashed_password=hash_password("password123"))
+    db.add_all([job, user])
+    db.commit()
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    provider = MockPeopleProvider([])
+    monkeypatch.setattr(service, "get_people_provider", lambda: provider)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    not_eligible = client.post(f"/jobs/{job.id}/people/broaden", headers=headers)
+    assert not_eligible.status_code == 409
+    assert provider.requests == 0
+
+    exact = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+    assert exact.status_code == 200
+    assert exact.json()["status"] == "no_reliable_matches"
+    assert exact.json()["search_scope"]["broaden_eligible"] is True
+    exact_requests = provider.requests
+    exact_run_count = db.query(PeopleDiscoveryRun).filter(
+        PeopleDiscoveryRun.job_id == job.id
+    ).count()
+
+    cached_exact = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+    assert cached_exact.status_code == 200
+    assert provider.requests == exact_requests
+    assert db.query(PeopleDiscoveryRun).filter(
+        PeopleDiscoveryRun.job_id == job.id
+    ).count() == exact_run_count
+
+    broadened = client.post(f"/jobs/{job.id}/people/broaden", headers=headers)
+    assert broadened.status_code == 200
+    assert broadened.json()["status"] == "no_reliable_matches"
+    assert broadened.json()["search_scope"]["broaden_attempted"] is True
+    assert broadened.json()["search_scope"]["broaden_eligible"] is False
+    broadened_requests = provider.requests
+    broadened_run = db.query(PeopleDiscoveryRun).filter(
+        PeopleDiscoveryRun.job_id == job.id
+    ).order_by(PeopleDiscoveryRun.id.desc()).first()
+    assert broadened_run is not None
+    assert broadened_run.company_context["discovery_strategy"] == "broadened"
+    assert all(
+        category["discovery_strategy"] == "broadened"
+        for category in broadened_run.category_diagnostics.values()
+    )
+
+    cached_broadened = client.post(f"/jobs/{job.id}/people/broaden", headers=headers)
+    assert cached_broadened.status_code == 200
+    assert provider.requests == broadened_requests
+
+
 def test_scoring_confidence_explanations_and_security() -> None:
     profile = extract_job_people_profile(_job())
     recruiter = _records()[0]
@@ -361,6 +471,7 @@ def test_apollo_search_uses_current_endpoint_and_partial_search_schema(
         company_name="Acme",
         company_domain="acme.example",
         titles=["Software Engineering Manager"],
+        seniorities=["manager", "director"],
         limit=1,
     )))
 
@@ -369,6 +480,7 @@ def test_apollo_search_uses_current_endpoint_and_partial_search_schema(
     assert method == "POST"
     assert url == "https://api.apollo.io/api/v1/mixed_people/api_search"
     assert kwargs["json"]["q_organization_domains_list"] == ["acme.example"]
+    assert kwargs["json"]["person_seniorities"] == ["manager", "director"]
     assert "q_organization_domains" not in kwargs["json"]
     assert kwargs["headers"]["x-api-key"] == "configured-without-reading-runtime-secret"
 

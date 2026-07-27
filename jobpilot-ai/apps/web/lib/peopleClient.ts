@@ -10,6 +10,7 @@ type CacheEntry = {
   cachedAt?: number;
   load?: Promise<PeopleResponse>;
   discovery?: Promise<PeopleResponse>;
+  broaden?: Promise<PeopleResponse>;
   listeners: Set<Listener>;
 };
 
@@ -74,6 +75,20 @@ export async function discoverPeople(jobId: JobId): Promise<PeopleResponse> {
       entry.discovery = undefined;
     });
   return entry.discovery;
+}
+
+export async function broadenPeople(jobId: JobId): Promise<PeopleResponse> {
+  const entry = entryFor(jobId);
+  if (entry.broaden) return entry.broaden;
+
+  entry.broaden = api<PeopleResponse>(`/jobs/${jobId}/people/broaden`, {
+    method: "POST"
+  })
+    .then((data) => publish(entry, data))
+    .finally(() => {
+      entry.broaden = undefined;
+    });
+  return entry.broaden;
 }
 
 export function clearPeopleCache(): void {

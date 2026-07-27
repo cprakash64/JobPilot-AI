@@ -10,7 +10,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
 from app.jobs.backfill_company_logos import backfill_company_logos
-from app.jobs.company_logo_service import get_or_create_company_branding, normalize_company_key
+from app.jobs.company_logo_service import (
+    get_or_create_company_branding,
+    normalize_company_key,
+    refresh_official_company_logo,
+)
 from app.jobs.safe_fetch import UnsafeUrlError, _validate_url
 from app.models.entities import CompanyBranding, JobPosting, JobSource
 
@@ -70,6 +74,25 @@ class TestCompanyBrandingReuse:
         assert second.id == first.id
         assert second.last_verified_at == first_verified_at
 
+    def test_official_logo_provenance_is_cached(self, db: Session, monkeypatch):
+        branding = get_or_create_company_branding(
+            db, "Example Commerce", catalog_domain="commerce.example"
+        )
+        monkeypatch.setattr(
+            "app.jobs.company_logo_service.discover_official_logo_url",
+            lambda domain: "https://commerce.example/assets/logo.png",
+        )
+        refreshed = refresh_official_company_logo(db, branding, force=True)
+        assert refreshed.source == "official_site"
+        assert refreshed.logo_url == "https://commerce.example/assets/logo.png"
+        assert refreshed.last_verified_at is not None
+
+        monkeypatch.setattr(
+            "app.jobs.company_logo_service.discover_official_logo_url",
+            lambda domain: (_ for _ in ()).throw(AssertionError("cache miss")),
+        )
+        assert refresh_official_company_logo(db, refreshed).logo_url == refreshed.logo_url
+
 
 class TestBackfillIdempotency:
     def test_backfill_resolves_previously_unbranded_jobs_and_is_safe_to_rerun(self, db: Session):
@@ -90,6 +113,47 @@ class TestBackfillIdempotency:
         assert second_run.already_present == len(upstart_jobs)
         jobs_after = db.scalars(select(JobPosting)).all()
         assert [j.company_logo_url for j in jobs_after] == [j.company_logo_url for j in jobs]
+
+    def test_targeted_backfill_uses_canonical_employer_domain(
+        self, db: Session, monkeypatch
+    ):
+        job = make_job(
+            db,
+            company="Example Commerce",
+            external_id="commerce-1",
+            logo_url=(
+                "https://www.google.com/s2/favicons"
+                "?domain=commerce.example&sz=64"
+            ),
+        )
+        job.company_domain = "commerce.example"
+        db.commit()
+        monkeypatch.setattr(
+            "app.jobs.company_logo_service.discover_official_logo_url",
+            lambda domain: (
+                "https://commerce.example/assets/company-logo.png"
+                if domain == "commerce.example"
+                else ""
+            ),
+        )
+
+        backfill_company_logos(
+            db,
+            force=True,
+            company_names={"Example Commerce"},
+            discover_official=True,
+        )
+        db.refresh(job)
+        branding = db.scalar(
+            select(CompanyBranding).where(
+                CompanyBranding.normalized_key == "example commerce"
+            )
+        )
+        assert job.company_domain == "commerce.example"
+        assert job.company_logo_url == (
+            "https://commerce.example/assets/company-logo.png"
+        )
+        assert branding is not None and branding.source == "official_site"
 
 
 class TestSafeFetchSSRF:

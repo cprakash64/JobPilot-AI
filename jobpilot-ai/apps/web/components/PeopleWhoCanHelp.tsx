@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ExternalLink, Mail, MessageSquareText, Star, UserCheck, Users, X } from "lucide-react";
 import { api, ApiError, type PeopleRecommendation, type PeopleResponse } from "@/lib/api";
 import {
+  broadenPeople,
   discoverPeople,
   getCachedPeople,
   loadPeople,
@@ -155,6 +156,29 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
     }
   }, [jobId]);
 
+  const broaden = useCallback(async () => {
+    if (discoveryInFlight.current) return null;
+    discoveryInFlight.current = true;
+    setDiscovering(true);
+    setError("");
+    try {
+      const response = await broadenPeople(jobId);
+      setData(response);
+      return response;
+    } catch (broadenError) {
+      setError(
+        safePeopleError(
+          broadenError,
+          "The controlled broader search could not be completed. Please try again."
+        )
+      );
+      return null;
+    } finally {
+      discoveryInFlight.current = false;
+      setDiscovering(false);
+    }
+  }, [jobId]);
+
   const personAction = useCallback(async (person: PeopleRecommendation, action: PersonAction) => {
     setActionId(person.recommendation_id);
     setError("");
@@ -225,6 +249,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
     setDraft,
     load,
     discover,
+    broaden,
     personAction,
     draftOutreach
   };
@@ -240,10 +265,13 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
     data?.status !== "disabled" &&
     (
       data?.status === "not_started" ||
-      data?.status === "no_reliable_matches" ||
       data?.status === "stale" ||
       data?.status === "provider_unavailable"
     );
+  const canBroaden = Boolean(
+    data?.status === "no_reliable_matches" &&
+    data.search_scope?.broaden_eligible
+  );
 
   return (
     <section
@@ -265,9 +293,18 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
             confirmed assignments. You choose whether and how to contact anyone.
           </p>
         </div>
-        {canDiscover ? (
-          <Button onClick={() => void controller.discover()} disabled={discovering}>
-            {discovering || data?.status === "stale" ? "Refresh people" : "Find people"}
+        {canDiscover || canBroaden ? (
+          <Button
+            onClick={() => void (canBroaden ? controller.broaden() : controller.discover())}
+            disabled={discovering}
+          >
+            {discovering
+              ? "Finding people…"
+              : canBroaden
+                ? "Broaden search"
+                : data?.status === "stale"
+                  ? "Refresh people"
+                  : "Find people"}
           </Button>
         ) : null}
       </div>
@@ -297,9 +334,15 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
           </p>
         ) : null}
         {data?.status === "no_reliable_matches" ? (
-          <p className="text-sm text-[var(--text-muted)]">
-            No sufficiently reliable matches were found. JobPilot will not fill categories with weak results.
-          </p>
+          <div>
+            <EmptyPeopleCategories />
+            {canBroaden ? (
+              <p className="mt-3 text-xs text-[var(--text-muted)]">
+                Broaden search is optional and bounded. It may include broader titles or
+                evidence-backed related-company matches.
+              </p>
+            ) : null}
+          </div>
         ) : null}
         {data?.status === "provider_unavailable" ? (
           <p className="text-sm text-[var(--text-muted)]">
@@ -318,6 +361,12 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
               ? "Related-company matches were considered"
               : "Related-company matches were not included"}
           </span>
+          {data.search_scope.exact_company_search_completed ? (
+            <span>Exact-company search completed</span>
+          ) : null}
+          {data.search_scope.broaden_attempted ? (
+            <span>Controlled broader search completed</span>
+          ) : null}
           <span>{data.search_scope.refresh_eligible ? "Refresh available" : "Using current cached search"}</span>
         </div>
       ) : null}
@@ -348,10 +397,10 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
                 ) : (
                   <p className="mt-2 text-sm text-[var(--text-muted)]">
                     {key === "likely_recruiters"
-                      ? "No sufficiently reliable recruiting contact was found yet."
+                      ? "No reliable recruiting contact met JobPilot’s threshold."
                       : key === "potential_hiring_managers"
                         ? "No potential manager met JobPilot’s confidence threshold."
-                        : "No sufficiently reliable referral candidate was found yet."}
+                        : "No relevant employee met JobPilot’s referral threshold."}
                   </p>
                 )}
               </section>
@@ -463,10 +512,25 @@ export function PeopleWhoCanHelpSummary({
             />
           ) : null}
           {data?.status === "no_reliable_matches" ? (
-            <StateWithRetry
-              text="No sufficiently reliable matches were found."
-              onRetry={() => void controller.discover()}
-            />
+            <div>
+              <EmptyPeopleCategories />
+              {data.search_scope?.broaden_eligible ? (
+                <>
+                  <p className="mt-3 text-xs text-[var(--text-muted)]">
+                    A controlled broader search may include broader titles or
+                    evidence-backed related-company matches.
+                  </p>
+                  <Button
+                    variant="secondary"
+                    className="mt-3"
+                    onClick={() => void controller.broaden()}
+                    disabled={discovering}
+                  >
+                    Broaden search
+                  </Button>
+                </>
+              ) : null}
+            </div>
           ) : null}
           {data?.status === "not_started" && !discovering ? (
             <StateWithRetry
@@ -499,6 +563,16 @@ export function PeopleWhoCanHelpSummary({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function EmptyPeopleCategories() {
+  return (
+    <div className="grid gap-2 text-sm text-[var(--text-muted)]">
+      <p>No reliable recruiting contact met JobPilot’s threshold.</p>
+      <p>No potential hiring manager met JobPilot’s threshold.</p>
+      <p>No relevant employee met JobPilot’s referral threshold.</p>
+    </div>
   );
 }
 

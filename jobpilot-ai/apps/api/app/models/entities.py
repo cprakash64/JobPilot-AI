@@ -319,7 +319,8 @@ class CompanyBranding(Base):
     canonical_name: Mapped[str] = mapped_column(String(255))
     domain: Mapped[str | None] = mapped_column(String(255))
     logo_url: Mapped[str | None] = mapped_column(String(1000))
-    # "ats" | "catalog" | "curated" | "discovered" | "none"
+    # "ats" | "catalog_asset" | "curated" | "domain_favicon" |
+    # "official_site" | "none"
     source: Mapped[str] = mapped_column(String(20), default="none")
     # "resolved" | "unresolved" | "failed"
     resolution_status: Mapped[str] = mapped_column(String(20), default="unresolved")

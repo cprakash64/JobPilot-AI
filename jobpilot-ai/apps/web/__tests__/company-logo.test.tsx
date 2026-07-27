@@ -19,6 +19,33 @@ describe("CompanyLogo", () => {
     expect(screen.getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 
+  it("never renders an aggregator-owned logo as the employer logo", () => {
+    render(
+      React.createElement(CompanyLogo, {
+        company: "Example Commerce",
+        logoUrl: (
+          "https://storage.googleapis.com/simplify-imgs/companies/id/logo.png"
+        )
+      })
+    );
+    expect(screen.queryByRole("img", { name: "Example Commerce logo" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Example Commerce generated company mark" })
+    ).toHaveTextContent("EC");
+  });
+
+  it("reserves a fixed logo box so fallback does not shift the card", () => {
+    const { container } = render(
+      React.createElement(CompanyLogo, {
+        company: "Example Commerce",
+        logoUrl: null,
+        size: 44
+      })
+    );
+    const box = container.firstElementChild;
+    expect(box).toHaveStyle({ width: "44px", height: "44px" });
+  });
+
   it("falls back to a generated mark when the only real image errors", () => {
     render(React.createElement(CompanyLogo, { company: "Deepgram", logoUrl: "https://logo.clearbit.com/deepgram.com" }));
     const img = screen.getByRole("img", { name: "Deepgram logo" });

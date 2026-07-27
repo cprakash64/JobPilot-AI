@@ -1,7 +1,7 @@
 import logging
 import os
-from hashlib import sha256
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,14 +12,24 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
+from app.documents.cover_letter_generation_service import generate_cover_letter
+from app.documents.filenames import build_document_filename
+from app.documents.resume_generation_service import generate_resume
+from app.documents.store import export_document as render_document_file
+from app.documents.store import persist_document, serialize_document
 from app.jobs.company_logo_service import (
+    is_safe_logo_url,
     is_untrusted_simplify_logo_url,
     normalize_company_key,
     resolve_company_logo,
 )
 from app.jobs.job_eligibility_service import evaluate_eligibility
-from app.jobs.job_ingestion_service import build_profile_view, discover_jobs, rematch_user
-from app.jobs.job_ingestion_service import _job_view  # noqa: PLC2701 - internal shared mapper
+from app.jobs.job_ingestion_service import (
+    _job_view,  # noqa: PLC2701 - internal shared mapper
+    build_profile_view,
+    discover_jobs,
+    rematch_user,
+)
 from app.jobs.job_normalization_service import DEMO_COMPANIES, is_placeholder_url
 from app.jobs.job_search_criteria_service import build_search_criteria
 from app.jobs.safe_fetch import FetchFailedError, UnsafeUrlError, safe_fetch_image
@@ -37,11 +47,6 @@ from app.models.entities import (
     User,
     UserProfile,
 )
-from app.documents.cover_letter_generation_service import generate_cover_letter
-from app.documents.filenames import build_document_filename
-from app.documents.resume_generation_service import generate_resume
-from app.documents.store import export_document as render_document_file
-from app.documents.store import persist_document, serialize_document
 from app.schemas.jobs import (
     ApplicationTrackerIn,
     DiscoverJobsIn,
@@ -368,7 +373,10 @@ def _serialize_card(
     company_domain = job.company_domain or ""
     company_logo_url = (
         ""
-        if is_untrusted_simplify_logo_url(job.company_logo_url)
+        if (
+            is_untrusted_simplify_logo_url(job.company_logo_url)
+            or not is_safe_logo_url(job.company_logo_url)
+        )
         else (job.company_logo_url or "")
     )
     if not company_logo_url:

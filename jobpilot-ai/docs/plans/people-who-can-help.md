@@ -219,6 +219,80 @@ Validation in progress:
 - [x] Complete API: 599 passed. Complete web: lint, typecheck, production build, and 192 tests
   passed. Chromium People E2E: 2 passed. Compose validation and `git diff --check`: passed.
 
+## Toshiba no-result and employer-logo repair (2026-07-27)
+
+### Diagnosis
+
+The persisted `AI Engineer Intern` posting is job `7606` for the canonical employer
+`Toshiba Global Commerce`, with canonical domain `commerce.toshiba.com`. Two complete Apollo runs
+were created eleven seconds apart with the same pre-repair fingerprint. Each searched 11 records
+and enriched eight, but no candidate cleared the existing `people-v2` category and company
+confidence gates. The second run was not a cache hit, demonstrating that successful empty results
+were not durable cache entries. No thresholds were lowered.
+
+The category funnel showed that manager discovery was overly AI-title-specific and did not include
+the generic software/engineering management titles that own many applied-AI internships. Most
+enriched search records also failed canonical-company confidence, so they remain suppressed. The
+exact-company path must not silently substitute a broader corporate-domain search.
+
+The job and branding rows did contain a logo URL, but it was Google's favicon service for the
+canonical subdomain and rendered a generic globe. The official canonical site publishes an
+employer wordmark in its own HTML metadata. The repair is a generic canonical-domain metadata
+resolver, not a company-name special case.
+
+### Decisions and implementation
+
+- A `people-discovery-v3` fingerprint includes the scoring version and discovery strategy.
+  Pre-versioned results are stale and refreshable only for the selected job.
+- A fresh completed no-match run is now a durable per-user/job/fingerprint cache entry. It is
+  returned before budgets, rate limiting, locking, or provider construction, so reopening and
+  repeated activation cannot create another paid search.
+- Exact discovery remains canonical-company-only. A new explicit `POST
+  /jobs/{job_id}/people/broaden` action is eligible only after a current exact no-match. Its title
+  groups are bounded and category-specific; an evidence-backed parent domain may be considered
+  only in this user-triggered path.
+- Machine-learning manager coverage now includes common software/engineering manager and director
+  titles, with Apollo seniority filters aligned to the title group. Scoring and confidence
+  thresholds are unchanged.
+- Funnel diagnostics distinguish discovery strategy, title broadening, related-company attempts,
+  enrichment budget exhaustion, and category-specific rejection reasons. The UI renders
+  category-specific empty states instead of a generic failure.
+- Company branding keeps canonical domain, logo URL, provenance, verification status, and
+  timestamp in the existing cache. A bounded SSRF-safe background resolver reads only the
+  canonical HTTPS site's HTML, accepts only same-domain logo/icon assets, validates the image, and
+  stores `official_site` provenance. Job rendering performs no metadata lookup.
+- The frontend accepts only safe HTTPS non-aggregator persisted logo URLs, reserves a fixed logo
+  box, loads lazily, tries the existing safe proxy and persisted source, then renders a generated
+  company mark. It no longer guesses `/favicon.ico` on every card render.
+
+### Rollout and rollback
+
+Run the targeted branding backfill with `--company` and `--discover-official`; it updates only the
+selected canonical company and its jobs. Roll back branding by restoring the prior cached row and
+job URL. Roll back People behavior by reverting the v3 fingerprint/broaden route; no schema change
+or migration is required. The Redis coalescing lock and provider circuit breaker remain enabled.
+
+### Validation checklist
+
+- [x] Focused People backend and branding/logo tests: 106 passed.
+- [x] Complete API test suite: 618 passed.
+- [x] Focused People/company-logo frontend tests: 33 passed.
+- [x] Complete web tests (195), lint, typecheck, and production Docker build.
+- [x] Chromium People E2E: 3 passed, including one exact action, one guarded broaden action, cached reopen,
+  disabled email discovery, and canonical logo rendering.
+- [x] API, worker, scheduler, and web rebuild/recreate; migration at
+  `0021_people_funnel_diagnostics`; Compose validation and health/readiness passed.
+- [x] Targeted canonical-domain logo backfill resolved one company. Job `7606` now uses a verified
+  `official_site` asset on `commerce.toshiba.com`; the safe proxy returns HTTP 200 `image/png`.
+- [x] After explicit approval, one exact-company Apollo People Search was made for job `7606`,
+  `commerce.toshiba.com`, and one engineering-management title group. It returned 17 raw records;
+  eight were enriched in one bounded bulk operation, zero passed the unchanged gates, and eight
+  credits were reported. Suppressions were `weak_company_confidence` (8),
+  `below_relevance_threshold` (8), and `enrichment_budget_exhausted` (9). Current-version run `6`
+  is complete with an honest no-match state. Two subsequent cache reads constructed no provider
+  and created no additional run or Apollo request.
+- [x] `git diff --check` and final worktree status inspected; no commit created.
+
 ## Precision-preserving recall improvement (2026-07-27)
 
 Status: implementation and offline validation complete; live provider validation is pending

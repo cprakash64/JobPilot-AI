@@ -51,6 +51,14 @@ async def discover_people(
     return await discover(db, user, job_id)
 
 
+@router.post("/broaden")
+async def broaden_people(
+    job_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    _require_enabled(user)
+    return await discover(db, user, job_id, strategy="broadened")
+
+
 @router.get("/diagnostics")
 def get_people_diagnostics(
     job_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)

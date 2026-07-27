@@ -297,7 +297,8 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
   await expect(page.getByText(/Find recruiters and referral candidates/)).toBeVisible();
   await page.getByRole("button", { name: "Find people" }).click();
   await expect(page.getByText("Rita Recruiter")).toBeVisible();
-  await expect(page.getByText("No sufficiently reliable matches in this category.")).toHaveCount(2);
+  await expect(page.getByText("No potential manager met JobPilot’s confidence threshold.")).toBeVisible();
+  await expect(page.getByText("No relevant employee met JobPilot’s referral threshold.")).toBeVisible();
 
   await page.getByRole("button", { name: /Find work email/ }).click();
   await expect(page.getByText(/Verified work email: rita@acme.example/)).toBeVisible();
@@ -322,4 +323,115 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
 
   // Private recommendation state is always requested with this browser user's token.
   expect(getCount).toBeGreaterThanOrEqual(3);
+});
+
+test("Toshiba no-result state broadens once and keeps its canonical logo", async ({ page }) => {
+  const jobId = 7606;
+  let exactSearches = 0;
+  let broadenedSearches = 0;
+  let state: "not_started" | "no_reliable_matches" | "complete" = "not_started";
+  const toshibaJob = {
+    id: jobId,
+    title: "AI Engineer Intern",
+    company: "Toshiba Global Commerce",
+    company_domain: "commerce.toshiba.com",
+    company_logo_url: "https://commerce.toshiba.com/images/tgcs/logo.png",
+    source: "simplifyjobs",
+    location: "Durham, NC",
+    workplace_type: "hybrid",
+    employment_type: "internship",
+    seniority_level: "intern",
+    posted_at: "2026-07-25T12:00:00Z",
+    discovered_at: "2026-07-25T12:00:00Z",
+    application_url: "https://job-boards.greenhouse.io/toshiba/jobs/7606",
+    source_url: "https://job-boards.greenhouse.io/toshiba/jobs/7606",
+    description_clean: "Build AI-enabled commerce software.",
+    required_skills: ["Python"],
+    preferred_skills: [],
+    responsibilities: ["Develop reliable AI services."],
+    match: null
+  };
+  const peoplePayload = () => ({
+    ...payload(state === "complete" ? basePerson : null, state),
+    warnings: [],
+    controls: { email_discovery: false, outreach_drafting: true },
+    search_scope: {
+      company_scope: "Hiring company only",
+      location_filter: "soft",
+      parent_company_matches_included: false,
+      exact_company_search_completed: state !== "not_started",
+      related_company_search_attempted: state === "complete",
+      broaden_eligible: state === "no_reliable_matches",
+      broaden_attempted: state === "complete",
+      refresh_eligible: false
+    }
+  });
+
+  await page.addInitScript(() => localStorage.setItem("jobpilot_token", "synthetic-e2e-token"));
+  await page.route("https://commerce.toshiba.com/images/tgcs/logo.png", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZSPcAAAAASUVORK5CYII=",
+        "base64"
+      )
+    });
+  });
+  await page.route(`${API}/jobs**`, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === "/jobs") {
+      return json(route, {
+        profile_complete: true,
+        criteria: { role_queries: [], skills: [], seniority_targets: [] },
+        profile_filters: {
+          target_roles: [],
+          target_levels: [],
+          preferred_locations: [],
+          work_preference: "hybrid"
+        },
+        jobs: [toshibaJob]
+      });
+    }
+    if (request.method() === "GET" && path === `/jobs/${jobId}/people`) {
+      return json(route, peoplePayload());
+    }
+    if (request.method() === "POST" && path === `/jobs/${jobId}/people/discover`) {
+      exactSearches += 1;
+      state = "no_reliable_matches";
+      return json(route, peoplePayload());
+    }
+    if (request.method() === "POST" && path === `/jobs/${jobId}/people/broaden`) {
+      broadenedSearches += 1;
+      state = "complete";
+      return json(route, peoplePayload());
+    }
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/jobs");
+  const card = page.getByRole("article").filter({ hasText: "AI Engineer Intern" });
+  await expect(card.getByRole("img", { name: "Toshiba Global Commerce logo" })).toHaveAttribute(
+    "src",
+    "https://commerce.toshiba.com/images/tgcs/logo.png"
+  );
+  expect(exactSearches).toBe(0);
+
+  await card.getByRole("button", { name: "Find people" }).click();
+  await expect(card.getByText("No reliable recruiting contact met JobPilot’s threshold.")).toBeVisible();
+  expect(exactSearches).toBe(1);
+
+  await card.getByRole("button", { name: "Broaden search" }).dblclick();
+  await expect(card.getByText("Rita Recruiter")).toBeVisible();
+  expect(broadenedSearches).toBe(1);
+
+  await page.reload();
+  await card.getByRole("button", { name: "View details" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "AI Engineer Intern" }).getByText("Rita Recruiter")
+  ).toBeVisible();
+  expect(exactSearches).toBe(1);
+  expect(broadenedSearches).toBe(1);
+  expect(await card.getByRole("button", { name: "Find work email" }).count()).toBe(0);
 });

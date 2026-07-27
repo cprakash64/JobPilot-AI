@@ -65,3 +65,5 @@ generated/
 # Finder's "file 2.py" copies caused a stale duplicate module to linger.
 * 2.*
 * copy.*
+
+.pnpm-store/

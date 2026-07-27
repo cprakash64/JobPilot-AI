@@ -78,8 +78,13 @@ _MANAGER_TITLES = {
     "machine_learning": [
         "AI Engineering Manager",
         "Machine Learning Engineering Manager",
+        "Software Engineering Manager",
+        "Engineering Manager",
+        "Software Development Manager",
         "Applied AI Manager",
         "Director of AI",
+        "Director of Software Engineering",
+        "Director of Engineering",
         "Director of Machine Learning",
         "Head of Engineering",
         "Engineering Lead",
@@ -178,9 +183,15 @@ def manager_title_groups(role_family: str | None, base_title: str) -> list[Title
         role_family or "",
         [f"{base_title} Manager", "Department Manager", "Director", "Head"],
     )
+    managers = [title for title in titles if "manager" in normalize_title(title).split()]
+    leadership = [title for title in titles if title not in managers]
     return [
-        TitleGroup("manager", titles[:4], ["manager"]),
-        TitleGroup("leadership", titles[4:] or titles[-2:], ["director", "head", "vp"]),
+        TitleGroup("manager", managers or titles[:2], ["manager"]),
+        TitleGroup(
+            "leadership",
+            leadership or titles[-2:],
+            ["director", "head", "vp"],
+        ),
     ]
 
 

@@ -38,7 +38,11 @@ function response(overrides = {}) {
       company_scope: "Hiring company only",
       location_filter: "soft",
       parent_company_matches_included: false,
-      refresh_eligible: false
+      refresh_eligible: false,
+      exact_company_search_completed: true,
+      related_company_search_attempted: false,
+      broaden_eligible: false,
+      broaden_attempted: false
     },
     controls: { email_discovery: true, outreach_drafting: true },
     ...overrides
@@ -182,7 +186,7 @@ describe("PeopleWhoCanHelp", () => {
           potential_referrers: []
         }
       }),
-      /No sufficiently reliable matches were found/
+      /No reliable recruiting contact met JobPilot’s threshold/
     ],
     [
       "provider unavailable",
@@ -206,7 +210,72 @@ describe("PeopleWhoCanHelp", () => {
     render(<PeopleWhoCanHelp jobId={7} />);
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(screen.queryByText("Rita Recruiter")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Find people" })).toBeInTheDocument();
+    if (payload.status === "no_reliable_matches") {
+      expect(screen.queryByRole("button", { name: "Find people" })).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByRole("button", { name: "Find people" })).toBeInTheDocument();
+    }
+  });
+
+  it("runs one controlled broaden request only after an eligible user action", async () => {
+    const noMatch = response({
+      status: "no_reliable_matches",
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      },
+      search_scope: {
+        company_scope: "Hiring company only",
+        location_filter: "soft",
+        parent_company_matches_included: false,
+        refresh_eligible: false,
+        exact_company_search_completed: true,
+        related_company_search_attempted: false,
+        broaden_eligible: true,
+        broaden_attempted: false
+      }
+    });
+    const broadened = response({
+      search_scope: {
+        company_scope: "Hiring company and evidence-backed related domain",
+        location_filter: "soft",
+        parent_company_matches_included: true,
+        refresh_eligible: false,
+        exact_company_search_completed: true,
+        related_company_search_attempted: true,
+        broaden_eligible: false,
+        broaden_attempted: true
+      }
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => noMatch,
+        text: async () => JSON.stringify(noMatch)
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => broadened,
+        text: async () => JSON.stringify(broadened)
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PeopleWhoCanHelp jobId={7606} />);
+
+    expect(
+      await screen.findByText("No reliable recruiting contact met JobPilot’s threshold.")
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const button = screen.getByRole("button", { name: "Broaden search" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "http://localhost:8000/jobs/7606/people/broaden",
+      expect.objectContaining({ method: "POST" })
+    );
   });
 
   it("keeps the section visible and reports an API failure", async () => {
@@ -273,7 +342,7 @@ describe("PeopleWhoCanHelp", () => {
     expect(screen.getByText("Rita Recruiter")).toBeInTheDocument();
     expect(screen.getByText(/responsibility for this opening has not been confirmed/i)).toBeInTheDocument();
     expect(screen.getByText("No potential manager met JobPilot’s confidence threshold.")).toBeInTheDocument();
-    expect(screen.getByText("No sufficiently reliable referral candidate was found yet.")).toBeInTheDocument();
+    expect(screen.getByText("No relevant employee met JobPilot’s referral threshold.")).toBeInTheDocument();
     expect(screen.getByText("Scope: Hiring company only")).toBeInTheDocument();
     expect(screen.getByText("Location used as a soft signal")).toBeInTheDocument();
     expect(screen.getByText("Related-company matches were not included")).toBeInTheDocument();
@@ -554,7 +623,7 @@ describe("PeopleWhoCanHelpSummary", () => {
           potential_referrers: []
         }
       }),
-      "No sufficiently reliable matches were found."
+      "No reliable recruiting contact met JobPilot’s threshold."
     ]
   ])("shows the %s state after explicit expansion", async (_label, payload, expected) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
