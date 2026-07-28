@@ -1,15 +1,17 @@
 <div align="center">
 
+<br />
+
 # 🧭 JobPilot AI
 
-### Discover better jobs. Build stronger applications. Reach the right people.
+### Your intelligent command center for the modern job search
 
-JobPilot AI is an end-to-end job search workspace that helps candidates discover fresh roles, understand their fit, generate tailored application materials, autofill common ATS forms, find relevant people at the hiring company, and track every application in one place.
+**Discover fresh opportunities, understand your fit, tailor every application, reach the right people, and track everything from one place.**
 
 <br />
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-Next.js-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Python](https://img.shields.io/badge/Python-FastAPI-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)](https://nextjs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Python-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Database-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-Cache-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
@@ -17,100 +19,154 @@ JobPilot AI is an end-to-end job search workspace that helps candidates discover
 
 <br />
 
-**Discover · Match · Tailor · Apply · Connect · Track**
+[Features](#-everything-you-need-in-one-workflow) •
+[How It Works](#-how-jobpilot-ai-works) •
+[Architecture](#-architecture) •
+[Getting Started](#-getting-started) •
+[Security](#-privacy-security-and-responsible-automation) •
+[Roadmap](#-roadmap)
+
+<br />
+
+> **JobPilot AI turns a scattered job search into one focused workflow.**
+
+<br />
 
 </div>
 
 ---
 
-## ✨ Why JobPilot AI?
+## 🌟 What is JobPilot AI?
 
-Job searching is fragmented. Candidates jump between job boards, resume tools, spreadsheets, networking platforms, and repetitive application forms.
+Most job seekers use five or six disconnected tools:
 
-JobPilot AI brings those workflows together:
+- job boards to find openings
+- spreadsheets to track progress
+- resume tools to tailor applications
+- browser extensions to fill forms
+- networking platforms to find recruiters and referrals
+- notes and reminders to follow up
 
-| Step | JobPilot AI helps you |
-|---|---|
-| 🔎 **Discover** | Find recent jobs from official and public application sources |
-| 🎯 **Match** | Score each job against your profile and explain the fit |
-| 📝 **Tailor** | Generate ATS-friendly resumes and cover letters for the role |
-| ⚡ **Apply** | Autofill common application forms through the browser extension |
-| 🤝 **Connect** | Find likely recruiters, potential hiring managers, and referral candidates |
-| 📊 **Track** | Keep saved, in-progress, and submitted applications organized |
+**JobPilot AI brings those workflows together.**
+
+It helps candidates move from discovery to application with more context, better organization, and less repetitive work.
 
 ---
 
-## 🚀 Core Features
+## ✨ Everything You Need in One Workflow
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
-### 🔍 Fresh Job Discovery
+### 🔎 Discover Fresh Jobs
 
-- Search recent roles from supported public and official sources
-- Filter by role, workplace type, fit score, and posting date
+Find recent roles from supported public and official application sources.
+
+- Filter by role, workplace, fit, and recency
+- Prefer official application links
 - Deduplicate repeated listings
-- Preserve official application links
-- Rank jobs using profile-aware matching
+- Keep only relevant opportunities
+- Refresh results without losing your progress
 
 </td>
 <td width="50%" valign="top">
 
-### 🎯 Explainable Fit Scores
+### 🎯 Understand Your Fit
 
-- Match titles, skills, experience, projects, and preferences
-- Show why a role matches
-- Highlight the strongest resume angle
-- Use clear fit bands instead of a black-box recommendation
+See more than a generic match score.
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 📄 Tailored Application Materials
-
-- Generate ATS-friendly resumes
-- Create role-specific cover letters
-- Keep education, projects, experience, and skills structured
-- Avoid duplicated resume sections
-- Preserve user review before use
-
-</td>
-<td width="50%" valign="top">
-
-### ⚡ Browser Autofill
-
-- Reuse one profile across applications
-- Fill common text fields, dropdowns, and application questions
-- Support multiple ATS patterns
-- Keep the candidate in control of final review and submission
+- Profile-aware job scoring
+- Clear fit bands
+- Explainable match reasons
+- Suggested resume angle
+- Role, skill, and experience alignment
 
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
 
-### 🤝 People Who Can Help
+### 📄 Tailor Every Application
 
-- Find likely recruiters
-- Identify potential hiring managers
-- Surface relevant employees who may be good referral candidates
-- Validate exact-company employment evidence
-- Keep separate recruiter, manager, and referral search coverage
-- Cache results and enforce provider budgets
+Create job-specific application materials without rebuilding them from scratch.
+
+- ATS-friendly resumes
+- Role-specific cover letters
+- Structured skills and experience
+- Relevant project selection
+- User review before use
 
 </td>
 <td width="50%" valign="top">
 
-### 📬 Grounded Outreach
+### ⚡ Autofill Application Forms
 
-- Create distinct recruiter, manager, and referral messages
-- Generate email, LinkedIn message, and connection-note formats
-- Use only supported profile, job, and recipient facts
-- Keep every draft editable
-- Never send outreach automatically
+Use one profile across common ATS workflows.
+
+- Fill text fields
+- Handle common dropdowns
+- Reuse profile answers
+- Support multiple application patterns
+- Keep final review and submission under user control
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🤝 Find People Who Can Help
+
+Go beyond anonymous applications.
+
+- Likely recruiters
+- Potential hiring managers
+- Relevant referral candidates
+- Exact-company employment checks
+- Separate category coverage
+- Cached, budget-aware provider calls
+
+</td>
+<td width="50%" valign="top">
+
+### 💬 Draft Better Outreach
+
+Generate grounded outreach that sounds personal, not generic.
+
+- Recruiter messages
+- Hiring-manager messages
+- Referral-candidate messages
+- Email and LinkedIn formats
+- Editable drafts
+- No automatic sending
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 📊 Track Every Application
+
+Keep your job search organized.
+
+- Saved roles
+- In-progress applications
+- Submitted applications
+- Status changes
+- Centralized application history
+
+</td>
+<td width="50%" valign="top">
+
+### 🛡️ Keep Control
+
+Automation should assist, not take over.
+
+- No automatic application submission
+- No automatic outreach
+- No guessed email addresses
+- No LinkedIn scraping
+- Clear confidence and limitation states
 
 </td>
 </tr>
@@ -118,49 +174,141 @@ JobPilot AI brings those workflows together:
 
 ---
 
-## 🧩 Product Flow
+## 🚀 Why It Feels Different
+
+| Traditional job search | JobPilot AI |
+|---|---|
+| Search across disconnected sites | One searchable discovery workspace |
+| Guess whether a job is a fit | Explainable profile-aware fit scoring |
+| Rewrite materials manually | Tailored resume and cover-letter workflows |
+| Fill the same fields repeatedly | Browser-assisted autofill |
+| Apply without knowing anyone | Recruiter, manager, and referral discovery |
+| Track jobs in spreadsheets | Built-in application tracker |
+| Send generic outreach | Grounded, recipient-aware drafts |
+
+---
+
+## 🧩 How JobPilot AI Works
 
 ```mermaid
 flowchart LR
-    A[Create your profile] --> B[Discover fresh jobs]
-    B --> C[Review fit score]
-    C --> D[Generate resume and cover letter]
-    D --> E[Autofill application]
+    A[Build your profile] --> B[Discover fresh jobs]
+    B --> C[Review fit and match reasons]
+    C --> D[Generate tailored materials]
+    D --> E[Autofill the application]
     C --> F[Find people who can help]
     F --> G[Draft grounded outreach]
-    E --> H[Track application]
+    E --> H[Track the application]
     G --> H
 ```
+
+### The workflow
+
+1. **Create your profile**  
+   Add your experience, projects, skills, education, preferences, and application answers.
+
+2. **Discover recent jobs**  
+   Search fresh opportunities and narrow them by role, workplace, fit, and posting date.
+
+3. **Understand the match**  
+   Review fit score, match reasons, and the strongest angle for your application.
+
+4. **Tailor your materials**  
+   Generate a role-specific resume and cover letter.
+
+5. **Apply faster**  
+   Use the browser extension to fill common application fields.
+
+6. **Find relevant people**  
+   Research likely recruiters, potential managers, and employees who may be good referral candidates.
+
+7. **Track progress**  
+   Keep every saved, active, and submitted application organized.
 
 ---
 
 ## 🤝 People Who Can Help
 
-The networking workflow is designed for **precision before volume**.
+The networking engine is designed around **precision before volume**.
 
 JobPilot AI performs independently bounded searches for:
 
-- **Likely recruiters**
-- **Potential hiring managers**
-- **Potential referral candidates**
+<table>
+<tr>
+<td width="33%" align="center">
+
+### 👤 Recruiters
+
+Talent acquisition, technical recruiting, university recruiting, and related hiring roles.
+
+</td>
+<td width="33%" align="center">
+
+### 🧑‍💼 Potential Managers
+
+Engineering leaders and relevant function managers who may be connected to the role.
+
+</td>
+<td width="33%" align="center">
+
+### 🧑‍💻 Referral Candidates
+
+Relevant individual contributors working in a closely related function.
+
+</td>
+</tr>
+</table>
 
 The system then:
 
-1. Matches the exact hiring company
-2. Reviews current-employment evidence
-3. Suppresses former, conflicting, stale, or related-company-only records
-4. Scores role and category relevance
-5. Places each person in their strongest category
-6. Reuses cached results without charging for repeated card opens
+```mermaid
+flowchart TD
+    A[Exact-company people search] --> B[Normalize provider evidence]
+    B --> C[Validate current employment]
+    C --> D{Eligible?}
+    D -- No --> E[Suppress with safe reason]
+    D -- Yes --> F[Score category relevance]
+    F --> G[Deduplicate identities]
+    G --> H[Assign strongest category]
+    H --> I[Persist and cache results]
+```
 
-### Data and outreach safeguards
+### Built-in safeguards
 
-- PDL is used for active people discovery
-- LinkedIn URLs are displayed only when supplied by a licensed provider
-- JobPilot AI does not scrape LinkedIn
-- Email discovery is explicitly user-triggered
-- Email patterns are never guessed
-- Outreach drafts are grounded and never sent automatically
+- Exact-company checks
+- Current-employment evidence
+- Former-employee suppression
+- Conflicting-employment suppression
+- Related-company separation
+- Category-specific search quotas
+- Request coalescing and caching
+- Provider budget limits
+- Durable usage accounting
+- Read-only card reopen behavior
+
+---
+
+## 🧠 Grounded Outreach
+
+Outreach drafts are created for the person’s likely relationship to the job.
+
+| Contact type | Draft objective |
+|---|---|
+| Recruiter | Make the application easy to understand and review |
+| Potential hiring manager | Show relevant experience and ask a focused team question |
+| Referral candidate | Ask for perspective before requesting help |
+
+JobPilot AI does **not** invent:
+
+- mutual connections
+- shared interests
+- recruiter ownership
+- hiring-team membership
+- willingness to refer
+- prior conversations
+- unpublished knowledge
+
+Every draft is editable and remains under the user’s control.
 
 ---
 
@@ -168,12 +316,12 @@ The system then:
 
 ```mermaid
 flowchart TB
-    subgraph Client
+    subgraph Experience
         WEB[Next.js Web App]
         EXT[Browser Extension]
     end
 
-    subgraph Backend
+    subgraph Application
         API[FastAPI API]
         WORKER[Background Worker]
         SCHEDULER[Scheduler]
@@ -184,7 +332,7 @@ flowchart TB
         REDIS[(Redis)]
     end
 
-    subgraph Providers
+    subgraph External Services
         JOBS[Job Sources]
         PDL[People Data Labs]
         HUNTER[Hunter]
@@ -193,28 +341,30 @@ flowchart TB
 
     WEB --> API
     EXT --> API
+
     API --> POSTGRES
     API --> REDIS
+
     WORKER --> POSTGRES
     WORKER --> REDIS
     SCHEDULER --> WORKER
+
     API --> JOBS
     API --> PDL
     API --> HUNTER
     API --> AI
 ```
 
-### Main stack
+### Technology stack
 
-- **Frontend:** Next.js, React, TypeScript
-- **Backend:** FastAPI, Python, Pydantic
-- **Database:** PostgreSQL
-- **Caching and coordination:** Redis
-- **Infrastructure:** Docker Compose
-- **Browser automation:** Chrome extension
-- **People discovery:** People Data Labs
-- **Work-email verification:** Hunter
-- **Application intelligence:** AI-assisted matching and generation
+<table>
+<tr>
+<td width="25%" align="center"><strong>Frontend</strong><br />Next.js<br />React<br />TypeScript</td>
+<td width="25%" align="center"><strong>Backend</strong><br />FastAPI<br />Python<br />Pydantic</td>
+<td width="25%" align="center"><strong>Data</strong><br />PostgreSQL<br />Redis<br />Alembic</td>
+<td width="25%" align="center"><strong>Infrastructure</strong><br />Docker Compose<br />Workers<br />Scheduler</td>
+</tr>
+</table>
 
 ---
 
@@ -222,13 +372,14 @@ flowchart TB
 
 ```text
 JobPilot-AI/
+├── README.md
 └── jobpilot-ai/
     ├── apps/
-    │   ├── api/          # FastAPI backend, models, routes, migrations, tests
-    │   ├── web/          # Next.js product UI
-    │   └── extension/    # Browser autofill extension
-    ├── docs/             # Architecture, privacy, providers, plans, reports
-    ├── evaluation/       # People-recommendation evaluation tooling
+    │   ├── api/             # FastAPI backend, models, migrations, tests
+    │   ├── web/             # Next.js product interface
+    │   └── extension/       # Browser autofill extension
+    ├── docs/                # Architecture, privacy, providers, plans, reports
+    ├── evaluation/          # Recommendation evaluation and review tooling
     ├── docker-compose.yml
     ├── .env.example
     └── Makefile
@@ -238,59 +389,91 @@ JobPilot-AI/
 
 ## ⚙️ Getting Started
 
-### Prerequisites
+<details open>
+<summary><strong>1. Prerequisites</strong></summary>
+
+<br />
+
+Install:
 
 - Git
 - Docker Desktop
 - Node.js 20+
 - Python 3.11+ for local backend development
-- Chrome or a Chromium-based browser for the extension
+- Chrome or Chromium for extension development
 
-### 1. Clone the repository
+</details>
+
+<details>
+<summary><strong>2. Clone the repository</strong></summary>
+
+<br />
 
 ```bash
 git clone https://github.com/cprakash64/JobPilot-AI.git
 cd JobPilot-AI/jobpilot-ai
 ```
 
-### 2. Create your environment file
+</details>
+
+<details>
+<summary><strong>3. Configure the environment</strong></summary>
+
+<br />
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in the required local configuration and provider credentials described in `.env.example`.
+Add the local settings and provider credentials described in `.env.example`.
 
-> Never commit `.env`, API keys, access tokens, provider payloads, or user data.
+> Never commit `.env`, API keys, tokens, provider payloads, or user data.
 
-### 3. Start the application
+</details>
+
+<details>
+<summary><strong>4. Start the application</strong></summary>
+
+<br />
 
 ```bash
 docker compose up -d --build
 ```
 
-### 4. Apply database migrations
+</details>
+
+<details>
+<summary><strong>5. Apply database migrations</strong></summary>
+
+<br />
 
 ```bash
 docker compose exec api alembic upgrade head
 ```
 
-### 5. Confirm readiness
+</details>
+
+<details>
+<summary><strong>6. Check readiness</strong></summary>
+
+<br />
 
 ```bash
 docker compose ps
 curl -sS http://localhost:8000/readyz
 ```
 
-The web application is available at:
+Open the web app at:
 
 ```text
 http://localhost:3000
 ```
 
+</details>
+
 ---
 
-## 🧪 Development and Validation
+## 🧪 Development
 
 ### Backend
 
@@ -308,21 +491,23 @@ npm run typecheck
 npm run build
 ```
 
-### Useful repository checks
+### Repository checks
 
 ```bash
 git diff --check
 docker compose config
 ```
 
-The project includes automated coverage for:
+### Covered areas
 
-- Job discovery and fit scoring
+- Job discovery and matching
+- Fit-score explanations
 - Company branding and logo safety
 - Profile and tracker workflows
-- People discovery and employment validation
-- Provider budgets, caching, and usage accounting
-- Frontend rendering and error states
+- People discovery and category ranking
+- Current-employment validation
+- Provider budgets and usage accounting
+- Frontend empty, loading, and error states
 - Browser extension behavior
 - Database migrations and readiness
 
@@ -330,20 +515,31 @@ The project includes automated coverage for:
 
 ## 🔐 Privacy, Security, and Responsible Automation
 
-JobPilot AI is built around user control.
+JobPilot AI is designed to assist the user without pretending certainty or removing control.
 
-- Applications are reviewed by the user before submission
-- Outreach is drafted, not automatically sent
-- Work-email lookup is user-triggered
-- LinkedIn is not scraped
-- Email addresses are not guessed
-- Provider calls are bounded, cached, and budgeted
-- Verified sensitive values are encrypted where retained
-- Secrets are loaded through environment configuration
-- Provider and application failures are represented honestly
-- Old or conflicting employment evidence is suppressed rather than presented as fact
+### Privacy principles
 
-Read more in:
+- User-triggered work-email lookup
+- No guessed email patterns
+- No LinkedIn scraping
+- No automatic outreach
+- No automatic application submission
+- Encrypted retention for supported sensitive fields
+- Provider call limits and caching
+- Honest provider and confidence states
+- Suppression of stale or conflicting employment data
+
+### Security principles
+
+- Environment-based secret management
+- SSRF-aware external fetching
+- Safe redirect handling
+- Content-type and response-size validation
+- Database migration checks
+- Provider usage accounting
+- Bounded retry and circuit-breaker behavior
+
+Read more:
 
 - `docs/people-data-privacy.md`
 - `docs/people-data-providers.md`
@@ -352,22 +548,43 @@ Read more in:
 
 ---
 
+## 📌 Current Status
+
+| Area | Status |
+|---|---|
+| Job discovery | ✅ Implemented |
+| Fit scoring | ✅ Implemented |
+| Resume and cover-letter workflow | ✅ Implemented |
+| Application tracker | ✅ Implemented |
+| Browser autofill foundation | ✅ Implemented |
+| Recruiter discovery | ✅ Implemented |
+| Potential manager discovery | ✅ Implemented |
+| Referral-candidate discovery | ✅ Implemented |
+| Employment-evidence validation | ✅ Implemented |
+| PDL usage, caching, and budgets | ✅ Implemented |
+| Hunter live rollout | 🟡 Controlled validation pending |
+| Wider beta evaluation | 🟡 In progress |
+| Production deployment | 🟡 Planned |
+
+---
+
 ## 🗺️ Roadmap
 
-- [x] Profile-based job matching
-- [x] Fresh job discovery
-- [x] Fit-score explanations
-- [x] Resume and cover-letter generation
+- [x] Profile-driven job discovery
+- [x] Explainable fit scoring
+- [x] Tailored resume generation
+- [x] Tailored cover-letter generation
 - [x] Application tracking
 - [x] Browser autofill foundation
 - [x] Recruiter, manager, and referral discovery
-- [x] Employment-evidence validation
-- [x] Provider budgeting, caching, and durable usage accounting
-- [ ] Wider ATS autofill coverage
-- [ ] Controlled Hunter email validation rollout
-- [ ] Broader closed-beta evaluation
-- [ ] More provider-backed profile coverage
-- [ ] Production deployment and monitoring
+- [x] Exact-company employment validation
+- [x] Provider caching and durable usage accounting
+- [x] Category-specific referral coverage
+- [ ] Controlled Hunter email validation
+- [ ] Wider ATS compatibility
+- [ ] Closed-beta evaluation
+- [ ] Production monitoring and deployment
+- [ ] Additional licensed data-provider coverage
 
 ---
 
@@ -375,35 +592,57 @@ Read more in:
 
 Contributions are welcome.
 
-1. Fork the repository
-2. Create a feature branch
-3. Make focused changes
-4. Add or update tests
-5. Run validation locally
-6. Open a pull request with a clear description
-
 ```bash
 git checkout -b feature/your-feature
+```
+
+Then:
+
+1. Make focused changes
+2. Add or update tests
+3. Run validation locally
+4. Commit with a clear message
+5. Open a pull request
+
+```bash
+git add .
 git commit -m "feat: describe your change"
 git push origin feature/your-feature
 ```
 
-For major product or architecture changes, open an issue first so the approach can be discussed.
+For major product or architecture changes, open an issue first.
 
 ---
 
-## ⚠️ Project Status
+## ⚠️ Important Note
 
-> JobPilot AI is under active development. Core workflows are implemented and have been validated internally, but provider coverage and application-site behavior can vary.
+JobPilot AI is under active development.
 
-JobPilot AI assists with job discovery and application preparation. Users remain responsible for reviewing the accuracy of their profile, materials, outreach, and submitted applications.
+Provider coverage, application-site behavior, and role data can vary. Users remain responsible for reviewing:
+
+- profile information
+- match explanations
+- generated materials
+- contact recommendations
+- outreach drafts
+- submitted applications
+
+JobPilot AI is an assistant—not an autonomous applicant.
 
 ---
 
 <div align="center">
 
-### Built to make job searching more focused, transparent, and human.
+<br />
 
-**JobPilot AI** — from finding the role to finding the right person.
+## Built for job seekers who want more clarity and less busywork
+
+### **Discover better roles. Apply with confidence. Reach the right people.**
+
+<br />
+
+**JobPilot AI**
+
+<br />
 
 </div>
