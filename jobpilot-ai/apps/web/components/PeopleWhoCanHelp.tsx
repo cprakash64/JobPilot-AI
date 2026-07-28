@@ -95,7 +95,9 @@ function providerFailureMessage(data: PeopleResponse): string {
     provider_rate_limited: "The people data provider rate limit has been reached.",
     provider_timeout: "The people search provider took too long to respond.",
     provider_circuit_open: "People search is temporarily paused after repeated provider failures.",
-    provider_schema_error: "The people provider returned an unsupported response."
+    provider_schema_error: "The people provider returned an unsupported response.",
+    recommendation_commit_failed:
+      "JobPilot found potential contacts but could not save the results. No additional search will run unless you retry."
   };
   const message = messages[data.availability_reason ?? ""] ??
     "The professional data provider is temporarily unavailable. You can safely retry later.";
@@ -349,7 +351,10 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
     (
       data?.status === "not_started" ||
       data?.status === "stale" ||
-      (data?.status === "provider_unavailable" && data.retry_eligible !== false)
+      (
+        ["provider_unavailable", "persistence_error"].includes(data?.status ?? "") &&
+        data?.retry_eligible !== false
+      )
     );
   const canBroaden = Boolean(
     data?.status === "no_reliable_matches" &&
@@ -387,6 +392,8 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
                 ? "Broaden search"
                 : data?.status === "stale"
                   ? "Refresh people"
+                  : ["provider_unavailable", "persistence_error"].includes(data?.status ?? "")
+                    ? "Retry discovery"
                   : "Find people"}
           </Button>
         ) : null}
@@ -410,7 +417,7 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
             ) : null}
           </div>
         ) : null}
-        {data?.status !== "provider_unavailable" ? data?.warnings.map((warning) => (
+        {!["provider_unavailable", "persistence_error"].includes(data?.status ?? "") ? data?.warnings.map((warning) => (
           <p key={warning} className="mb-2 text-sm text-amber-800">{warning}</p>
         )) : null}
         {data?.status === "not_started" ? (
@@ -430,6 +437,11 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
           </div>
         ) : null}
         {data?.status === "provider_unavailable" ? (
+          <p className="text-sm text-[var(--text-muted)]">
+            {providerFailureMessage(data)}
+          </p>
+        ) : null}
+        {data?.status === "persistence_error" ? (
           <p className="text-sm text-[var(--text-muted)]">
             {providerFailureMessage(data)}
           </p>
@@ -602,6 +614,18 @@ export function PeopleWhoCanHelpSummary({
             />
           ) : null}
           {data?.status === "provider_unavailable" && data.retry_eligible === false ? (
+            <p className="text-sm text-[var(--text-muted)]">
+              {providerFailureMessage(data)}
+            </p>
+          ) : null}
+          {data?.status === "persistence_error" && data.retry_eligible !== false ? (
+            <StateWithRetry
+              text={providerFailureMessage(data)}
+              onRetry={() => void controller.discover()}
+              label="Retry discovery"
+            />
+          ) : null}
+          {data?.status === "persistence_error" && data.retry_eligible === false ? (
             <p className="text-sm text-[var(--text-muted)]">
               {providerFailureMessage(data)}
             </p>

@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 # ruff: noqa: E501
+import hashlib
 import logging
 import re
 import time
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import httpx
 
 from app.core.config import settings
+from app.people.bulk_capability import (
+    bulk_capability_state,
+    record_bulk_request_level_422,
+    record_bulk_supported,
+)
+from app.people.provider_usage import (
+    ProviderUsageContext,
+    ProviderUsageRecorder,
+    SessionFactory,
+    operation_idempotency_key,
+    reported_credits,
+)
 from app.people.schemas import (
     EmailVerificationResult,
     PeopleSearchQuery,
@@ -71,6 +85,60 @@ class _HttpProvider:
         self.credits = 0
         self.last_http_status: int | None = None
         self.last_duration_ms: float | None = None
+        self._usage_recorder: ProviderUsageRecorder | None = None
+        self._usage_context: ProviderUsageContext | None = None
+        self._usage_ordinals: dict[str, int] = defaultdict(int)
+
+    def configure_usage(
+        self,
+        context: ProviderUsageContext,
+        *,
+        session_factory: SessionFactory,
+    ) -> None:
+        self._usage_context = context
+        self._usage_recorder = ProviderUsageRecorder(
+            context,
+            session_factory=session_factory,
+            unknown_credit_budget_units=(
+                settings.people_provider_unknown_credit_budget_units
+            ),
+        )
+
+    def _start_usage(self, operation_type: str) -> str | None:
+        if self._usage_recorder is None or self._usage_context is None:
+            return None
+        self._usage_ordinals[operation_type] += 1
+        key = operation_idempotency_key(
+            self._usage_context,
+            provider=self.provider_name,
+            operation_type=operation_type,
+            ordinal=self._usage_ordinals[operation_type],
+        )
+        if not self._usage_recorder.start(
+            idempotency_key=key,
+            provider=self.provider_name,
+            operation_type=operation_type,
+        ):
+            raise ProviderUnavailable(
+                "provider_operation_duplicate",
+                provider=self.provider_name,
+            )
+        return key
+
+    def _finish_usage(
+        self,
+        key: str | None,
+        *,
+        http_outcome: str,
+        payload: object = None,
+    ) -> None:
+        if key is None or self._usage_recorder is None:
+            return
+        self._usage_recorder.finish(
+            idempotency_key=key,
+            http_outcome=http_outcome,
+            credits_reported=reported_credits(payload),
+        )
 
     def _failure(self) -> None:
         failures, _ = _CIRCUITS.get(self.provider_name, (0, None))
@@ -82,7 +150,14 @@ class _HttpProvider:
         )
         _CIRCUITS[self.provider_name] = (failures, opened)
 
-    async def _request(self, method: str, url: str, **kwargs) -> dict:
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        operation_type: str,
+        **kwargs,
+    ) -> dict:
         _, opened = _CIRCUITS.get(self.provider_name, (0, None))
         if opened and opened > datetime.now(UTC):
             raise ProviderUnavailable(
@@ -91,6 +166,7 @@ class _HttpProvider:
         if opened:
             # Allow one clean half-open attempt after the reset interval.
             _CIRCUITS[self.provider_name] = (0, None)
+        usage_key = self._start_usage(operation_type)
         self.requests += 1
         timeout = httpx.Timeout(settings.people_provider_timeout_seconds)
         started = time.monotonic()
@@ -98,6 +174,7 @@ class _HttpProvider:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 response = await client.request(method, url, **kwargs)
         except httpx.TimeoutException as exc:
+            self._finish_usage(usage_key, http_outcome="provider_timeout")
             self._failure()
             raise ProviderUnavailable(
                 "provider_timeout",
@@ -105,6 +182,10 @@ class _HttpProvider:
                 duration_ms=(time.monotonic() - started) * 1000,
             ) from exc
         except httpx.NetworkError as exc:
+            self._finish_usage(
+                usage_key,
+                http_outcome="provider_network_error",
+            )
             self._failure()
             raise ProviderUnavailable(
                 "provider_network_error",
@@ -114,6 +195,20 @@ class _HttpProvider:
         duration_ms = (time.monotonic() - started) * 1000
         self.last_http_status = response.status_code
         self.last_duration_ms = duration_ms
+        parsed_payload: object = None
+        if (
+            len(response.content)
+            <= settings.people_provider_response_max_bytes
+        ):
+            try:
+                parsed_payload = response.json()
+            except ValueError:
+                parsed_payload = None
+        self._finish_usage(
+            usage_key,
+            http_outcome=f"http_{response.status_code}",
+            payload=parsed_payload,
+        )
         reason = {
             401: "provider_unauthorized",
             403: "provider_forbidden",
@@ -166,17 +261,15 @@ class _HttpProvider:
                 http_status=response.status_code,
                 duration_ms=duration_ms,
             )
-        try:
-            data = response.json()
-        except ValueError as exc:
+        if parsed_payload is None:
             self._failure()
             raise ProviderUnavailable(
                 "provider_schema_error",
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
-            ) from exc
-        if not isinstance(data, dict):
+            )
+        if not isinstance(parsed_payload, dict):
             self._failure()
             raise ProviderUnavailable(
                 "provider_schema_error",
@@ -185,16 +278,24 @@ class _HttpProvider:
                 duration_ms=duration_ms,
             )
         _CIRCUITS[self.provider_name] = (0, None)
-        return data
+        return parsed_payload
 
 
 class ApolloPeopleProvider(_HttpProvider):
     def __init__(self, api_key: str | None = None) -> None:
         super().__init__("apollo")
         self.api_key = api_key or settings.apollo_api_key
+        self._bulk_account_scope = hashlib.sha256(
+            (self.api_key or "").encode()
+        ).hexdigest()
         self.enrichment_rejection_reasons: dict[str, str] = {}
         self.enrichment_safe_metrics: dict[str, int] = {}
         self.search_identifier_safe_metrics: dict[str, object] = {}
+        self.bulk_capability_state = bulk_capability_state(
+            self.provider_name,
+            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            self._bulk_account_scope,
+        )
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -220,6 +321,7 @@ class ApolloPeopleProvider(_HttpProvider):
             payload["person_locations"] = [query.location]
         data = await self._request(
             "POST", "https://api.apollo.io/api/v1/mixed_people/api_search",
+            operation_type="people_search",
             headers=self._headers(), json=payload,
         )
         rows = data.get("people")
@@ -293,6 +395,23 @@ class ApolloPeopleProvider(_HttpProvider):
             identifiers.append(identifier)
 
         enriched: list[ProviderPerson] = []
+        self.bulk_capability_state = bulk_capability_state(
+            self.provider_name,
+            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            self._bulk_account_scope,
+        )
+        if self.bulk_capability_state in {
+            "temporarily_rejected",
+            "account_not_supported",
+        }:
+            self._increment_enrichment_metric("bulk_capability_skipped")
+            for identifier in identifiers[
+                : settings.people_max_enrichments_per_job
+            ]:
+                person = await self._single_enrichment_after_bulk_422(identifier)
+                if person is not None:
+                    enriched.append(person)
+            return enriched
         for offset in range(0, len(identifiers), 10):
             batch = identifiers[offset : offset + 10]
             try:
@@ -305,11 +424,28 @@ class ApolloPeopleProvider(_HttpProvider):
                     endpoint="/api/v1/people/bulk_match",
                     metadata=exc.safe_metadata,
                 )
+                if (
+                    exc.safe_metadata.get("error_scope") == "request_level"
+                    and not exc.safe_metadata.get("field_paths")
+                ):
+                    self.bulk_capability_state = (
+                        record_bulk_request_level_422(
+                            self.provider_name,
+                            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                            self._bulk_account_scope,
+                        )
+                    )
                 for identifier in batch:
                     person = await self._single_enrichment_after_bulk_422(identifier)
                     if person is not None:
                         enriched.append(person)
                 continue
+            record_bulk_supported(
+                self.provider_name,
+                APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                self._bulk_account_scope,
+            )
+            self.bulk_capability_state = "supported"
             enriched.extend(self._normalize_bulk_matches(data, batch))
         return enriched
 
@@ -336,6 +472,7 @@ class ApolloPeopleProvider(_HttpProvider):
         return await self._request(
             "POST",
             "https://api.apollo.io/api/v1/people/bulk_match",
+            operation_type="bulk_enrichment",
             headers=headers,
             json=payload,
         )
@@ -347,6 +484,7 @@ class ApolloPeopleProvider(_HttpProvider):
             data = await self._request(
                 "POST",
                 "https://api.apollo.io/api/v1/people/match",
+                operation_type="single_person_enrichment",
                 headers=self._headers(),
                 params={
                     "id": identifier,
@@ -451,6 +589,7 @@ class PDLPeopleProvider(_HttpProvider):
         )
         data = await self._request(
             "GET", "https://api.peopledatalabs.com/v5/person/search",
+            operation_type="people_search",
             headers={"X-Api-Key": self.api_key}, params={"sql": sql, "size": query.limit},
         )
         self.credits += 1
@@ -474,6 +613,7 @@ class HunterEmailProvider(_HttpProvider):
         parts = request.full_name.strip().split()
         data = await self._request(
             "GET", "https://api.hunter.io/v2/email-finder",
+            operation_type="email_discovery",
             params={"domain": request.company_domain, "first_name": parts[0], "last_name": parts[-1], "api_key": self.api_key},
         )
         self.credits += 1
@@ -490,6 +630,7 @@ class HunterEmailProvider(_HttpProvider):
             raise ProviderUnavailable("provider_not_configured", provider=self.provider_name)
         data = await self._request(
             "GET", "https://api.hunter.io/v2/email-verifier",
+            operation_type="email_verification",
             params={"email": email, "api_key": self.api_key},
         )
         self.credits += 1

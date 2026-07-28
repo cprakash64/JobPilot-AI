@@ -112,6 +112,7 @@ export type PeopleStatus =
   | "complete"
   | "no_reliable_matches"
   | "provider_unavailable"
+  | "persistence_error"
   | "stale";
 
 export type PeopleAvailabilityReason =
@@ -129,6 +130,7 @@ export type PeopleAvailabilityReason =
   | "provider_schema_error"
   | "provider_budget_exceeded"
   | "provider_user_limit_exceeded"
+  | "recommendation_commit_failed"
   | "provider_unavailable";
 
 export type PeopleRecommendation = {
@@ -181,6 +183,7 @@ export type PeopleResponse = {
   availability_reason?: PeopleAvailabilityReason;
   retry_eligible?: boolean;
   retry_after_seconds?: number | null;
+  retry_eligible_at?: string | null;
   beta: boolean;
   generated_at?: string | null;
   expires_at?: string | null;

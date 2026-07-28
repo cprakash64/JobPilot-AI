@@ -549,7 +549,7 @@ class JobPeopleCandidate(Base):
     data_confidence: Mapped[float] = mapped_column(Float, nullable=False)
     current_employment_confidence: Mapped[float] = mapped_column(Float, nullable=False)
     employment_validation_status: Mapped[str] = mapped_column(
-        String(40), default="insufficient_evidence", server_default="legacy"
+        String(96), default="insufficient_evidence", server_default="legacy"
     )
     employment_validation_version: Mapped[str] = mapped_column(
         String(40), default="legacy", server_default="legacy", index=True
@@ -618,6 +618,58 @@ class PeopleDiscoveryRun(Base):
     safe_failure_message: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+
+
+class PeopleProviderOperationUsage(Base):
+    """Identifier-free, independently committed external-provider usage."""
+
+    __tablename__ = "people_provider_operation_usage"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_people_provider_operation_usage_idempotency",
+        ),
+        Index(
+            "ix_people_provider_usage_budget",
+            "user_id",
+            "occurred_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    discovery_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("people_discovery_runs.id", ondelete="SET NULL"),
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    operation_type: Mapped[str] = mapped_column(
+        String(60), nullable=False, index=True
+    )
+    request_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    http_outcome: Mapped[str] = mapped_column(String(96), nullable=False)
+    credits_reported: Mapped[int | None] = mapped_column(Integer)
+    credits_estimated: Mapped[int | None] = mapped_column(Integer)
+    budget_units: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    credit_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="unknown", server_default="unknown"
+    )
+    adapter_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    occurred_at: Mapped[DateTimeValue] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
 
 
 class PeopleRecommendationFeedback(Base):

@@ -1,6 +1,6 @@
 import json
-from functools import lru_cache
 import os
+from functools import lru_cache
 
 from pydantic import Field, field_validator
 
@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     people_email_per_user_daily_limit: int = 0
     people_provider_timeout_seconds: float = 8.0
     people_provider_response_max_bytes: int = 1_000_000
+    people_provider_unknown_credit_budget_units: int = 1
+    people_apollo_bulk_capability_enabled: bool = True
+    people_apollo_bulk_rejection_threshold: int = 2
+    people_apollo_bulk_capability_ttl_seconds: int = 3600
     people_min_relevance_score: float = 60.0
     people_min_recruiter_relevance: float = 60.0
     people_min_manager_relevance: float = 60.0

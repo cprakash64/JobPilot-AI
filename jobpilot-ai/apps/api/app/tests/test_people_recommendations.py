@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import logging
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import get_args
 
 import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -25,14 +29,20 @@ from app.models.entities import (
     JobPosting,
     PeopleDiscoveryRun,
     PeopleEmploymentVerificationRun,
+    PeopleProviderOperationUsage,
     ProfessionalPerson,
     User,
     UserJobPeopleRecommendation,
     UserProfile,
 )
 from app.people import providers
+from app.people.bulk_capability import (
+    bulk_capability_state,
+    clear_local_bulk_capabilities,
+)
 from app.people.employment_validation import (
     EMPLOYMENT_VALIDATION_VERSION,
+    EmploymentValidationStatus,
     validate_current_employment,
 )
 from app.people.feature_flags import configuration_summary
@@ -41,6 +51,12 @@ from app.people.intelligence import (
     extract_job_people_profile,
     resolve_company_identity,
     validate_company_domain,
+)
+from app.people.provider_usage import (
+    ProviderUsageContext,
+    ProviderUsageRecorder,
+    operation_idempotency_key,
+    reconcile_unknown_operations,
 )
 from app.people.providers import ApolloPeopleProvider, MockPeopleProvider, ProviderUnavailable
 from app.people.schemas import (
@@ -1898,6 +1914,48 @@ def _persist_recommendation(
     return user, job, person, recommendation
 
 
+def test_later_successful_results_supersede_an_old_no_match_state(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user, job, _person, _recommendation = _persist_recommendation(db)
+    fingerprint = service.query_fingerprint(job, "exact")
+    db.add_all([
+        PeopleDiscoveryRun(
+            job_id=job.id,
+            user_id=user.id,
+            status="complete",
+            provider="apollo",
+            query_fingerprint=fingerprint,
+            records_searched=10,
+            records_enriched=0,
+            completed_at=datetime.now(UTC) - timedelta(minutes=2),
+        ),
+        PeopleDiscoveryRun(
+            job_id=job.id,
+            user_id=user.id,
+            status="complete",
+            provider="apollo",
+            query_fingerprint=fingerprint,
+            records_searched=10,
+            records_enriched=1,
+            completed_at=datetime.now(UTC),
+        ),
+    ])
+    db.commit()
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+
+    payload = service.recommendations_payload(db, user, job.id)
+
+    assert payload["status"] == "complete"
+    assert len(payload["categories"]["likely_recruiters"]) == 1
+    assert payload["categories"]["potential_hiring_managers"] == []
+    assert payload["categories"]["potential_referrers"] == []
+
+
 def test_old_cache_is_hidden_and_email_is_blocked_for_employment_conflict(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2171,3 +2229,501 @@ def test_configuration_summary_reports_booleans_without_secret_values(
         "environment": "development",
     }
     assert "do-not-log" not in repr(summary)
+
+
+def test_all_employment_statuses_fit_widened_schema_and_exact_regression_value(
+    db: Session,
+) -> None:
+    status_column = JobPeopleCandidate.__table__.c.employment_validation_status
+    supported = set(get_args(EmploymentValidationStatus))
+    longest = "exact_company_current_but_unverified_freshness"
+
+    assert longest in supported
+    assert len(longest) == 46
+    assert status_column.type.length == 96
+    assert max(map(len, supported)) <= status_column.type.length
+
+    _persist_recommendation(db, status=longest)
+    db.commit()
+    persisted = db.scalar(
+        select(JobPeopleCandidate).where(
+            JobPeopleCandidate.employment_validation_status == longest
+        )
+    )
+    assert persisted is not None
+    assert persisted.employment_validation_status == longest
+
+
+def test_persistence_usage_migration_is_sequential_and_downgrade_fails_closed() -> None:
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "0024_people_persistence_usage.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "0024_people_persistence_usage"' in migration
+    assert 'down_revision = "0023_people_evidence"' in migration
+    assert "sa.String(length=96)" in migration
+    assert "values longer than 40 characters exist" in migration
+    assert "people_provider_operation_usage" in migration
+
+
+def test_persistence_usage_migration_refuses_unsafe_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "0024_people_persistence_usage.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "people_persistence_usage_migration",
+        migration_path,
+    )
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class UnsafeConnection:
+        def scalar(self, _statement):
+            return 1
+
+    class GuardedOperations:
+        def get_bind(self):
+            return UnsafeConnection()
+
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"destructive downgrade operation ran before guard: {name}"
+            )
+
+    monkeypatch.setattr(migration, "op", GuardedOperations())
+
+    with pytest.raises(RuntimeError, match="longer than 40"):
+        migration.downgrade()
+
+
+def test_provider_usage_is_idempotent_private_and_survives_main_rollback(
+    db: Session,
+) -> None:
+    user = User(
+        email="durable-usage@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    run = PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="running",
+        provider="apollo",
+        query_fingerprint="durable-usage",
+    )
+    db.add(run)
+    db.commit()
+    context = ProviderUsageContext(
+        user_id=user.id,
+        job_id=job.id,
+        discovery_run_id=run.id,
+        adapter_version="apollo-enrichment-v3",
+    )
+    factory = sessionmaker(
+        bind=db.get_bind(),
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    recorder = ProviderUsageRecorder(context, session_factory=factory)
+    key = operation_idempotency_key(
+        context,
+        provider="apollo",
+        operation_type="bulk_enrichment",
+        ordinal=1,
+    )
+
+    assert recorder.start(
+        idempotency_key=key,
+        provider="apollo",
+        operation_type="bulk_enrichment",
+    )
+    assert not recorder.start(
+        idempotency_key=key,
+        provider="apollo",
+        operation_type="bulk_enrichment",
+    )
+    recorder.finish(
+        idempotency_key=key,
+        http_outcome="http_422",
+        credits_reported=None,
+    )
+    original_title = job.title
+    job.title = "transaction that will be rolled back"
+    db.flush()
+    db.rollback()
+
+    row = db.scalar(
+        select(PeopleProviderOperationUsage).where(
+            PeopleProviderOperationUsage.idempotency_key == key
+        )
+    )
+    assert row is not None
+    assert row.request_count == 1
+    assert row.http_outcome == "http_422"
+    assert row.credits_reported is None
+    assert row.credits_estimated == 1
+    assert row.credit_status == "estimated"
+    assert db.get(JobPosting, job.id).title == original_title
+    assert {
+        column.name for column in row.__table__.columns
+    }.isdisjoint({
+        "provider_person_id",
+        "name",
+        "email",
+        "profile_url",
+        "provider_payload",
+    })
+
+
+def test_unknown_reconciled_usage_is_not_zero_and_counts_against_budget(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user = User(
+        email="reconciled-budget@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    run = PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="persistence_error",
+        provider="apollo",
+        query_fingerprint="reconciled-usage",
+        failure_code="recommendation_commit_failed",
+    )
+    db.add(run)
+    db.commit()
+    context = ProviderUsageContext(
+        user_id=user.id,
+        job_id=job.id,
+        discovery_run_id=run.id,
+        adapter_version="apollo-enrichment-v3",
+    )
+    factory = sessionmaker(bind=db.get_bind(), autoflush=False)
+
+    first = reconcile_unknown_operations(
+        context=context,
+        provider="apollo",
+        operation_counts={"people_search": 2},
+        safe_http_outcomes={"people_search": "http_200"},
+        session_factory=factory,
+    )
+    second = reconcile_unknown_operations(
+        context=context,
+        provider="apollo",
+        operation_counts={"people_search": 2},
+        safe_http_outcomes={"people_search": "http_200"},
+        session_factory=factory,
+    )
+
+    assert first == 2
+    assert second == 0
+    rows = db.scalars(select(PeopleProviderOperationUsage)).all()
+    assert len(rows) == 2
+    assert all(row.credits_reported is None for row in rows)
+    assert all(row.credits_estimated is None for row in rows)
+    assert all(row.credit_status == "unknown" for row in rows)
+    assert sum(row.budget_units for row in rows) == 2
+
+    monkeypatch.setattr(settings, "people_daily_credit_budget", 2)
+    monkeypatch.setattr(settings, "people_per_user_daily_limit", 10)
+    with pytest.raises(HTTPException) as blocked:
+        service._budget_check(db, user.id)
+    assert blocked.value.detail["availability_reason"] == "provider_budget_exceeded"
+
+
+def test_bulk_capability_temporarily_skips_after_repeated_request_level_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifier = "aaaaaaaaaaaaaaaaaaaaaaaa"
+    calls: list[str] = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            calls.append(url)
+            if url.endswith("/bulk_match"):
+                return httpx.Response(
+                    422,
+                    request=httpx.Request(method, url),
+                    json={"message": "not retained"},
+                )
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "person": {
+                        "id": identifier,
+                        "name": "Private Person",
+                        "title": "Technical Recruiter",
+                        "organization": {
+                            "name": "Acme",
+                            "primary_domain": "acme.example",
+                        },
+                    }
+                },
+            )
+
+    monkeypatch.setattr(
+        providers.httpx,
+        "AsyncClient",
+        lambda **_kwargs: FakeClient(),
+    )
+    monkeypatch.setattr(settings, "people_apollo_bulk_rejection_threshold", 2)
+    clear_local_bulk_capabilities()
+    request = [PersonEnrichmentRequest(provider_person_id=identifier)]
+
+    first = ApolloPeopleProvider("synthetic-test-key")
+    assert len(asyncio.run(first.enrich_people(request))) == 1
+    account_scope = first._bulk_account_scope
+    assert (
+        bulk_capability_state(
+            "apollo", "apollo-enrichment-v3", account_scope
+        )
+        == "unknown"
+    )
+    second = ApolloPeopleProvider("synthetic-test-key")
+    assert len(asyncio.run(second.enrich_people(request))) == 1
+    assert (
+        bulk_capability_state(
+            "apollo", "apollo-enrichment-v3", account_scope
+        )
+        == "temporarily_rejected"
+    )
+    third = ApolloPeopleProvider("synthetic-test-key")
+    assert len(asyncio.run(third.enrich_people(request))) == 1
+
+    assert sum(url.endswith("/bulk_match") for url in calls) == 2
+    assert sum(url.endswith("/people/match") for url in calls) == 3
+    assert third.enrichment_safe_metrics["bulk_capability_skipped"] == 1
+    assert (
+        bulk_capability_state(
+            "apollo", "apollo-enrichment-v4", account_scope
+        )
+        == "unknown"
+    )
+
+
+def test_bulk_422_successful_single_fallback_persists_normally(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    identifier = "aaaaaaaaaaaaaaaaaaaaaaaa"
+    job = _job()
+    user = User(
+        email="fallback-persistence@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    db.add_all([job, user])
+    db.commit()
+    query = PeopleSearchQuery(
+        category="likely_recruiter",
+        company_name="Acme AI",
+        company_domain="acme.example",
+        titles=["Technical Recruiter"],
+        limit=1,
+    )
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            person = {
+                "id": identifier,
+                "name": "Private Person",
+                "title": "Technical Recruiter",
+                "linkedin_url": "https://www.linkedin.com/in/private-person",
+                "organization": {
+                    "name": "Acme AI",
+                    "primary_domain": "acme.example",
+                },
+            }
+            if url.endswith("/api_search"):
+                return httpx.Response(
+                    200,
+                    request=httpx.Request(method, url),
+                    json={"people": [person]},
+                )
+            if url.endswith("/bulk_match"):
+                return httpx.Response(
+                    422,
+                    request=httpx.Request(method, url),
+                    json={"message": "not retained"},
+                )
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={"person": person, "credits_consumed": 1},
+            )
+
+    monkeypatch.setattr(
+        providers.httpx,
+        "AsyncClient",
+        lambda **_kwargs: FakeClient(),
+    )
+    monkeypatch.setattr(
+        service,
+        "build_category_search_queries",
+        lambda _profile, category, **_kwargs: (
+            [query] if category == "likely_recruiter" else []
+        ),
+    )
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    monkeypatch.setattr(settings, "people_primary_provider", "apollo")
+    monkeypatch.setattr(settings, "apollo_api_key", "synthetic-test-key")
+    monkeypatch.setattr(settings, "people_min_relevance_score", 0)
+    monkeypatch.setattr(settings, "people_min_recruiter_relevance", 0)
+    monkeypatch.setattr(settings, "people_min_data_confidence", 0)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    response = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "complete"
+    assert len(response.json()["categories"]["likely_recruiters"]) == 1
+    run = db.scalar(
+        select(PeopleDiscoveryRun)
+        .where(PeopleDiscoveryRun.job_id == job.id)
+        .order_by(PeopleDiscoveryRun.id.desc())
+    )
+    assert run.status == "complete"
+    assert run.records_enriched == 1
+    assert run.company_context["provider_enrichment_safe_metrics"][
+        "bulk_payload_validation_failed"
+    ] == 1
+    assert db.scalar(
+        select(JobPeopleCandidate).where(
+            JobPeopleCandidate.job_id == job.id
+        )
+    ) is not None
+
+
+def test_database_failure_is_cached_as_persistence_error_and_usage_survives(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user = User(
+        email="persistence-error@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.commit()
+
+    class DurableMock(MockPeopleProvider):
+        def configure_usage(self, context, *, session_factory):
+            self.context = context
+            self.recorder = ProviderUsageRecorder(
+                context,
+                session_factory=session_factory,
+            )
+            self.ordinal = 0
+
+        def record(self, operation_type: str) -> None:
+            self.ordinal += 1
+            key = operation_idempotency_key(
+                self.context,
+                provider="mock",
+                operation_type=operation_type,
+                ordinal=self.ordinal,
+            )
+            assert self.recorder.start(
+                idempotency_key=key,
+                provider="mock",
+                operation_type=operation_type,
+            )
+            self.recorder.finish(
+                idempotency_key=key,
+                http_outcome="http_200",
+                credits_reported=0,
+            )
+
+        async def search_people(self, query):
+            self.record("people_search")
+            return await super().search_people(query)
+
+        async def enrich_people(self, people):
+            self.record("single_person_enrichment")
+            return await super().enrich_people(people)
+
+    provider = DurableMock(_records())
+    monkeypatch.setattr(service, "get_people_provider", lambda: provider)
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    monkeypatch.setattr(settings, "people_primary_provider", "mock")
+    monkeypatch.setattr(settings, "people_min_relevance_score", 0)
+    monkeypatch.setattr(settings, "people_min_recruiter_relevance", 0)
+    monkeypatch.setattr(settings, "people_min_manager_relevance", 0)
+    monkeypatch.setattr(settings, "people_min_referrer_relevance", 0)
+    monkeypatch.setattr(settings, "people_min_data_confidence", 0)
+
+    def fail_persistence(*_args, **_kwargs):
+        raise SQLAlchemyError("synthetic storage failure")
+
+    monkeypatch.setattr(service, "_person_for_provider", fail_persistence)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    response = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+    provider_requests = provider.requests
+    reopened = client.get(f"/jobs/{job.id}/people", headers=headers)
+    refreshed = client.get(f"/jobs/{job.id}/people", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "persistence_error"
+    assert (
+        response.json()["availability_reason"]
+        == "recommendation_commit_failed"
+    )
+    assert response.json()["categories"] == {
+        "likely_recruiters": [],
+        "potential_hiring_managers": [],
+        "potential_referrers": [],
+    }
+    assert reopened.json()["status"] == "persistence_error"
+    assert refreshed.json()["status"] == "persistence_error"
+    assert provider.requests == provider_requests
+    run = db.scalar(
+        select(PeopleDiscoveryRun)
+        .where(PeopleDiscoveryRun.job_id == job.id)
+        .order_by(PeopleDiscoveryRun.id.desc())
+    )
+    assert run.status == "persistence_error"
+    assert run.failure_code == "recommendation_commit_failed"
+    assert run.company_context["pipeline_outcomes"]["persistence"] == "failed"
+    assert db.scalar(
+        select(func.count(PeopleProviderOperationUsage.id)).where(
+            PeopleProviderOperationUsage.discovery_run_id == run.id
+        )
+    ) > 0

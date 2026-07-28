@@ -254,7 +254,7 @@ describe("PeopleWhoCanHelp", () => {
     if (payload.status === "no_reliable_matches") {
       expect(screen.queryByRole("button", { name: "Find people" })).not.toBeInTheDocument();
     } else {
-      expect(screen.getByRole("button", { name: "Find people" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Retry discovery" })).toBeInTheDocument();
     }
   });
 
@@ -698,6 +698,83 @@ describe("PeopleWhoCanHelpSummary", () => {
       expect(
         fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")
       ).toHaveLength(1);
+    });
+    resolveDiscovery({
+      ok: true,
+      json: async () => response(),
+      text: async () => JSON.stringify(response())
+    } as Response);
+    expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
+  });
+
+  it("keeps a cached persistence failure read-only until retry is eligible", async () => {
+    const persistenceFailure = response({
+      status: "persistence_error",
+      availability_reason: "recommendation_commit_failed",
+      retry_eligible: false,
+      retry_eligible_at: "2026-07-26T12:05:00Z",
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => persistenceFailure,
+      text: async () => JSON.stringify(persistenceFailure)
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const first = render(<PeopleWhoCanHelp jobId={7600} />);
+
+    expect(
+      await screen.findByText(
+        "JobPilot found potential contacts but could not save the results. No additional search will run unless you retry."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry discovery" })).not.toBeInTheDocument();
+    first.unmount();
+    clearPeopleCache();
+    render(<PeopleWhoCanHelp jobId={7600} />);
+    await screen.findByText(/could not save the results/i);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
+  it("coalesces repeated explicit persistence Retry clicks into one mutation", async () => {
+    const persistenceFailure = response({
+      status: "persistence_error",
+      availability_reason: "recommendation_commit_failed",
+      retry_eligible: true,
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    let resolveDiscovery!: (value: Response) => void;
+    const discoveryResponse = new Promise<Response>((resolve) => {
+      resolveDiscovery = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") return discoveryResponse;
+      return Promise.resolve({
+        ok: true,
+        json: async () => persistenceFailure,
+        text: async () => JSON.stringify(persistenceFailure)
+      } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PeopleWhoCanHelpSummary jobId={7600} onViewAll={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+    const retry = await screen.findByRole("button", { name: "Retry discovery" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
     });
     resolveDiscovery({
       ok: true,

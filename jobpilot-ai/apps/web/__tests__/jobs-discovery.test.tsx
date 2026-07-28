@@ -197,7 +197,7 @@ describe("JobDiscovery", () => {
     // Source badge shows the ATS provider name.
     expect(within(card).getByText("Greenhouse")).toBeInTheDocument();
     expect(within(card).getByRole("heading", { name: "People Who Can Help" })).toBeInTheDocument();
-    expect(within(card).getByRole("button", { name: "Find people" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "View people" })).toBeInTheDocument();
     expect(
       vi.mocked(fetch).mock.calls.filter(([input]) => /\/jobs\/\d+\/people/.test(String(input)))
     ).toHaveLength(0);

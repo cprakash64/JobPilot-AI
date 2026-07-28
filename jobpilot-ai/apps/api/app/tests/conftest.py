@@ -41,8 +41,15 @@ def _reset_rate_limiter() -> None:
     fresh in-memory DB where ids restart at 1, so without a reset the ``create:1``
     bucket accumulates across tests and eventually trips the 20/60s limit. Clear
     it between tests so rate-limit state never leaks between unrelated cases."""
-    from app.routes.applications import _RATE_BUCKETS
     from app.people.service import _RATE_BUCKETS as people_rate_buckets
+    from app.routes.applications import _RATE_BUCKETS
 
     _RATE_BUCKETS.clear()
     people_rate_buckets.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_people_bulk_capability() -> None:
+    from app.people.bulk_capability import clear_local_bulk_capabilities
+
+    clear_local_bulk_capabilities()

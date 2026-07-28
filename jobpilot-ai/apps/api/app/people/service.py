@@ -14,7 +14,8 @@ from typing import Literal
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.audit import record_audit
 from app.core.config import settings
@@ -25,6 +26,7 @@ from app.models.entities import (
     JobPosting,
     PeopleDiscoveryRun,
     PeopleEmploymentVerificationRun,
+    PeopleProviderOperationUsage,
     PeopleRecommendationFeedback,
     ProfessionalPerson,
     ProfessionalPersonSource,
@@ -41,6 +43,10 @@ from app.people.employment_validation import (
 from app.people.feature_flags import is_beta
 from app.people.intelligence import extract_job_people_profile
 from app.people.observability import metric
+from app.people.provider_usage import (
+    ProviderUsageContext,
+    ProviderUsagePersistenceError,
+)
 from app.people.providers import (
     APOLLO_ENRICHMENT_ADAPTER_VERSION,
     PDLPeopleProvider,
@@ -246,6 +252,7 @@ _RETRYABLE_PROVIDER_ERRORS = frozenset(
         "provider_network_error",
         "provider_unavailable",
         "discovery_failed",
+        "recommendation_commit_failed",
     }
 )
 _NON_RETRYABLE_PROVIDER_ERRORS = frozenset(
@@ -272,7 +279,12 @@ def _current_provider_error_run(
         user_id=user_id,
         fingerprints=[fingerprint],
     )
-    return latest if latest and latest.status == "provider_unavailable" else None
+    return (
+        latest
+        if latest
+        and latest.status in {"provider_unavailable", "persistence_error"}
+        else None
+    )
 
 
 def _provider_error_retry_state(
@@ -322,6 +334,107 @@ def _provider_error_context(reason: str, *, now: datetime) -> dict[str, object]:
     return {
         "provider_error_retry_policy": "non_retryable",
         "retry_eligible_at": None,
+    }
+
+
+def _configure_provider_usage(
+    provider: object,
+    *,
+    db: Session,
+    user_id: int,
+    job_id: int,
+    discovery_run_id: int,
+    adapter_version: str,
+) -> None:
+    configure = getattr(provider, "configure_usage", None)
+    if not callable(configure):
+        return
+    configure(
+        ProviderUsageContext(
+            user_id=user_id,
+            job_id=job_id,
+            discovery_run_id=discovery_run_id,
+            adapter_version=adapter_version,
+        ),
+        session_factory=sessionmaker(
+            bind=db.get_bind(),
+            autoflush=False,
+            expire_on_commit=False,
+        ),
+    )
+
+
+def _durable_usage_summary(
+    db: Session,
+    discovery_run_id: int,
+) -> dict[str, object]:
+    rows = db.execute(
+        select(
+            PeopleProviderOperationUsage.request_count,
+            PeopleProviderOperationUsage.credits_reported,
+            PeopleProviderOperationUsage.credits_estimated,
+            PeopleProviderOperationUsage.budget_units,
+            PeopleProviderOperationUsage.credit_status,
+        ).where(
+            PeopleProviderOperationUsage.discovery_run_id
+            == discovery_run_id
+        )
+    ).all()
+    operation_counts: dict[str, int] = defaultdict(int)
+    operation_rows = db.execute(
+        select(
+            PeopleProviderOperationUsage.operation_type,
+            PeopleProviderOperationUsage.request_count,
+        ).where(
+            PeopleProviderOperationUsage.discovery_run_id
+            == discovery_run_id
+        )
+    ).all()
+    for operation_type, request_count in operation_rows:
+        operation_counts[str(operation_type)] += int(request_count)
+    return {
+        "request_count": sum(int(row.request_count) for row in rows),
+        "reported_credits": sum(
+            int(row.credits_reported or 0) for row in rows
+        ),
+        "estimated_credits": sum(
+            int(row.credits_estimated or 0) for row in rows
+        ),
+        "unknown_credit_operations": sum(
+            int(row.request_count)
+            for row in rows
+            if row.credit_status == "unknown"
+        ),
+        "budget_units": sum(int(row.budget_units) for row in rows),
+        "operation_counts": dict(sorted(operation_counts.items())),
+    }
+
+
+def _provider_pipeline_outcomes(
+    provider: object,
+    usage_summary: dict[str, object],
+) -> dict[str, str]:
+    operation_counts = usage_summary.get("operation_counts", {})
+    if not isinstance(operation_counts, dict):
+        operation_counts = {}
+    metrics = getattr(provider, "enrichment_safe_metrics", {})
+    bulk_calls = int(operation_counts.get("bulk_enrichment", 0))
+    single_calls = int(
+        operation_counts.get("single_person_enrichment", 0)
+    )
+    if metrics.get("bulk_payload_validation_failed"):
+        bulk_outcome = "request_rejected_fallback_continued"
+    elif metrics.get("bulk_capability_skipped"):
+        bulk_outcome = "skipped_by_capability_cache"
+    elif bulk_calls:
+        bulk_outcome = "completed"
+    else:
+        bulk_outcome = "not_used"
+    return {
+        "bulk_enrichment": bulk_outcome,
+        "bounded_single_fallback": (
+            "completed" if single_calls else "not_used"
+        ),
     }
 
 
@@ -633,6 +746,14 @@ async def _secondary_employment_validation(
         if not acquired:
             return None
         provider = PDLPeopleProvider()
+        _configure_provider_usage(
+            provider,
+            db=db,
+            user_id=user_id,
+            job_id=job_id,
+            discovery_run_id=discovery_run_id,
+            adapter_version=EMPLOYMENT_EVIDENCE_VERSION,
+        )
         result_status = "insufficient_evidence"
         credits = 0
         match: ProviderPerson | None = None
@@ -861,19 +982,54 @@ def _ensure_recommendation(
 
 def _budget_check(db: Session, user_id: int) -> None:
     start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
-    global_used = db.scalar(
+    has_durable_usage = (
+        select(PeopleProviderOperationUsage.id)
+        .where(
+            PeopleProviderOperationUsage.discovery_run_id
+            == PeopleDiscoveryRun.id
+        )
+        .exists()
+    )
+    legacy_global_used = db.scalar(
         select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0)).where(
             PeopleDiscoveryRun.started_at >= start,
             PeopleDiscoveryRun.provider != "hunter",
+            ~has_durable_usage,
         )
     ) or 0
-    user_used = db.scalar(
+    legacy_user_used = db.scalar(
         select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0)).where(
             PeopleDiscoveryRun.user_id == user_id,
             PeopleDiscoveryRun.started_at >= start,
             PeopleDiscoveryRun.provider != "hunter",
+            ~has_durable_usage,
         )
     ) or 0
+    durable_global_used = db.scalar(
+        select(
+            func.coalesce(
+                func.sum(PeopleProviderOperationUsage.budget_units),
+                0,
+            )
+        ).where(
+            PeopleProviderOperationUsage.occurred_at >= start,
+            PeopleProviderOperationUsage.provider != "hunter",
+        )
+    ) or 0
+    durable_user_used = db.scalar(
+        select(
+            func.coalesce(
+                func.sum(PeopleProviderOperationUsage.budget_units),
+                0,
+            )
+        ).where(
+            PeopleProviderOperationUsage.user_id == user_id,
+            PeopleProviderOperationUsage.occurred_at >= start,
+            PeopleProviderOperationUsage.provider != "hunter",
+        )
+    ) or 0
+    global_used = int(legacy_global_used) + int(durable_global_used)
+    user_used = int(legacy_user_used) + int(durable_user_used)
     if settings.people_daily_credit_budget and global_used >= settings.people_daily_credit_budget:
         raise HTTPException(
             status_code=429,
@@ -1324,6 +1480,16 @@ async def discover(
         )
         db.add(run)
         db.commit()
+        _configure_provider_usage(
+            provider,
+            db=db,
+            user_id=user.id,
+            job_id=job_id,
+            discovery_run_id=run.id,
+            adapter_version=str(
+                company_context["provider_adapter_version"]
+            ),
+        )
         categories: dict[PeopleCategory, list[ProviderPerson]] = {}
         diagnostics: dict[str, dict] = {
             category: {
@@ -1354,6 +1520,10 @@ async def discover(
         }
         failures: list[str] = []
         searched = 0
+        enriched: list[ProviderPerson] = []
+        displayed: dict[str, int] = defaultdict(int)
+        employment_outcomes: dict[str, int] = defaultdict(int)
+        pipeline_stage = "search"
         try:
             for category in _PEOPLE_CATEGORIES:
                 category_rows: list[ProviderPerson] = []
@@ -1399,8 +1569,17 @@ async def discover(
                     category=category,
                     scoring_version=SCORING_VERSION,
                 )
+            pipeline_stage = "enrichment"
             if not any(categories.values()) and settings.people_pdl_fallback_enabled:
                 fallback = PDLPeopleProvider()
+                _configure_provider_usage(
+                    fallback,
+                    db=db,
+                    user_id=user.id,
+                    job_id=job_id,
+                    discovery_run_id=run.id,
+                    adapter_version="provider-neutral-v1",
+                )
                 for category in _PEOPLE_CATEGORIES:
                     fallback_rows: list[ProviderPerson] = []
                     for query in build_category_search_queries(profile, category):
@@ -1457,6 +1636,7 @@ async def discover(
                     provider=settings.people_primary_provider,
                     status="enrichment_failed",
                 )
+            pipeline_stage = "employment_validation"
             metric(
                 "people_enrichment_requests_total",
                 len(unique_enrichment_requests),
@@ -1496,7 +1676,6 @@ async def discover(
                 "potential_hiring_manager": settings.people_max_displayed_managers,
                 "potential_referrer": settings.people_max_displayed_referrers,
             }
-            displayed: dict[str, int] = defaultdict(int)
             for _, category, initial, school, employer in enrich_targets:
                 if displayed[category] >= caps[category]:
                     continue
@@ -1601,6 +1780,18 @@ async def discover(
                             "conflicting_current_employment",
                         }:
                             employment = secondary_result
+                employment_outcomes[employment.status] += 1
+                diagnostics[category].setdefault(
+                    "employment_validation_outcomes", {}
+                )
+                diagnostics[category]["employment_validation_outcomes"][
+                    employment.status
+                ] = (
+                    diagnostics[category][
+                        "employment_validation_outcomes"
+                    ].get(employment.status, 0)
+                    + 1
+                )
                 if employment.status == "confirmed_exact_company_verified":
                     data_confidence = max(data_confidence, 0.75)
                     rejection_reasons = [
@@ -1634,6 +1825,7 @@ async def discover(
                     shared_employer=employer,
                     employment_validation_status=employment.status,
                 )
+                pipeline_stage = "recommendation_persistence"
                 canonical = _person_for_provider(db, person)
                 db.flush()
                 candidate = db.scalar(
@@ -1678,6 +1870,7 @@ async def discover(
                     category=category,
                     scoring_version=SCORING_VERSION,
                 )
+                pipeline_stage = "employment_validation"
             usage = await provider.get_usage()
             run = db.get(PeopleDiscoveryRun, run.id)
             run.status = "partial" if failures and any(displayed.values()) else "complete"
@@ -1706,9 +1899,27 @@ async def discover(
                 if run.status == "provider_unavailable"
                 else {}
             )
+            durable_usage = _durable_usage_summary(db, run.id)
             run.company_context = {
                 **company_context,
                 "provider_request_count": usage.requests,
+                "durable_provider_usage": durable_usage,
+                "provider_bulk_capability_state": getattr(
+                    provider, "bulk_capability_state", "unknown"
+                ),
+                "pipeline_outcomes": {
+                    "search": (
+                        "partial_failure" if failures else "completed"
+                    ),
+                    "enrichment": "completed",
+                    **_provider_pipeline_outcomes(
+                        provider, durable_usage
+                    ),
+                    "employment_validation": dict(
+                        sorted(employment_outcomes.items())
+                    ),
+                    "persistence": "completed",
+                },
                 "provider_enrichment_safe_metrics": getattr(
                     provider, "enrichment_safe_metrics", {}
                 ),
@@ -1719,6 +1930,7 @@ async def discover(
             }
             run.category_diagnostics = diagnostics
             run.completed_at = completed_at
+            pipeline_stage = "recommendation_commit"
             db.commit()
             metric(
                 "people_provider_credits_used",
@@ -1730,27 +1942,92 @@ async def discover(
                 run.status, job_id, searched, sum(displayed.values()),
                 run.provider_credits_used, SCORING_VERSION,
             )
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            persistence_failure = (
+                isinstance(exc, ProviderUsagePersistenceError)
+                or (
+                    isinstance(exc, SQLAlchemyError)
+                    and pipeline_stage
+                    in {
+                        "recommendation_persistence",
+                        "recommendation_commit",
+                    }
+                )
+            )
             failed_run = db.get(PeopleDiscoveryRun, run.id)
             if failed_run:
                 completed_at = _now()
-                failed_run.status = "provider_unavailable"
-                failed_run.failure_code = "discovery_failed"
-                failed_run.safe_failure_message = "People discovery is temporarily unavailable."
+                durable_usage = _durable_usage_summary(db, run.id)
+                failure_code = (
+                    "recommendation_commit_failed"
+                    if persistence_failure
+                    else "discovery_failed"
+                )
+                failed_run.status = (
+                    "persistence_error"
+                    if persistence_failure
+                    else "provider_unavailable"
+                )
+                failed_run.failure_code = failure_code
+                failed_run.safe_failure_message = (
+                    "JobPilot found potential contacts but could not save "
+                    "the results. No additional search will run unless you retry."
+                    if persistence_failure
+                    else "People discovery is temporarily unavailable."
+                )
                 failed_run.company_context = {
                     **(failed_run.company_context or {}),
+                    "durable_provider_usage": durable_usage,
+                    "provider_bulk_capability_state": getattr(
+                        provider, "bulk_capability_state", "unknown"
+                    ),
+                    "pipeline_outcomes": {
+                        "search": (
+                            "completed"
+                            if pipeline_stage != "search"
+                            else "failed"
+                        ),
+                        "enrichment": (
+                            "completed"
+                            if pipeline_stage
+                            in {
+                                "employment_validation",
+                                "recommendation_persistence",
+                                "recommendation_commit",
+                            }
+                            else "failed"
+                        ),
+                        **_provider_pipeline_outcomes(
+                            provider, durable_usage
+                        ),
+                        "employment_validation": dict(
+                            sorted(employment_outcomes.items())
+                        ),
+                        "persistence": (
+                            "failed"
+                            if persistence_failure
+                            else "not_completed"
+                        ),
+                    },
                     **_provider_error_context(
-                        "discovery_failed",
+                        failure_code,
                         now=completed_at,
                     ),
                 }
+                failed_run.category_diagnostics = diagnostics
+                failed_run.records_searched = searched
+                failed_run.records_enriched = len(enriched)
                 failed_run.completed_at = completed_at
                 db.commit()
             metric(
                 "people_discovery_provider_errors_total",
                 provider=settings.people_primary_provider,
-                status="discovery_failed",
+                status=(
+                    "recommendation_commit_failed"
+                    if persistence_failure
+                    else "discovery_failed"
+                ),
             )
             logger.exception("people_discovery failed job_id=%s", job_id)
         metric("people_discovery_duration_ms", (time.monotonic() - started) * 1000)
@@ -1874,10 +2151,11 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     if (
         stale_version
         and latest_run
-        and latest_run.status == "provider_unavailable"
+        and latest_run.status
+        in {"provider_unavailable", "persistence_error"}
         and latest_run.failure_code != "provider_schema_error"
     ):
-        response_status = "provider_unavailable"
+        response_status = latest_run.status
         warnings.append(
             latest_run.safe_failure_message
             or "Professional data provider unavailable."
@@ -1890,6 +2168,15 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     elif latest_run and latest_run.status == "provider_unavailable":
         response_status = "provider_unavailable"
         warnings.append(latest_run.safe_failure_message or "Professional data provider unavailable.")
+    elif latest_run and latest_run.status == "persistence_error":
+        response_status = "persistence_error"
+        warnings.append(
+            latest_run.safe_failure_message
+            or (
+                "JobPilot found potential contacts but could not save the "
+                "results. No additional search will run unless you retry."
+            )
+        )
     elif latest_run and latest_run.status == "partial":
         response_status = "partial"
         warnings.append("Some professional data sources were unavailable; showing reliable partial results.")
@@ -1900,7 +2187,9 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         warnings.append("Previous results are stale. Refresh is available.")
     availability_reason = (
         latest_run.failure_code
-        if latest_run and latest_run.status == "provider_unavailable"
+        if latest_run
+        and latest_run.status
+        in {"provider_unavailable", "persistence_error"}
         else "available"
     )
     retry_eligible = False
@@ -1915,7 +2204,10 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         # A provider-schema failure becomes retryable only when its adapter
         # fingerprint is obsolete. The POST remains an explicit user action.
         retry_eligible = True
-    elif latest_run and latest_run.status == "provider_unavailable":
+    elif latest_run and latest_run.status in {
+        "provider_unavailable",
+        "persistence_error",
+    }:
         (
             retry_eligible,
             retry_after_seconds,
@@ -1972,7 +2264,8 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             "parent_company_matches_included": related_company_search_attempted,
             "refresh_eligible": response_status == "stale"
             or (
-                response_status == "provider_unavailable"
+                response_status
+                in {"provider_unavailable", "persistence_error"}
                 and retry_eligible
             ),
             "exact_company_search_completed": exact_no_match is not None

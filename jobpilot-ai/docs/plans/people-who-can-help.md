@@ -648,4 +648,90 @@ the next separately approved live validation.
 - [x] Extension typecheck, 30 files / 284 tests, and production build passed.
 - [x] Docker Compose configuration validation passed.
 - [x] Changed-code Ruff and `git diff --check` passed.
-- [ ] A new explicit approval is required before any live Apollo validation.
+- [x] One explicitly approved live Apollo validation was completed; any further provider request
+  requires new approval.
+
+### Controlled Apollo v3 validation (2026-07-28)
+
+One explicitly approved exact-company discovery was run against an existing Okta role with prior
+nonzero search evidence. PDL, Hunter/email discovery, secondary employment verification, network
+matching, and broadening remained disabled. A request guard prevented non-exact domains, a second
+bulk request, and non-Apollo provider traffic.
+
+- Six exact-company search calls returned 101 records. All 101 records contained accepted `id`
+  values (97 unique); none were rejected.
+- One bulk request contained eight unchanged search IDs and no other detail fields. Apollo returned
+  HTTP 422 with no allowlisted field path (`provider_bulk_validation_failed`, request-level).
+- The existing bounded isolation flow made eight single-person calls. At least three correlated
+  records reached employment-v2.1 validation before persistence stopped: two were
+  `exact_company_current_but_unverified_freshness` and one was `insufficient_evidence`.
+- No secondary-provider request occurred. GET before discovery made zero provider calls. The
+  explicit POST made 15 total Apollo calls (six search, one bulk, eight bounded isolation), and two
+  subsequent GET/reopen reads left that count unchanged.
+- Persistence failed because `exact_company_current_but_unverified_freshness` is 46 characters
+  while `job_people_candidates.employment_validation_status` is `VARCHAR(40)`. The transaction
+  rolled back, so the current run safely ended as `provider_unavailable` / `discovery_failed`;
+  no current-run recommendation or category diagnostics were persisted.
+- Persisted credits are zero, but external Apollo credit consumption is indeterminate because the
+  successful bounded-isolation work occurred before the transaction rollback and usage could not
+  be saved. No additional provider request was made to investigate it.
+- The available browser session was signed out and rendered the session-expired state. Its reopen
+  and refresh remained read-only, but qualifying/no-match rendering could not be validated. A
+  separate migration widening the employment status column is required before another explicitly
+  approved live validation.
+
+### Persistence and durable provider-usage repair (2026-07-28)
+
+Architecture and decisions:
+
+- The failed field is `job_people_candidates.employment_validation_status`. The ORM and migration
+  now use `VARCHAR(96)`, which fits every current typed outcome and leaves bounded room for future
+  typed outcomes. The related audit found that employment-verification run status (`VARCHAR(60)`),
+  discovery status (`VARCHAR(30)`), provider failure code (`VARCHAR(60)`), email verification
+  status (`VARCHAR(30)`), employment source (`VARCHAR(80)`), and version fields (`VARCHAR(40)`)
+  fit their current typed values. Suppression reasons are JSON lists. No unrelated column was
+  widened.
+- Migration `0024_people_persistence_usage` widens the status without truncation and refuses to
+  downgrade when any stored value exceeds the former 40-character limit.
+- `people_provider_operation_usage` is identifier-free and independently committed. Each external
+  operation is inserted before the request with a deterministic run/provider/operation/ordinal
+  idempotency key, then updated with a safe HTTP outcome and reported, estimated, or unknown
+  credits. Budgets combine this ledger with legacy run totals only for runs without ledger rows.
+- The prior controlled validation was reconciled from known safe counts as 15 unknown-credit
+  operations (six search, one bulk, eight bounded single enrichment). A second reconciliation
+  inserted zero rows, proving idempotency; no exact credit count was invented.
+- Database persistence failures are cached as `persistence_error` /
+  `recommendation_commit_failed`, with stage-level search, bulk, bounded fallback, employment, and
+  persistence diagnostics. GET/open/reopen remain read-only, and explicit retries retain client
+  coalescing.
+- Apollo bulk capability is cached in Redis using a non-reversible configured-account scope plus
+  adapter version. Repeated request-level 422 responses without field paths temporarily skip bulk
+  for a bounded TTL and use only the existing top-candidate single-person cap.
+
+Progress and validation:
+
+- [x] Added migration and matching ORM changes.
+- [x] Added durable provider-operation accounting, conservative budget inclusion, and an
+  identifier-free reconciliation command.
+- [x] Preserved bounded single-person fallback after bulk HTTP 422 and normal downstream
+  employment/scoring/persistence behavior.
+- [x] Added persistence-error API/UI states and explicit-retry-only behavior.
+- [x] Focused People backend tests passed (59 tests).
+- [x] Focused People frontend tests passed (62 tests).
+- [x] Complete API tests passed (657 tests).
+- [x] Web lint, typecheck, production build, and complete tests passed (202 tests).
+- [x] Extension typecheck, tests (284), and production build passed.
+- [x] PostgreSQL upgrade/downgrade/re-upgrade completed and returned to
+  `0024_people_persistence_usage`.
+- [x] API, worker, scheduler, and web were rebuilt/recreated; API health/readiness and the web jobs
+  route returned HTTP 200.
+- [x] Changed-code Ruff, Compose validation, and `git diff --check`.
+- [ ] A new explicit approval is required before any live provider validation.
+
+Rollout and rollback:
+
+- Roll out migration 0024 before application processes using the ledger. Bulk capability starts
+  unknown and only changes after bounded observations.
+- Roll back application code first. Migration downgrade is allowed only while every employment
+  status fits the former 40-character column; otherwise it fails closed and requires deliberate
+  data remediation. The circuit breaker remains enabled and unchanged.
