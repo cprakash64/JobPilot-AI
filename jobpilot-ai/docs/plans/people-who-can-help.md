@@ -572,4 +572,80 @@ adapter v1 if needed; no database migration or destructive cache operation is re
 - [x] Database is at `0023_people_evidence (head)` and this adapter requires no migration.
   `alembic check` continues to report the repository's pre-existing broad model/migration drift
   across unrelated tables; this change adds no model/schema operation.
-- [ ] One-job live validation requires a new explicit approval after every offline check passes.
+- [x] Controlled job `7600` live validation ran after explicit approval. The obsolete search cache
+  required exactly one manager search; Apollo returned zero raw records and therefore zero valid
+  `person_id` values. The service correctly made no empty/invalid bulk request, no 422-isolation
+  request, and consumed zero credits. It persisted one current adapter-v2 `complete` no-match run
+  with `provider_request_count=1`; subsequent payload reads and the current no-match cache check
+  made no provider request. The response is `no_reliable_matches`, not
+  `provider_schema_error`. An expired browser session prevented authenticated visual confirmation;
+  the UI rendered the People panel and its safe session-expired state. Bulk success and live
+  single-item suppression remain unverified because the sole authorized search returned no
+  candidates, and no second search or provider request was made.
+- [x] A follow-up controlled validation selected job `7596` from safe historical diagnostics
+  showing 40 prior manager results. The current Apollo search returned 20 rows but zero valid
+  `person_id` fields, so adapter v2 raised `provider_schema_error` on the HTTP 200 search response
+  before bulk enrichment. The cache-reopen probe then exposed that provider-error runs are not
+  reusable and unintentionally issued a second search; this exceeded the intended one-search
+  limit. Both searches returned the same safe aggregate outcome. No bulk, fallback, PDL, Hunter,
+  email, broadening, or network call occurred and zero credits were recorded. Provider activity
+  stopped immediately. Live bulk success, identity correlation, employment validation, and
+  display remain unverified; the canonical Apollo search identifier must be re-diagnosed from
+  allowlisted field-presence/shape metadata before any further live request.
+
+## Apollo identifier and provider-error cache correction (2026-07-27)
+
+Status: offline implementation and full regression validation complete. No provider request was
+authorized or performed by this phase.
+
+### Diagnosis and decisions
+
+- Apollo's current People Search guide documents the response `id` as the value copied unchanged
+  into bulk enrichment `details[].id`. Requiring `person_id` contradicted both that contract and
+  the controlled response, where 20 records had no `person_id`. Adapter v3 selects only `id`;
+  `person_id`, `contact_id`, `organization_id`, and `account_id` are never fallback identities.
+- IDs retain their exact casing and content. Validation accepts a bounded non-empty alphanumeric,
+  underscore, or hyphen form rather than assuming every Apollo identity is a 24-character
+  hexadecimal value. Null, blank, surrounding-whitespace, placeholder, obfuscated, non-string,
+  and malformed values are rejected. Deduplication and ten-record chunking remain unchanged.
+- Search observation records only aggregate field presence, accepted/rejected counts, primitive
+  type counts, and string-length counts. No identifier, person, URL, response body, credential,
+  or header value is logged or persisted in diagnostics.
+- Bulk construction is `POST /api/v1/people/bulk_match` with `json={"details": [{"id": ...}]}`
+  and only `x-api-key`, `Content-Type`, and `Accept` headers. Reveal/waterfall/webhook/search
+  options are omitted, an empty batch is rejected locally, and IDs are never transformed.
+  The earlier 422 may therefore have resulted from the now-removed query-option encoding, an
+  account-specific bulk contract/access rule, or record/request validation that the old adapter
+  did not safely capture; identifier selection alone is not asserted as its cause.
+- Allowlisted 422 metadata now distinguishes request-level from record-level validation. When no
+  safe structured error/path exists, the aggregate reason is
+  `provider_bulk_validation_failed`; it is not mislabeled as an invalid person ID. The existing
+  bounded single-person isolation remains unchanged and is covered only by synthetic tests.
+- Provider-error runs now carry a retry policy and, for transient errors, a bounded
+  `retry_eligible_at` timestamp in existing JSON context. GET remains read-only. Current adapter
+  schema failures and permanent account/configuration failures block discovery; transient
+  failures require both elapsed retry time and an explicit POST. An adapter fingerprint change
+  makes an old schema error stale/refreshable, but never starts discovery automatically.
+- The collapsed summary action is now “View people” and performs only GET. Initial discovery,
+  stale refresh, and eligible provider retry are separate explicit buttons. Client promise
+  coalescing and the backend Redis lock continue to collapse repeated mutation clicks.
+
+### Rollout and rollback
+
+No migration or global Redis operation is required. Deploy adapter v3 and the API/web changes
+together. Existing successful recommendations and unrelated providers/jobs remain current.
+Rolling back restores adapter v2 fingerprints; do not delete discovery runs or disable request
+coalescing. Keep PDL, Hunter/email discovery, network matching, and broad fallback disabled for
+the next separately approved live validation.
+
+### Validation checklist
+
+- [x] Focused People backend: 50 passed.
+- [x] Focused People frontend: 60 passed.
+- [x] Complete API: 648 passed.
+- [x] Complete web: 14 files / 200 tests passed.
+- [x] Web lint, typecheck, and production build passed.
+- [x] Extension typecheck, 30 files / 284 tests, and production build passed.
+- [x] Docker Compose configuration validation passed.
+- [x] Changed-code Ruff and `git diff --check` passed.
+- [ ] A new explicit approval is required before any live Apollo validation.

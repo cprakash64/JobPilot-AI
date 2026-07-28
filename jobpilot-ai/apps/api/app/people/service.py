@@ -238,6 +238,93 @@ def _latest_run(
     )
 
 
+_RETRYABLE_PROVIDER_ERRORS = frozenset(
+    {
+        "provider_circuit_open",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_network_error",
+        "provider_unavailable",
+        "discovery_failed",
+    }
+)
+_NON_RETRYABLE_PROVIDER_ERRORS = frozenset(
+    {
+        "provider_not_configured",
+        "provider_unauthorized",
+        "provider_forbidden",
+        "provider_budget_exceeded",
+        "provider_user_limit_exceeded",
+    }
+)
+
+
+def _current_provider_error_run(
+    db: Session,
+    *,
+    job_id: int,
+    user_id: int,
+    fingerprint: str,
+) -> PeopleDiscoveryRun | None:
+    latest = _latest_run(
+        db,
+        job_id=job_id,
+        user_id=user_id,
+        fingerprints=[fingerprint],
+    )
+    return latest if latest and latest.status == "provider_unavailable" else None
+
+
+def _provider_error_retry_state(
+    run: PeopleDiscoveryRun,
+    *,
+    now: datetime | None = None,
+) -> tuple[bool, int | None, datetime | None]:
+    reason = run.failure_code or "provider_unavailable"
+    if reason == "provider_schema_error" or reason in _NON_RETRYABLE_PROVIDER_ERRORS:
+        return False, None, None
+    if reason not in _RETRYABLE_PROVIDER_ERRORS:
+        return False, None, None
+    value = (run.company_context or {}).get("retry_eligible_at")
+    try:
+        retry_at = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        retry_at = None
+    if retry_at is None:
+        completed = run.completed_at or run.started_at
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=UTC)
+        retry_at = completed + timedelta(seconds=_provider_retry_seconds(reason))
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    current = now or _now()
+    remaining = max(0, int((retry_at - current).total_seconds() + 0.999))
+    return remaining == 0, remaining or None, retry_at
+
+
+def _provider_error_blocks_discovery(run: PeopleDiscoveryRun) -> bool:
+    retry_eligible, _, _ = _provider_error_retry_state(run)
+    return not retry_eligible
+
+
+def _provider_error_context(reason: str, *, now: datetime) -> dict[str, object]:
+    if reason in _RETRYABLE_PROVIDER_ERRORS:
+        retry_at = now + timedelta(seconds=_provider_retry_seconds(reason))
+        return {
+            "provider_error_retry_policy": "bounded_explicit_retry",
+            "retry_eligible_at": retry_at.isoformat(),
+        }
+    if reason == "provider_schema_error":
+        return {
+            "provider_error_retry_policy": "adapter_version_change_required",
+            "retry_eligible_at": None,
+        }
+    return {
+        "provider_error_retry_policy": "non_retryable",
+        "retry_eligible_at": None,
+    }
+
+
 def _normalized_linkedin(value: str | None) -> str | None:
     return safe_profile_url(value)
 
@@ -1129,6 +1216,23 @@ async def discover(
         )
         return recommendations_payload(db, user, job_id)
 
+    cached_provider_error = _current_provider_error_run(
+        db,
+        job_id=job_id,
+        user_id=user.id,
+        fingerprint=fingerprint,
+    )
+    if (
+        cached_provider_error is not None
+        and _provider_error_blocks_discovery(cached_provider_error)
+    ):
+        metric(
+            "people_discovery_cache_hits_total",
+            provider="database_provider_error",
+            scoring_version=SCORING_VERSION,
+        )
+        return recommendations_payload(db, user, job_id)
+
     if strategy == "broadened":
         exact_fingerprint = query_fingerprint(job, "exact")
         if _fresh_no_match_run(
@@ -1177,6 +1281,17 @@ async def discover(
             user_id=user.id,
             fingerprint=fingerprint,
         ) is not None:
+            return recommendations_payload(db, user, job_id)
+        cached_provider_error = _current_provider_error_run(
+            db,
+            job_id=job_id,
+            user_id=user.id,
+            fingerprint=fingerprint,
+        )
+        if (
+            cached_provider_error is not None
+            and _provider_error_blocks_discovery(cached_provider_error)
+        ):
             return recommendations_payload(db, user, job_id)
         profile = extract_job_people_profile(job, db)
         provider = get_people_provider()
@@ -1582,15 +1697,28 @@ async def discover(
                 diagnostics[category]["title_groups"] = list(dict.fromkeys(
                     diagnostics[category]["title_groups"]
                 ))
+            completed_at = _now()
+            provider_error_context = (
+                _provider_error_context(
+                    run.failure_code or "provider_unavailable",
+                    now=completed_at,
+                )
+                if run.status == "provider_unavailable"
+                else {}
+            )
             run.company_context = {
                 **company_context,
                 "provider_request_count": usage.requests,
                 "provider_enrichment_safe_metrics": getattr(
                     provider, "enrichment_safe_metrics", {}
                 ),
+                "provider_search_identifier_safe_metrics": getattr(
+                    provider, "search_identifier_safe_metrics", {}
+                ),
+                **provider_error_context,
             }
             run.category_diagnostics = diagnostics
-            run.completed_at = _now()
+            run.completed_at = completed_at
             db.commit()
             metric(
                 "people_provider_credits_used",
@@ -1606,10 +1734,18 @@ async def discover(
             db.rollback()
             failed_run = db.get(PeopleDiscoveryRun, run.id)
             if failed_run:
+                completed_at = _now()
                 failed_run.status = "provider_unavailable"
                 failed_run.failure_code = "discovery_failed"
                 failed_run.safe_failure_message = "People discovery is temporarily unavailable."
-                failed_run.completed_at = _now()
+                failed_run.company_context = {
+                    **(failed_run.company_context or {}),
+                    **_provider_error_context(
+                        "discovery_failed",
+                        now=completed_at,
+                    ),
+                }
+                failed_run.completed_at = completed_at
                 db.commit()
             metric(
                 "people_discovery_provider_errors_total",
@@ -1735,7 +1871,18 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     has_results = any(categories.values())
     response_status = "complete" if has_results else "not_started"
     warnings: list[str] = []
-    if stale_version:
+    if (
+        stale_version
+        and latest_run
+        and latest_run.status == "provider_unavailable"
+        and latest_run.failure_code != "provider_schema_error"
+    ):
+        response_status = "provider_unavailable"
+        warnings.append(
+            latest_run.safe_failure_message
+            or "Professional data provider unavailable."
+        )
+    elif stale_version:
         response_status = "stale"
         warnings.append("Previous search results used an older search version. Refresh is available.")
     elif latest_run and latest_run.status in {"running"}:
@@ -1756,16 +1903,24 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         if latest_run and latest_run.status == "provider_unavailable"
         else "available"
     )
-    retry_eligible = availability_reason in {
-        "provider_circuit_open",
-        "provider_rate_limited",
-        "provider_timeout",
-        "provider_network_error",
-        "provider_unavailable",
-    }
-    retry_after_seconds = (
-        _provider_retry_seconds(availability_reason) if retry_eligible else None
-    )
+    retry_eligible = False
+    retry_after_seconds: int | None = None
+    retry_eligible_at: datetime | None = None
+    if (
+        stale_version
+        and latest_run
+        and latest_run.status == "provider_unavailable"
+        and availability_reason == "provider_schema_error"
+    ):
+        # A provider-schema failure becomes retryable only when its adapter
+        # fingerprint is obsolete. The POST remains an explicit user action.
+        retry_eligible = True
+    elif latest_run and latest_run.status == "provider_unavailable":
+        (
+            retry_eligible,
+            retry_after_seconds,
+            retry_eligible_at,
+        ) = _provider_error_retry_state(latest_run)
     exact_no_match = _fresh_no_match_run(
         db,
         job_id=job_id,
@@ -1801,6 +1956,7 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         "availability_reason": availability_reason,
         "retry_eligible": retry_eligible,
         "retry_after_seconds": retry_after_seconds,
+        "retry_eligible_at": retry_eligible_at,
         "beta": is_beta(user),
         "generated_at": latest_run.completed_at if latest_run else None,
         "expires_at": expires_at,
@@ -1814,8 +1970,11 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             ),
             "location_filter": "soft",
             "parent_company_matches_included": related_company_search_attempted,
-            "refresh_eligible": response_status
-            in {"provider_unavailable", "stale"},
+            "refresh_eligible": response_status == "stale"
+            or (
+                response_status == "provider_unavailable"
+                and retry_eligible
+            ),
             "exact_company_search_completed": exact_no_match is not None
             or bool(has_results and latest_current_run),
             "related_company_search_attempted": related_company_search_attempted,

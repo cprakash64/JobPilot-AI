@@ -458,7 +458,7 @@ def test_apollo_adapter_version_refreshes_cached_schema_error(
     db.flush()
     monkeypatch.setattr(settings, "people_primary_provider", "apollo")
     monkeypatch.setattr(
-        service, "APOLLO_ENRICHMENT_ADAPTER_VERSION", "apollo-enrichment-v1"
+        service, "APOLLO_ENRICHMENT_ADAPTER_VERSION", "apollo-enrichment-v2"
     )
     broken_fingerprint = service.query_fingerprint(job)
     db.add(PeopleDiscoveryRun(
@@ -474,14 +474,78 @@ def test_apollo_adapter_version_refreshes_cached_schema_error(
     db.commit()
 
     monkeypatch.setattr(
-        service, "APOLLO_ENRICHMENT_ADAPTER_VERSION", "apollo-enrichment-v2"
+        service, "APOLLO_ENRICHMENT_ADAPTER_VERSION", "apollo-enrichment-v3"
     )
     payload = recommendations_payload(db, user, job.id)
 
     assert service.query_fingerprint(job) != broken_fingerprint
     assert payload["status"] == "stale"
     assert payload["availability_reason"] == "provider_schema_error"
+    assert payload["retry_eligible"] is True
     assert payload["search_scope"]["refresh_eligible"] is True
+
+
+def test_adapter_change_waits_for_one_explicit_retry_mutation(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    job = _job()
+    user = User(
+        email="adapter-explicit-retry@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    db.add_all([job, user])
+    db.flush()
+    monkeypatch.setattr(settings, "people_primary_provider", "apollo")
+    monkeypatch.setattr(
+        service, "APOLLO_ENRICHMENT_ADAPTER_VERSION", "apollo-enrichment-v2"
+    )
+    db.add(PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="provider_unavailable",
+        provider="apollo",
+        query_fingerprint=service.query_fingerprint(job),
+        failure_code="provider_schema_error",
+        safe_failure_message="The people provider returned an unsupported response.",
+        completed_at=datetime.now(UTC),
+    ))
+    db.commit()
+    monkeypatch.setattr(
+        service, "APOLLO_ENRICHMENT_ADAPTER_VERSION", "apollo-enrichment-v3"
+    )
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    provider = MockPeopleProvider([])
+    monkeypatch.setattr(service, "get_people_provider", lambda: provider)
+    single_query = PeopleSearchQuery(
+        category="likely_recruiter",
+        company_name="Acme AI",
+        company_domain="acme.example",
+        titles=["Technical Recruiter"],
+        limit=1,
+    )
+    monkeypatch.setattr(
+        service,
+        "build_category_search_queries",
+        lambda _profile, category, **_kwargs: (
+            [single_query] if category == "likely_recruiter" else []
+        ),
+    )
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    loaded = client.get(f"/jobs/{job.id}/people", headers=headers)
+    refreshed = client.get(f"/jobs/{job.id}/people", headers=headers)
+    assert loaded.json()["status"] == "stale"
+    assert refreshed.json()["status"] == "stale"
+    assert provider.requests == 0
+
+    retried = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+    assert retried.status_code == 200
+    assert provider.requests == 1
 
 
 def test_current_no_match_and_controlled_broaden_are_each_idempotent(
@@ -607,9 +671,125 @@ def test_apollo_search_uses_current_endpoint_and_partial_search_schema(
     assert "q_organization_domains" not in kwargs["json"]
     assert kwargs["headers"]["x-api-key"] == "configured-without-reading-runtime-secret"
     assert rows[0].provider_record_observed_at is not None
-    assert rows[0].provider_person_id == "aaaaaaaaaaaaaaaaaaaaaaaa"
+    assert rows[0].provider_person_id == "bbbbbbbbbbbbbbbbbbbbbbbb"
     assert rows[0].employment_verified_at is None
     assert rows[0].employment_source == "provider_current_listing"
+    assert provider.search_identifier_safe_metrics == {
+        "records_with_id": 1,
+        "records_with_person_id": 1,
+        "records_with_contact_id": 1,
+        "accepted_identifier_count": 1,
+        "rejected_identifier_count": 0,
+        "identifier_type_distribution": {"string": 1},
+        "identifier_length_distribution": {"24": 1},
+    }
+
+
+def test_apollo_search_accepts_documented_id_without_person_id_and_logs_only_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    documented_id = "apollo_person-ABC_123"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "people": [{
+                        "id": documented_id,
+                        "first_name": "Private",
+                        "last_name_obfuscated": "Pe***n",
+                        "title": "Engineering Manager",
+                        "organization": {"name": "Acme"},
+                    }]
+                },
+            )
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
+    with caplog.at_level(logging.INFO, logger="jobpilot.people.provider"):
+        rows = asyncio.run(provider.search_people(PeopleSearchQuery(
+            category="potential_hiring_manager",
+            company_name="Acme",
+            company_domain="acme.example",
+            titles=["Engineering Manager"],
+            limit=1,
+        )))
+
+    assert [row.provider_person_id for row in rows] == [documented_id]
+    assert provider.search_identifier_safe_metrics == {
+        "records_with_id": 1,
+        "records_with_person_id": 0,
+        "records_with_contact_id": 0,
+        "accepted_identifier_count": 1,
+        "rejected_identifier_count": 0,
+        "identifier_type_distribution": {"string": 1},
+        "identifier_length_distribution": {str(len(documented_id)): 1},
+    }
+    assert documented_id not in caplog.text
+    assert "Private" not in caplog.text
+    assert "configured-without-reading-runtime-secret" not in caplog.text
+
+
+def test_apollo_search_rejects_contact_organization_and_person_id_as_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "people": [
+                        {
+                            "person_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+                            "contact_id": "bbbbbbbbbbbbbbbbbbbbbbbb",
+                            "title": "Engineering Manager",
+                            "first_name": "Redacted",
+                            "organization": {"name": "Acme"},
+                        },
+                        {
+                            "organization_id": "cccccccccccccccccccccccc",
+                            "account_id": "dddddddddddddddddddddddd",
+                            "title": "Director of Engineering",
+                            "first_name": "Redacted",
+                            "organization": {"name": "Acme"},
+                        },
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
+    with pytest.raises(ProviderUnavailable) as raised:
+        asyncio.run(provider.search_people(PeopleSearchQuery(
+            category="potential_hiring_manager",
+            company_name="Acme",
+            company_domain="acme.example",
+            titles=["Engineering Manager"],
+            limit=2,
+        )))
+
+    assert raised.value.reason == "provider_schema_error"
+    assert provider.search_identifier_safe_metrics["records_with_id"] == 0
+    assert provider.search_identifier_safe_metrics["records_with_person_id"] == 1
+    assert provider.search_identifier_safe_metrics["records_with_contact_id"] == 1
+    assert provider.search_identifier_safe_metrics["accepted_identifier_count"] == 0
+    assert provider.search_identifier_safe_metrics["rejected_identifier_count"] == 2
 
 
 def test_apollo_422_is_reported_as_provider_schema_error(
@@ -795,6 +975,51 @@ def test_eight_valid_apollo_ids_use_one_bulk_request(
     assert len(enriched) == 8
 
 
+def test_apollo_bulk_preserves_documented_id_and_avoids_empty_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    documented_id = "Apollo_Search-ID_123"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append(kwargs)
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "matches": [{
+                        "id": documented_id,
+                        "name": "Redacted Person",
+                        "title": "Engineering Manager",
+                        "organization": {"name": "Acme"},
+                    }]
+                },
+            )
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
+    empty = asyncio.run(provider.enrich_people([
+        PersonEnrichmentRequest(provider_person_id=""),
+        PersonEnrichmentRequest(provider_person_id="placeholder"),
+    ]))
+    enriched = asyncio.run(provider.enrich_people([
+        PersonEnrichmentRequest(provider_person_id=documented_id)
+    ]))
+
+    assert empty == []
+    assert len(calls) == 1
+    assert calls[0]["json"] == {"details": [{"id": documented_id}]}
+    assert "params" not in calls[0]
+    assert [person.provider_person_id for person in enriched] == [documented_id]
+
+
 def test_apollo_bulk_enrichment_filters_deduplicates_and_chunks_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -840,7 +1065,7 @@ def test_apollo_bulk_enrichment_filters_deduplicates_and_chunks_ids(
             *identifiers,
             identifiers[0],
             "",
-            "not-an-apollo-id",
+            "not an apollo id",
             "abcd********************",
         ]
     ]
@@ -866,13 +1091,14 @@ def test_apollo_bulk_enrichment_filters_deduplicates_and_chunks_ids(
     )
     assert all("reveal_personal_emails" not in call[2]["json"] for call in calls)
     assert all("reveal_phone_number" not in call[2]["json"] for call in calls)
+    assert all("params" not in call[2] for call in calls)
     assert all(call[2]["headers"]["Content-Type"] == "application/json" for call in calls)
     assert all(set(call[2]["headers"]) == {"x-api-key", "Content-Type", "Accept"} for call in calls)
     assert provider.enrichment_safe_metrics["duplicate_provider_person_id"] == 1
     assert provider.enrichment_safe_metrics["invalid_provider_person_id"] == 4
     assert provider.enrichment_safe_metrics["blank_provider_person_id"] == 1
     assert provider.enrichment_safe_metrics["malformed_provider_person_id"] == 1
-    assert provider.enrichment_safe_metrics["obfuscated_provider_person_id"] == 1
+    assert provider.enrichment_safe_metrics["placeholder_provider_person_id"] == 1
     assert provider.enrichment_safe_metrics["null_provider_person_id"] == 1
 
 
@@ -960,9 +1186,34 @@ def test_apollo_bulk_422_uses_bounded_single_fallback_and_safe_metadata(
     assert providers._CIRCUITS.get("apollo", (0, None)) == (0, None)
     assert "body.details.*.id" in caplog.text
     assert "expected_types=['string']" in caplog.text
+    assert "error_scope=record_level" in caplog.text
     assert "Private Person" not in caplog.text
     assert rejected_identifier not in caplog.text
     assert "configured-without-reading-runtime-secret" not in caplog.text
+
+
+def test_apollo_422_without_safe_field_path_uses_request_level_reason() -> None:
+    response = httpx.Response(
+        422,
+        request=httpx.Request("POST", "https://api.apollo.io/api/v1/people/bulk_match"),
+        json={"message": "Private response content must not be retained"},
+    )
+
+    metadata = providers._safe_apollo_validation_metadata(response)
+
+    assert metadata == {
+        "error_types": ["provider_bulk_validation_failed"],
+        "field_paths": [],
+        "expected_types": [],
+        "missing_required": False,
+        "error_scope": "request_level",
+    }
+    unparseable = httpx.Response(
+        422,
+        request=response.request,
+        text="not-json and not retained",
+    )
+    assert providers._safe_apollo_validation_metadata(unparseable) == metadata
 
 
 def test_apollo_enrichment_requires_id_correlation_and_preserves_request_order(
@@ -1395,7 +1646,7 @@ def test_provider_budget_block_is_non_retryable_and_not_persisted(
     assert db.query(PeopleDiscoveryRun).count() == before
 
 
-def test_provider_circuit_open_response_includes_retry_eligibility(
+def test_provider_circuit_open_response_observes_retry_timing(
     db: Session,
 ) -> None:
     from app.people import service
@@ -1422,8 +1673,171 @@ def test_provider_circuit_open_response_includes_retry_eligibility(
 
     assert payload["status"] == "provider_unavailable"
     assert payload["availability_reason"] == "provider_circuit_open"
-    assert payload["retry_eligible"] is True
-    assert payload["retry_after_seconds"] == 60
+    assert payload["retry_eligible"] is False
+    assert 1 <= payload["retry_after_seconds"] <= 60
+    assert payload["retry_eligible_at"] is not None
+    assert payload["search_scope"]["refresh_eligible"] is False
+
+
+def test_provider_schema_error_reopen_and_refresh_are_read_only(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user = User(
+        email="schema-cache@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    db.add(PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="provider_unavailable",
+        provider="apollo",
+        query_fingerprint=service.query_fingerprint(job, "exact"),
+        failure_code="provider_schema_error",
+        safe_failure_message="The people provider returned an unsupported response.",
+        company_context={
+            "provider_adapter_version": providers.APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            "provider_error_retry_policy": "adapter_version_change_required",
+            "retry_eligible_at": None,
+        },
+        completed_at=datetime.now(UTC),
+    ))
+    db.commit()
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    monkeypatch.setattr(settings, "people_primary_provider", "apollo")
+    provider = MockPeopleProvider([])
+    monkeypatch.setattr(service, "get_people_provider", lambda: provider)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    first = client.get(f"/jobs/{job.id}/people", headers=headers)
+    reopened = client.get(f"/jobs/{job.id}/people", headers=headers)
+    explicit_but_ineligible = client.post(
+        f"/jobs/{job.id}/people/discover",
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert reopened.status_code == 200
+    assert explicit_but_ineligible.status_code == 200
+    assert first.json()["status"] == "provider_unavailable"
+    assert first.json()["retry_eligible"] is False
+    assert provider.requests == 0
+    assert db.query(PeopleDiscoveryRun).filter(
+        PeopleDiscoveryRun.job_id == job.id
+    ).count() == 1
+
+
+def test_later_success_supersedes_cached_provider_error(db: Session) -> None:
+    from app.people import service
+
+    user = User(
+        email="provider-error-superseded@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    fingerprint = service.query_fingerprint(job, "exact")
+    db.add(PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="provider_unavailable",
+        provider="apollo",
+        query_fingerprint=fingerprint,
+        failure_code="provider_schema_error",
+        completed_at=datetime.now(UTC) - timedelta(minutes=1),
+    ))
+    db.flush()
+    db.add(PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="complete",
+        provider="apollo",
+        query_fingerprint=fingerprint,
+        completed_at=datetime.now(UTC),
+    ))
+    db.commit()
+
+    assert service._current_provider_error_run(
+        db,
+        job_id=job.id,
+        user_id=user.id,
+        fingerprint=fingerprint,
+    ) is None
+
+
+def test_transient_provider_error_requires_explicit_retry_after_timestamp(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user = User(
+        email="timed-provider-retry@example.com",
+        hashed_password=hash_password("password123"),
+    )
+    job = _job()
+    db.add_all([user, job])
+    db.flush()
+    run = PeopleDiscoveryRun(
+        job_id=job.id,
+        user_id=user.id,
+        status="provider_unavailable",
+        provider="apollo",
+        query_fingerprint=service.query_fingerprint(job, "exact"),
+        failure_code="provider_timeout",
+        safe_failure_message="The people search provider took too long to respond.",
+        company_context={
+            "provider_error_retry_policy": "bounded_explicit_retry",
+            "retry_eligible_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        },
+        completed_at=datetime.now(UTC),
+    )
+    db.add(run)
+    db.commit()
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+    monkeypatch.setattr(settings, "people_primary_provider", "apollo")
+    provider = MockPeopleProvider([])
+    monkeypatch.setattr(service, "get_people_provider", lambda: provider)
+    single_query = PeopleSearchQuery(
+        category="likely_recruiter",
+        company_name="Acme AI",
+        company_domain="acme.example",
+        titles=["Technical Recruiter"],
+        limit=1,
+    )
+    monkeypatch.setattr(
+        service,
+        "build_category_search_queries",
+        lambda _profile, category, **_kwargs: (
+            [single_query] if category == "likely_recruiter" else []
+        ),
+    )
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    too_early = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+    assert too_early.status_code == 200
+    assert too_early.json()["retry_eligible"] is False
+    assert provider.requests == 0
+
+    run.company_context = {
+        **run.company_context,
+        "retry_eligible_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+    }
+    db.commit()
+    retried = client.post(f"/jobs/{job.id}/people/discover", headers=headers)
+
+    assert retried.status_code == 200
+    assert provider.requests == 1
 
 
 def _persist_recommendation(

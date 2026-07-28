@@ -519,10 +519,9 @@ export function PeopleWhoCanHelpSummary({
   const resultsAvailable = hasResults(data);
   const availableMessage = data ? availabilityMessage(data) : null;
 
-  async function loadAndMaybeDiscover(force: boolean) {
+  async function loadOnly(force: boolean) {
     setExpanded(true);
-    const loaded = data && !force ? data : await controller.load(force);
-    if (loaded?.status === "not_started") await controller.discover();
+    if (!data || force) await controller.load(force);
   }
 
   async function activate() {
@@ -530,7 +529,7 @@ export function PeopleWhoCanHelpSummary({
       setExpanded(false);
       return;
     }
-    await loadAndMaybeDiscover(false);
+    await loadOnly(false);
   }
 
   const counts = data
@@ -576,12 +575,10 @@ export function PeopleWhoCanHelpSummary({
           disabled={loading || discovering}
         >
           {loading || discovering
-            ? "Finding people…"
+            ? "Loading people…"
             : expanded
               ? "Hide people"
-              : resultsAvailable
-                ? "View people"
-                : "Find people"}
+              : "View people"}
         </Button>
       </div>
 
@@ -592,7 +589,7 @@ export function PeopleWhoCanHelpSummary({
             <div>
               <p role="alert" className="text-sm text-red-700">{error}</p>
               {errorCanRetry ? (
-                <Button variant="secondary" className="mt-3" onClick={() => void loadAndMaybeDiscover(true)}>
+                <Button variant="secondary" className="mt-3" onClick={() => void loadOnly(true)}>
                   Retry
                 </Button>
               ) : null}

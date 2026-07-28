@@ -23,8 +23,11 @@ from app.people.security import safe_profile_url
 
 logger = logging.getLogger("jobpilot.people.provider")
 
-APOLLO_ENRICHMENT_ADAPTER_VERSION = "apollo-enrichment-v2"
-_APOLLO_PERSON_ID = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
+APOLLO_ENRICHMENT_ADAPTER_VERSION = "apollo-enrichment-v3"
+_APOLLO_PERSON_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_APOLLO_PLACEHOLDER_IDS = frozenset(
+    {"unknown", "none", "null", "placeholder", "redacted", "n/a"}
+)
 
 
 class ProviderUnavailable(RuntimeError):
@@ -191,6 +194,7 @@ class ApolloPeopleProvider(_HttpProvider):
         self.api_key = api_key or settings.apollo_api_key
         self.enrichment_rejection_reasons: dict[str, str] = {}
         self.enrichment_safe_metrics: dict[str, int] = {}
+        self.search_identifier_safe_metrics: dict[str, object] = {}
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -227,6 +231,21 @@ class ApolloPeopleProvider(_HttpProvider):
                 http_status=self.last_http_status,
                 duration_ms=self.last_duration_ms,
             )
+        self.search_identifier_safe_metrics = _search_identifier_safe_metrics(rows)
+        logger.info(
+            "apollo_search_identifier_shape records_with_id=%s "
+            "records_with_person_id=%s records_with_contact_id=%s accepted=%s "
+            "rejected=%s id_type_distribution=%s id_length_distribution=%s "
+            "adapter_version=%s",
+            self.search_identifier_safe_metrics["records_with_id"],
+            self.search_identifier_safe_metrics["records_with_person_id"],
+            self.search_identifier_safe_metrics["records_with_contact_id"],
+            self.search_identifier_safe_metrics["accepted_identifier_count"],
+            self.search_identifier_safe_metrics["rejected_identifier_count"],
+            self.search_identifier_safe_metrics["identifier_type_distribution"],
+            self.search_identifier_safe_metrics["identifier_length_distribution"],
+            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+        )
         normalized = [
             person
             for row in rows
@@ -298,11 +317,9 @@ class ApolloPeopleProvider(_HttpProvider):
         return self.enrichment_rejection_reasons.get(provider_person_id)
 
     async def _bulk_enrichment_request(self, identifiers: list[str]) -> dict:
+        if not identifiers:
+            raise ValueError("Apollo bulk enrichment requires at least one identifier")
         headers = self._headers()
-        params = {
-            "reveal_personal_emails": "false",
-            "reveal_phone_number": "false",
-        }
         payload = {"details": [{"id": identifier} for identifier in identifiers]}
         logger.info(
             "apollo_enrichment_request method=POST endpoint=/api/v1/people/bulk_match "
@@ -313,14 +330,13 @@ class ApolloPeopleProvider(_HttpProvider):
             sorted(payload),
             len(payload["details"]),
             ["id"],
-            sorted(params),
+            [],
             APOLLO_ENRICHMENT_ADAPTER_VERSION,
         )
         return await self._request(
             "POST",
             "https://api.apollo.io/api/v1/people/bulk_match",
             headers=headers,
-            params=params,
             json=payload,
         )
 
@@ -334,8 +350,6 @@ class ApolloPeopleProvider(_HttpProvider):
                 headers=self._headers(),
                 params={
                     "id": identifier,
-                    "reveal_personal_emails": "false",
-                    "reveal_phone_number": "false",
                 },
             )
         except ProviderUnavailable as exc:
@@ -523,10 +537,13 @@ def get_email_provider() -> WorkEmailProvider:
 def _valid_apollo_person_id(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    identifier = value.strip()
-    if not identifier or not _APOLLO_PERSON_ID.fullmatch(identifier):
+    if value != value.strip() or not value:
         return None
-    return identifier.lower()
+    if value.lower() in _APOLLO_PLACEHOLDER_IDS:
+        return None
+    if "*" in value or not _APOLLO_PERSON_ID.fullmatch(value):
+        return None
+    return value
 
 
 def _invalid_apollo_person_id_shape(value: object) -> str:
@@ -536,18 +553,65 @@ def _invalid_apollo_person_id_shape(value: object) -> str:
         return "non_string_provider_person_id"
     if not value.strip():
         return "blank_provider_person_id"
-    if "*" in value:
-        return "obfuscated_provider_person_id"
+    if "*" in value or value.strip().lower() in _APOLLO_PLACEHOLDER_IDS:
+        return "placeholder_provider_person_id"
     return "malformed_provider_person_id"
 
 
 def _apollo_person_id(row: dict, *, identifier_kind: str) -> str | None:
-    if identifier_kind == "search":
-        # Apollo's current People Enrichment contract explicitly directs callers
-        # to use People Search's person_id. Search-result id/contact_id values
-        # are different identities and must not be sent to enrichment.
-        return _valid_apollo_person_id(row.get("person_id"))
+    # Apollo documents People Search's `id` as the identity to copy unchanged
+    # into bulk_match details[].id. contact_id and organization/account IDs are
+    # different namespaces and are never fallbacks.
     return _valid_apollo_person_id(row.get("id"))
+
+
+def _identifier_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "other"
+
+
+def _search_identifier_safe_metrics(rows: list[object]) -> dict[str, object]:
+    records_with_id = 0
+    records_with_person_id = 0
+    records_with_contact_id = 0
+    accepted = 0
+    type_distribution: dict[str, int] = {}
+    length_distribution: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            type_distribution["missing"] = type_distribution.get("missing", 0) + 1
+            continue
+        records_with_id += int("id" in row)
+        records_with_person_id += int("person_id" in row)
+        records_with_contact_id += int("contact_id" in row)
+        value = row.get("id")
+        value_type = _identifier_type(value)
+        type_distribution[value_type] = type_distribution.get(value_type, 0) + 1
+        if isinstance(value, str):
+            length = str(len(value))
+            length_distribution[length] = length_distribution.get(length, 0) + 1
+        if _valid_apollo_person_id(value) is not None:
+            accepted += 1
+    return {
+        "records_with_id": records_with_id,
+        "records_with_person_id": records_with_person_id,
+        "records_with_contact_id": records_with_contact_id,
+        "accepted_identifier_count": accepted,
+        "rejected_identifier_count": len(rows) - accepted,
+        "identifier_type_distribution": dict(sorted(type_distribution.items())),
+        "identifier_length_distribution": dict(sorted(length_distribution.items())),
+    }
 
 
 def _bulk_apollo_matches(data: dict) -> list[object] | None:
@@ -582,12 +646,19 @@ def _safe_validation_token(value: object) -> str | None:
 def _safe_apollo_validation_metadata(
     response: httpx.Response,
 ) -> dict[str, object]:
+    fallback = {
+        "error_types": ["provider_bulk_validation_failed"],
+        "field_paths": [],
+        "expected_types": [],
+        "missing_required": False,
+        "error_scope": "request_level",
+    }
     try:
         payload = response.json()
     except ValueError:
-        return {"error_types": ["unparseable_validation_response"]}
+        return fallback
     if not isinstance(payload, dict):
-        return {"error_types": ["unsupported_validation_response"]}
+        return fallback
     values = payload.get("detail") or payload.get("errors") or []
     if isinstance(values, dict):
         values = [values]
@@ -622,11 +693,24 @@ def _safe_apollo_validation_metadata(
         )
         if token := _safe_validation_token(expected):
             expected_types.add(token)
+    error_scope = (
+        "record_level"
+        if any(
+            path.startswith("details.") or ".details." in path
+            for path in field_paths
+        )
+        else "request_level"
+    )
     result: dict[str, object] = {
-        "error_types": sorted(error_types) or ["validation_error"],
+        "error_types": (
+            sorted(error_types)
+            if field_paths
+            else ["provider_bulk_validation_failed"]
+        ),
         "field_paths": sorted(field_paths),
         "expected_types": sorted(expected_types),
         "missing_required": missing_required,
+        "error_scope": error_scope,
     }
     return result
 
@@ -636,12 +720,13 @@ def _log_safe_apollo_validation(
 ) -> None:
     logger.warning(
         "apollo_enrichment_validation endpoint=%s http_status=422 error_types=%s "
-        "field_paths=%s expected_types=%s missing_required=%s",
+        "field_paths=%s expected_types=%s missing_required=%s error_scope=%s",
         endpoint,
         metadata.get("error_types", []),
         metadata.get("field_paths", []),
         metadata.get("expected_types", []),
         bool(metadata.get("missing_required")),
+        metadata.get("error_scope", "request_level"),
     )
 
 

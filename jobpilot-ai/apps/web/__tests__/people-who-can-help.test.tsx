@@ -118,6 +118,40 @@ describe("PeopleWhoCanHelp", () => {
     expect(await screen.findByText(expected)).toBeInTheDocument();
   });
 
+  it("keeps browser refresh after provider_schema_error read-only", async () => {
+    const unavailable = response({
+      status: "provider_unavailable",
+      availability_reason: "provider_schema_error",
+      retry_eligible: false,
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => unavailable,
+      text: async () => JSON.stringify(unavailable)
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const first = render(<PeopleWhoCanHelp jobId={7596} />);
+    expect(
+      await screen.findByText("The people provider returned an unsupported response.")
+    ).toBeInTheDocument();
+    first.unmount();
+    clearPeopleCache();
+    render(<PeopleWhoCanHelp jobId={7596} />);
+    expect(
+      await screen.findByText("The people provider returned an unsupported response.")
+    ).toBeInTheDocument();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")
+    ).toHaveLength(0);
+  });
+
   it("shows the discovery initial state, starts discovery, and renders all result categories", async () => {
     const manager = {
       ...recommendation,
@@ -477,7 +511,7 @@ describe("PeopleWhoCanHelpSummary", () => {
       </>
     );
     expect(screen.getAllByRole("heading", { name: "People Who Can Help" })).toHaveLength(100);
-    expect(screen.getAllByRole("button", { name: "Find people" })).toHaveLength(100);
+    expect(screen.getAllByRole("button", { name: "View people" })).toHaveLength(100);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -548,6 +582,10 @@ describe("PeopleWhoCanHelpSummary", () => {
     render(<PeopleWhoCanHelpSummary jobId={731} onViewAll={onViewAll} />);
 
     expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+    expect(await screen.findByText("Find recruiters and referral candidates for this job.")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Find people" }));
 
     expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
@@ -605,7 +643,8 @@ describe("PeopleWhoCanHelpSummary", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<PeopleWhoCanHelpSummary jobId={812} onViewAll={() => undefined} />);
 
-    const button = screen.getByRole("button", { name: "Find people" });
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+    const button = await screen.findByRole("button", { name: "Find people" });
     fireEvent.click(button);
     fireEvent.click(button);
 
@@ -615,6 +654,50 @@ describe("PeopleWhoCanHelpSummary", () => {
           String(input).endsWith("/jobs/812/people/discover") && init?.method === "POST"
       );
       expect(discoveryCalls).toHaveLength(1);
+    });
+    resolveDiscovery({
+      ok: true,
+      json: async () => response(),
+      text: async () => JSON.stringify(response())
+    } as Response);
+    expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
+  });
+
+  it("coalesces repeated explicit provider Retry clicks into one mutation", async () => {
+    const unavailable = response({
+      status: "provider_unavailable",
+      availability_reason: "provider_timeout",
+      retry_eligible: true,
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    let resolveDiscovery!: (value: Response) => void;
+    const discoveryResponse = new Promise<Response>((resolve) => {
+      resolveDiscovery = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") return discoveryResponse;
+      return Promise.resolve({
+        ok: true,
+        json: async () => unavailable,
+        text: async () => JSON.stringify(unavailable)
+      } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PeopleWhoCanHelpSummary jobId={7596} onViewAll={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+    const retry = await screen.findByRole("button", { name: "Retry discovery" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")
+      ).toHaveLength(1);
     });
     resolveDiscovery({
       ok: true,
@@ -647,7 +730,7 @@ describe("PeopleWhoCanHelpSummary", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<PeopleWhoCanHelpSummary jobId={7506} onViewAll={() => undefined} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
     expect(
       await screen.findByText("Saved people results need revalidation.")
     ).toBeInTheDocument();
@@ -676,7 +759,7 @@ describe("PeopleWhoCanHelpSummary", () => {
     }));
     render(<PeopleWhoCanHelpSummary jobId={7508} onViewAll={() => undefined} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
     expect(
       await screen.findByText(
         "The configured provider account does not have access to people search."
@@ -745,7 +828,7 @@ describe("PeopleWhoCanHelpSummary", () => {
       text: async () => JSON.stringify(payload)
     }));
     render(<PeopleWhoCanHelpSummary jobId={7} onViewAll={() => undefined} />);
-    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
     expect(await screen.findByText(expected)).toBeInTheDocument();
   });
 
@@ -774,11 +857,16 @@ describe("PeopleWhoCanHelpSummary", () => {
     render(<PeopleWhoCanHelpSummary jobId={731} onViewAll={() => undefined} />);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "People recommendations could not be loaded"
     );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByText("Find recruiters and referral candidates for this job.")
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "Find people" }));
     expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
