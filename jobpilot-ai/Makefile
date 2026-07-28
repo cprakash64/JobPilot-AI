@@ -1,4 +1,4 @@
-.PHONY: dev dev-hot down reset-db migrate logs-api test test-api test-web test-extension verify-auth
+.PHONY: dev dev-hot down reset-db migrate logs-api test test-api test-web test-extension evaluate-people verify-auth
 
 # Prefer the project-local backend environment when it exists. Developers can
 # still override this explicitly, for example: make test-api API_PYTHON=python3.12
@@ -48,6 +48,9 @@ test-extension:
 	cd apps/extension && npm run typecheck
 	cd apps/extension && npm test
 	cd apps/extension && npm run build
+
+evaluate-people:
+	$(API_PYTHON) evaluation/people_recommendations/evaluate.py
 
 verify-auth:
 	curl -i -sS http://localhost:8000/health

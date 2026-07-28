@@ -33,6 +33,7 @@ def make_settings(**overrides):
         demographics_encryption_key="k" * 32,
         demographics_encryption_required=False,
         workday_credentials_encryption_key="w" * 32,
+        people_email_discovery_enabled=False,
         cors_origins=["https://app.jobpilot.example"],
         cors_allow_credentials=True,
         database_url=SAFE_DB,
@@ -116,6 +117,146 @@ def test_encryption_key_is_required_only_when_encryption_is_enabled() -> None:
 def test_workday_credentials_use_a_dedicated_production_key() -> None:
     findings = collect_findings(make_settings(workday_credentials_encryption_key=None))
     assert any(f.setting == "WORKDAY_CREDENTIALS_ENCRYPTION_KEY" for f in findings)
+
+
+def test_people_email_requires_separate_provider_and_positive_budgets() -> None:
+    findings = collect_findings(make_settings(
+        people_email_discovery_enabled=True,
+        people_data_encryption_key="e" * 32,
+        hunter_api_key=None,
+        people_email_daily_credit_budget=0,
+        people_email_per_user_daily_limit=0,
+        people_email_result_ttl_days=0,
+    ))
+    names = {finding.setting for finding in findings}
+    assert {
+        "HUNTER_API_KEY",
+        "PEOPLE_EMAIL_DAILY_CREDIT_BUDGET",
+        "PEOPLE_EMAIL_PER_USER_DAILY_LIMIT",
+        "PEOPLE_EMAIL_RESULT_TTL_DAYS",
+    } <= names
+
+
+def test_people_email_configuration_accepts_separate_positive_limits() -> None:
+    findings = collect_findings(make_settings(
+        people_email_discovery_enabled=True,
+        people_data_encryption_key="e" * 32,
+        hunter_api_key="configured-secret",
+        people_email_daily_credit_budget=100,
+        people_email_per_user_daily_limit=5,
+        people_email_result_ttl_days=30,
+    ))
+    assert not any(
+        finding.setting.startswith("PEOPLE_EMAIL")
+        or finding.setting == "HUNTER_API_KEY"
+        for finding in findings
+    )
+
+
+def test_secondary_employment_verification_requires_provider_and_own_budgets() -> None:
+    findings = collect_findings(make_settings(
+        people_employment_secondary_verification_enabled=True,
+        pdl_api_key=None,
+        people_employment_verification_daily_credit_budget=0,
+        people_employment_verification_per_user_daily_limit=0,
+    ))
+    names = {finding.setting for finding in findings}
+    assert {
+        "PDL_API_KEY",
+        "PEOPLE_EMPLOYMENT_VERIFICATION_DAILY_CREDIT_BUDGET",
+        "PEOPLE_EMPLOYMENT_VERIFICATION_PER_USER_DAILY_LIMIT",
+    } <= names
+
+
+def test_secondary_employment_verification_accepts_separate_positive_limits() -> None:
+    findings = collect_findings(make_settings(
+        people_employment_secondary_verification_enabled=True,
+        pdl_api_key="configured-secret",
+        people_employment_verification_daily_credit_budget=30,
+        people_employment_verification_per_user_daily_limit=3,
+    ))
+    assert not any(
+        finding.setting == "PDL_API_KEY"
+        or finding.setting.startswith("PEOPLE_EMPLOYMENT_VERIFICATION")
+        for finding in findings
+    )
+
+
+def test_enabled_people_discovery_requires_pdl_and_independent_limits() -> None:
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="apollo",
+        )
+    )
+    assert any(
+        finding.setting == "PEOPLE_PRIMARY_PROVIDER"
+        for finding in findings
+    )
+
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="pdl",
+            people_pdl_discovery_enabled=True,
+            pdl_api_key=None,
+            people_pdl_daily_credit_budget=0,
+            people_pdl_per_user_daily_limit=0,
+            people_pdl_result_ttl_days=0,
+        )
+    )
+    names = {finding.setting for finding in findings}
+    assert {
+        "PDL_API_KEY",
+        "PEOPLE_PDL_DAILY_CREDIT_BUDGET",
+        "PEOPLE_PDL_PER_USER_DAILY_LIMIT",
+        "PEOPLE_PDL_RESULT_TTL_DAYS",
+    } <= names
+
+
+def test_enabled_pdl_discovery_accepts_independent_limits() -> None:
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="pdl",
+            people_pdl_discovery_enabled=True,
+            pdl_api_key="configured-secret",
+            people_pdl_daily_credit_budget=50,
+            people_pdl_per_user_daily_limit=16,
+            people_pdl_result_ttl_days=30,
+            people_pdl_recruiter_results=4,
+            people_pdl_manager_results=4,
+            people_pdl_referral_results=8,
+            people_pdl_max_results_per_discovery=16,
+        )
+    )
+    assert not any(
+        finding.setting.startswith("PEOPLE_PDL")
+        or finding.setting in {"PDL_API_KEY", "PEOPLE_PRIMARY_PROVIDER"}
+        for finding in findings
+    )
+
+
+def test_pdl_category_limits_must_fit_the_discovery_cap() -> None:
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="pdl",
+            people_pdl_discovery_enabled=True,
+            pdl_api_key="configured-secret",
+            people_pdl_daily_credit_budget=50,
+            people_pdl_per_user_daily_limit=16,
+            people_pdl_result_ttl_days=30,
+            people_pdl_recruiter_results=4,
+            people_pdl_manager_results=4,
+            people_pdl_referral_results=8,
+            people_pdl_max_results_per_discovery=15,
+        )
+    )
+    assert any(
+        finding.setting == "PEOPLE_PDL_MAX_RESULTS_PER_DISCOVERY"
+        for finding in findings
+    )
 
 
 # --------------------------------------------------------------------------- #

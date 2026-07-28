@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "fixture_kind": "synthetic_and_redacted",
+  "cases": [
+    {
+      "case_id": "synthetic-ml-001",
+      "categories": {
+        "recruiter": [{"id": "p-r1", "relevant": true, "confidence": 0.91}],
+        "manager": [{"id": "p-m1", "relevant": true, "confidence": 0.82}],
+        "referral": [
+          {"id": "p-e1", "relevant": true, "confidence": 0.88},
+          {"id": "p-e2", "relevant": true, "confidence": 0.77}
+        ]
+      },
+      "employment": [
+        {"id": "p-r1", "predicted_current": true, "actually_current": true, "stale": false},
+        {"id": "p-m1", "predicted_current": true, "actually_current": true, "stale": false},
+        {"id": "p-e1", "predicted_current": true, "actually_current": true, "stale": false}
+      ],
+      "duplicates": [],
+      "no_reliable_result_expected": false,
+      "no_reliable_result_returned": false,
+      "emails": [{"status": "verified", "actually_deliverable_work_email": true}],
+      "unsupported_claims": []
+    },
+    {
+      "case_id": "redacted-security-002",
+      "categories": {"recruiter": [], "manager": [], "referral": []},
+      "employment": [],
+      "duplicates": [],
+      "no_reliable_result_expected": true,
+      "no_reliable_result_returned": true,
+      "emails": [{"status": "not_found", "actually_deliverable_work_email": false}],
+      "unsupported_claims": []
+    }
+  ]
+}

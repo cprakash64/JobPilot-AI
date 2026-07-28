@@ -63,7 +63,7 @@ describe("TrackerClient", () => {
     localStorage.setItem("jobpilot_token", "token");
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
-      if (url.endsWith("/jobs/tracker/all")) {
+      if (url.endsWith("/jobs/tracker/submitted")) {
         return Promise.resolve(jsonResponse({ applications: APPLICATIONS }));
       }
       if (url.endsWith("/jobs/101/tracker") && init?.method === "PUT") {

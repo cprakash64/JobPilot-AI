@@ -13,10 +13,13 @@ from app.models.entities import (
     Experience,
     GeneratedDocument,
     JobMatch,
+    PeopleDiscoveryRun,
+    PeopleRecommendationFeedback,
     Project,
     SensitiveDemographics,
     User,
     UserProfile,
+    UserJobPeopleRecommendation,
 )
 
 router = APIRouter(prefix="/privacy", tags=["privacy"])
@@ -40,6 +43,19 @@ def export_user_data(user: User = Depends(get_current_user), db: Session = Depen
         "matches": db.scalars(select(JobMatch).where(JobMatch.user_id == user.id)).all(),
         "documents": db.scalars(select(GeneratedDocument).where(GeneratedDocument.user_id == user.id)).all(),
         "applications": db.scalars(select(ApplicationTracker).where(ApplicationTracker.user_id == user.id)).all(),
+        "people_recommendations": db.scalars(
+            select(UserJobPeopleRecommendation).where(
+                UserJobPeopleRecommendation.user_id == user.id
+            )
+        ).all(),
+        "people_discovery_runs": db.scalars(
+            select(PeopleDiscoveryRun).where(PeopleDiscoveryRun.user_id == user.id)
+        ).all(),
+        "people_feedback": db.scalars(
+            select(PeopleRecommendationFeedback).where(
+                PeopleRecommendationFeedback.user_id == user.id
+            )
+        ).all(),
     }
     record_audit(db, user.id, "data_exported")
     db.commit()
@@ -52,4 +68,3 @@ def delete_account(user: User = Depends(get_current_user), db: Session = Depends
     db.flush()
     db.execute(delete(User).where(User.id == user.id))
     db.commit()
-

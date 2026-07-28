@@ -104,6 +104,111 @@ export type Job = {
   eligibility?: JobEligibility | null;
 };
 
+export type PeopleStatus =
+  | "disabled"
+  | "not_started"
+  | "in_progress"
+  | "partial"
+  | "complete"
+  | "no_reliable_matches"
+  | "provider_unavailable"
+  | "persistence_error"
+  | "stale";
+
+export type PeopleAvailabilityReason =
+  | "available"
+  | "globally_disabled"
+  | "not_in_rollout"
+  | "configuration_unavailable"
+  | "provider_not_configured"
+  | "provider_circuit_open"
+  | "provider_unauthorized"
+  | "provider_forbidden"
+  | "provider_master_key_required_or_forbidden"
+  | "provider_rate_limited"
+  | "provider_timeout"
+  | "provider_network_error"
+  | "provider_schema_error"
+  | "provider_request_invalid"
+  | "provider_response_invalid"
+  | "provider_budget_exceeded"
+  | "provider_user_limit_exceeded"
+  | "recommendation_commit_failed"
+  | "provider_unavailable";
+
+export type PeopleRecommendation = {
+  recommendation_id: number;
+  full_name: string;
+  current_title: string;
+  current_company: string;
+  category: "likely_recruiter" | "potential_hiring_manager" | "potential_referrer";
+  category_label: string;
+  relevance_score: number;
+  confidence: "high" | "moderate" | "limited";
+  current_employment_confidence: number;
+  employment_validation_status:
+    | "confirmed_exact_company_verified"
+    | "exact_company_current_but_unverified_freshness"
+    | "confirmed_related_company"
+    | "conflicting_current_employment"
+    | "former_employee"
+    | "stale_or_uncertain"
+    | "insufficient_evidence";
+  employment_last_verified_at: string | null;
+  employment_warning: string | null;
+  email_lookup_allowed: boolean;
+  reasons: string[];
+  limitations: string[];
+  last_checked_at: string;
+  professional_profile_url: string | null;
+  email_status:
+    | "not_requested"
+    | "searching"
+    | "verified"
+    | "accept_all"
+    | "risky"
+    | "unknown"
+    | "not_found"
+    | "employment_conflict"
+    | "identity_uncertain"
+    | "rate_limited"
+    | "budget_exceeded"
+    | "provider_unavailable"
+    | "provider_error";
+  professional_email: string | null;
+  email_verified_at: string | null;
+  saved: boolean;
+  contacted: boolean;
+};
+
+export type PeopleResponse = {
+  status: PeopleStatus;
+  availability_reason?: PeopleAvailabilityReason;
+  retry_eligible?: boolean;
+  retry_after_seconds?: number | null;
+  retry_eligible_at?: string | null;
+  beta: boolean;
+  generated_at?: string | null;
+  expires_at?: string | null;
+  categories: {
+    likely_recruiters: PeopleRecommendation[];
+    potential_hiring_managers: PeopleRecommendation[];
+    potential_referrers: PeopleRecommendation[];
+  };
+  warnings: string[];
+  search_scope?: {
+    company_scope: string;
+    location_filter: "none" | "soft" | "hard";
+    parent_company_matches_included: boolean;
+    refresh_eligible: boolean;
+    exact_company_search_completed?: boolean;
+    related_company_search_attempted?: boolean;
+    broaden_eligible?: boolean;
+    broaden_attempted?: boolean;
+  };
+  controls: { email_discovery: boolean; outreach_drafting: boolean };
+};
+
 export type ProfileFilters = {
   target_roles: string[];
   target_levels: string[];
@@ -260,6 +365,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       } else if (typeof parsed.detail === "string") {
         // Legacy shape used by most routes.
         message = parsed.detail;
+      } else if (parsed.detail && typeof parsed.detail === "object") {
+        // Several guarded endpoints use FastAPI's structured `detail` object.
+        // Preserve its safe code/message just like the preferred envelope.
+        structured = parsed.detail as StructuredError;
+        if (typeof structured.message === "string") message = structured.message;
       }
     } catch {
       // Keep the raw body when the server does not return JSON.

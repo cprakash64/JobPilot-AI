@@ -1,6 +1,6 @@
 import json
-from functools import lru_cache
 import os
+from functools import lru_cache
 
 from pydantic import Field, field_validator
 
@@ -91,7 +91,86 @@ class Settings(BaseSettings):
     job_scoring_batch_size: int = 100
     job_scoring_max_attempts: int = 3
 
-    @field_validator("cors_origins", "job_source_companies", "job_discovery_source_packs", mode="before")
+    # --- People Who Can Help (all controls fail closed) ---
+    people_recommendations_enabled: bool = False
+    people_rollout_mode: str = "disabled"  # disabled|internal|beta|percentage|all
+    people_rollout_percentage: int = 0
+    people_internal_emails: list[str] = []
+    people_beta_user_ids: list[str] = []
+    people_primary_provider: str = "pdl"
+    # Apollo is retained for explicit internal diagnostics only. Normal
+    # discovery cannot select it unless both gates are enabled.
+    people_apollo_discovery_enabled: bool = False
+    people_apollo_diagnostic_enabled: bool = False
+    people_pdl_discovery_enabled: bool = True
+    people_email_discovery_enabled: bool = False
+    people_pdl_fallback_enabled: bool = False
+    people_outreach_drafting_enabled: bool = False
+    people_network_matching_enabled: bool = False
+    people_employment_secondary_verification_enabled: bool = False
+    people_employment_comparison_mode: bool = False
+    people_employment_verification_daily_credit_budget: int = 0
+    people_employment_verification_per_user_daily_limit: int = 0
+    people_employment_verification_ttl_days: int = 30
+    people_employment_verification_max_recruiters: int = 1
+    people_employment_verification_max_managers: int = 1
+    people_employment_verification_max_referrers: int = 1
+    apollo_api_key: str | None = None
+    hunter_api_key: str | None = None
+    pdl_api_key: str | None = None
+    people_data_encryption_key: str | None = None
+    people_result_ttl_days: int = 30
+    people_pdl_result_ttl_days: int = 30
+    people_pdl_results_per_query: int = 20
+    people_pdl_recruiter_results: int = 4
+    people_pdl_manager_results: int = 4
+    people_pdl_referral_results: int = 8
+    people_pdl_max_results_per_discovery: int = 16
+    people_pdl_daily_credit_budget: int = 0
+    people_pdl_per_user_daily_limit: int = 0
+    people_employment_freshness_days: int = 180
+    people_email_result_ttl_days: int = 30
+    people_max_discovery_results_per_category: int = 20
+    people_max_displayed_recruiters: int = 3
+    people_max_displayed_managers: int = 3
+    people_max_displayed_referrers: int = 5
+    people_max_enrichments_per_job: int = 8
+    people_daily_credit_budget: int = 0
+    people_per_user_daily_limit: int = 0
+    people_email_daily_credit_budget: int = 0
+    people_email_per_user_daily_limit: int = 0
+    people_provider_timeout_seconds: float = 8.0
+    people_provider_response_max_bytes: int = 1_000_000
+    people_provider_unknown_credit_budget_units: int = 1
+    people_apollo_bulk_capability_enabled: bool = True
+    people_apollo_bulk_rejection_threshold: int = 2
+    people_apollo_bulk_capability_ttl_seconds: int = 3600
+    people_apollo_complete_person_max_recruiters: int = 1
+    people_apollo_complete_person_max_managers: int = 1
+    people_apollo_complete_person_max_referrers: int = 1
+    people_apollo_complete_person_max_per_job: int = 3
+    people_apollo_complete_person_cache_ttl_seconds: int = 2_592_000
+    people_apollo_complete_person_not_found_ttl_seconds: int = 86_400
+    people_apollo_complete_person_error_ttl_seconds: int = 300
+    people_min_relevance_score: float = 60.0
+    people_min_recruiter_relevance: float = 60.0
+    people_min_manager_relevance: float = 60.0
+    people_min_referrer_relevance: float = 60.0
+    people_min_data_confidence: float = 0.5
+    people_recruiter_enrichment_reserve: int = 3
+    people_manager_enrichment_reserve: int = 3
+    people_referrer_enrichment_reserve: int = 2
+    people_discovery_rate_limit_per_hour: int = 10
+    people_email_rate_limit_per_hour: int = 10
+
+    @field_validator(
+        "cors_origins",
+        "job_source_companies",
+        "job_discovery_source_packs",
+        "people_internal_emails",
+        "people_beta_user_ids",
+        mode="before",
+    )
     @classmethod
     def parse_cors(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):

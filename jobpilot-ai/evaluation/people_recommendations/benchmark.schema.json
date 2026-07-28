@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobPilot people recommendation benchmark v1",
+  "type": "object",
+  "required": ["schema_version", "cases"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case_id", "categories", "employment", "emails", "unsupported_claims"],
+        "properties": {
+          "case_id": {"type": "string"},
+          "categories": {"type": "object"},
+          "employment": {"type": "array"},
+          "emails": {"type": "array"},
+          "unsupported_claims": {"type": "array"}
+        }
+      }
+    }
+  }
+}

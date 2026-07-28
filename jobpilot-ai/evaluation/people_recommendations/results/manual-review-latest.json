@@ -1,0 +1,344 @@
+{
+  "schema_version": "manual-people-review-v1",
+  "case_count": 20,
+  "contains_live_accuracy_claim": false,
+  "coverage_note": "Existing persisted discovery runs are listed first. Jobs without a run have empty funnels because this offline report never invokes a provider.",
+  "cases": [
+    {
+      "job_id": 7605,
+      "job_title": "Agentic Software Engineer Intern",
+      "company": "Toshiba Global Commerce",
+      "company_domain": "commerce.toshiba.com",
+      "discovery_run_id": 3,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 1,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": [
+          {
+            "candidate_id": 1,
+            "current_title": "Software Test Engineer @ Toshiba",
+            "current_company": "Toshiba",
+            "scoring_version": "people-v1",
+            "relevance_score": 61.5,
+            "data_confidence": 0.9,
+            "limitations": [
+              "Willingness to provide a referral has not been established."
+            ],
+            "human_relevance_label": null,
+            "human_current_employment_label": null,
+            "human_parent_subsidiary_mismatch": null,
+            "review_notes": ""
+          }
+        ]
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7506,
+      "job_title": "Software Engineer 1",
+      "company": "Huntington Ingalls Industries",
+      "company_domain": "hii.com",
+      "discovery_run_id": 2,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7892,
+      "job_title": "Junior Investment Analyst",
+      "company": "AJ Bell",
+      "company_domain": "ajbell.co.uk",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7891,
+      "job_title": "Engineer \u2013 Web Apps",
+      "company": "Notability",
+      "company_domain": "notability.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7890,
+      "job_title": "Graduate Development Programme 2028",
+      "company": "Turner & Townsend",
+      "company_domain": "turnerandtownsend.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7889,
+      "job_title": "Senior HSE Manager  - (Saudi National)",
+      "company": "Turner & Townsend",
+      "company_domain": "turnerandtownsend.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7888,
+      "job_title": "\u3010Project Management\u3011Professional / Senior Professional (Osaka)",
+      "company": "Turner & Townsend",
+      "company_domain": "turnerandtownsend.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7887,
+      "job_title": "Senior Project Manager - Construction Project",
+      "company": "Turner & Townsend",
+      "company_domain": "turnerandtownsend.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7886,
+      "job_title": "Associate Director - Project Manager (Construction Project)",
+      "company": "Turner & Townsend",
+      "company_domain": "turnerandtownsend.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7885,
+      "job_title": "Senior Project Manager / Project Lead (Real Estate)",
+      "company": "Turner & Townsend",
+      "company_domain": "turnerandtownsend.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7884,
+      "job_title": "Accounting Internship ( 6 months)",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7883,
+      "job_title": "Student Marketeer - Trondheim",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7882,
+      "job_title": "Student Marketeer - Kristiansand",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7881,
+      "job_title": "Student Marketeer - Stavanger",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7880,
+      "job_title": "ZA_EN_Student Jobs_Student Marketeer",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7879,
+      "job_title": "2027 Red Bull Student Marketeer - Free State",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7878,
+      "job_title": "Lehre im Restaurantfach",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7877,
+      "job_title": "Merchandiser (Part Time)",
+      "company": "Red Bull",
+      "company_domain": "redbull.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7876,
+      "job_title": "\u03a3\u03cd\u03bc\u03b2\u03bf\u03c5\u03bb\u03bf\u03c2 \u03a0\u03c9\u03bb\u03ae\u03c3\u03b5\u03c9\u03bd - \u0393\u03bb\u03c5\u03c6\u03ac\u03b4\u03b1, \u039c\u03b5\u03c1\u03b9\u03ba\u03ae \u0391\u03c0\u03b1\u03c3\u03c7\u03cc\u03bb\u03b7\u03c3\u03b7",
+      "company": "H&M Group",
+      "company_domain": "hmgroup.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    },
+    {
+      "job_id": 7875,
+      "job_title": "Pattern Maker  H&M Kids \u2013 1 YEAR TEMPORARY ",
+      "company": "H&M Group",
+      "company_domain": "hmgroup.com",
+      "discovery_run_id": null,
+      "company_context": {},
+      "category_funnels": {},
+      "credits_consumed": 0,
+      "candidates": {
+        "recruiter": [],
+        "manager": [],
+        "referral": []
+      },
+      "review_status": "unreviewed"
+    }
+  ]
+}

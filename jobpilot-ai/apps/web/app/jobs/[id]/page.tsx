@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
+import { PeopleWhoCanHelp } from "@/components/PeopleWhoCanHelp";
 
 export default async function JobDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -12,6 +13,7 @@ export default async function JobDetailsPage({ params }: { params: Promise<{ id:
       <div className="rounded-lg border border-line bg-white p-5">
         <Link className="text-pine" href="/jobs">Back to job discovery</Link>
       </div>
+      <PeopleWhoCanHelp jobId={id} />
     </AppShell>
   );
 }

@@ -140,7 +140,7 @@ def _pinned_request_url(url: str, ip: str) -> str:
     return f"{parsed.scheme}://{netloc}{path}{query}"
 
 
-def _read_capped(response: httpx.Response) -> bytes:
+def _read_capped(response: httpx.Response, *, max_bytes: int = MAX_BYTES) -> bytes:
     """Stream the body, aborting as soon as it exceeds MAX_BYTES.
 
     Never buffers an unbounded response, regardless of how (or whether) the
@@ -150,19 +150,19 @@ def _read_capped(response: httpx.Response) -> bytes:
     total = 0
     for chunk in response.iter_bytes():
         total += len(chunk)
-        if total > MAX_BYTES:
+        if total > max_bytes:
             raise FetchFailedError("response exceeds size limit")
         chunks.append(chunk)
     return b"".join(chunks)
 
 
-def safe_fetch_image(
-    url: str, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+def _safe_fetch(
+    url: str,
+    *,
+    allowed_content_types: tuple[str, ...],
+    max_bytes: int,
+    timeout_seconds: float,
 ) -> SafeFetchResult:
-    """Fetch `url` and return its bytes, only if every hop (including
-    redirects) resolves to a public address and the final response is a real
-    image content type within the size cap. Raises UnsafeUrlError /
-    FetchFailedError otherwise — never returns a partial/unsafe result."""
     current = url
     seen: set[str] = set()
 
@@ -212,10 +212,10 @@ def safe_fetch_image(
 
                 raw_type = resp.headers.get("content-type") or ""
                 content_type = raw_type.split(";")[0].strip().lower()
-                if content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+                if content_type not in allowed_content_types:
                     raise FetchFailedError(f"unsupported content-type: {content_type or '(none)'}")
 
-                content = _read_capped(resp)
+                content = _read_capped(resp, max_bytes=max_bytes)
                 if len(content) == 0:
                     raise FetchFailedError("empty response")
                 return SafeFetchResult(
@@ -225,3 +225,30 @@ def safe_fetch_image(
                 resp.close()
 
     raise FetchFailedError("too many redirects")
+
+
+def safe_fetch_image(
+    url: str, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+) -> SafeFetchResult:
+    """Fetch a bounded raster image through the SSRF-safe transport."""
+    return _safe_fetch(
+        url,
+        allowed_content_types=ALLOWED_IMAGE_CONTENT_TYPES,
+        max_bytes=MAX_BYTES,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def safe_fetch_html(
+    url: str,
+    *,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_bytes: int = 1024 * 1024,
+) -> SafeFetchResult:
+    """Fetch bounded public HTML for official-site branding discovery."""
+    return _safe_fetch(
+        url,
+        allowed_content_types=("text/html", "application/xhtml+xml"),
+        max_bytes=max_bytes,
+        timeout_seconds=timeout_seconds,
+    )

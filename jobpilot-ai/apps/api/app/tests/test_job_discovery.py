@@ -418,6 +418,45 @@ def test_tracker_returns_job_details_and_hides_application_stage_jobs(
     assert all(row["id"] != job["id"] for row in remaining)
 
 
+def test_tracker_all_is_complete_ledger_and_submitted_is_confirmation_only(
+    client: TestClient, monkeypatch
+) -> None:
+    headers = signup(client, "tracker-contract@example.com")
+    client.put("/profile", headers=headers, json=ml_profile_payload())
+    _patch_sources(monkeypatch, default_jobs())
+    jobs = client.post("/jobs/discover", headers=headers, json={}).json()["jobs"]
+    assert len(jobs) >= 3
+
+    saved_id, applying_id, interview_id = (job["id"] for job in jobs[:3])
+    client.post(f"/jobs/{saved_id}/save", headers=headers)
+    client.put(
+        f"/jobs/{applying_id}/tracker",
+        headers=headers,
+        json={"status": "applying"},
+    )
+    client.put(
+        f"/jobs/{interview_id}/tracker",
+        headers=headers,
+        json={"status": "interview"},
+    )
+
+    all_rows = client.get("/jobs/tracker/all", headers=headers).json()["applications"]
+    all_statuses = {row["job_id"]: row["status"] for row in all_rows}
+    assert all_statuses == {
+        saved_id: "saved",
+        applying_id: "applying",
+        interview_id: "interview",
+    }
+    assert all(row["job"]["title"] and row["job"]["application_url"] for row in all_rows)
+
+    submitted = client.get(
+        "/jobs/tracker/submitted", headers=headers
+    ).json()["applications"]
+    assert [(row["job_id"], row["status"]) for row in submitted] == [
+        (interview_id, "interview")
+    ]
+
+
 def test_post_apply_status_sets_applied_date(client: TestClient, monkeypatch) -> None:
     headers = signup(client, "interview-date@example.com")
     client.put("/profile", headers=headers, json=ml_profile_payload())

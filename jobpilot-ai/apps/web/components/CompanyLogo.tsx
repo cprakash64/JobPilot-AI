@@ -15,7 +15,7 @@ export function CompanyLogo({
   company,
   logoUrl,
   proxyPath,
-  companyDomain,
+  companyDomain: _companyDomain,
   size = 44
 }: {
   company: string;
@@ -29,10 +29,9 @@ export function CompanyLogo({
   const sources = useMemo(() => {
     const list: string[] = [];
     if (proxyPath) list.push(`${API_URL}${proxyPath}`);
-    if (logoUrl) list.push(logoUrl);
-    if (companyDomain) list.push(`https://${companyDomain}/favicon.ico`);
+    if (isTrustedLogoUrl(logoUrl)) list.push(logoUrl);
     return list;
-  }, [proxyPath, logoUrl, companyDomain]);
+  }, [proxyPath, logoUrl]);
 
   const [attempt, setAttempt] = useState(0);
   const src = sources[attempt];
@@ -62,6 +61,20 @@ export function CompanyLogo({
       )}
     </div>
   );
+}
+
+function isTrustedLogoUrl(value?: string | null): value is string {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" &&
+      !(
+        parsed.hostname === "storage.googleapis.com" &&
+        parsed.pathname.startsWith("/simplify-imgs/")
+      );
+  } catch {
+    return false;
+  }
 }
 
 const BRAND_PALETTE = [

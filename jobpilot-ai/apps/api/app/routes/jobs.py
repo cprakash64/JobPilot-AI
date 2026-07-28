@@ -1,7 +1,7 @@
 import logging
 import os
-from hashlib import sha256
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,14 +12,24 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
+from app.documents.cover_letter_generation_service import generate_cover_letter
+from app.documents.filenames import build_document_filename
+from app.documents.resume_generation_service import generate_resume
+from app.documents.store import export_document as render_document_file
+from app.documents.store import persist_document, serialize_document
 from app.jobs.company_logo_service import (
+    is_safe_logo_url,
     is_untrusted_simplify_logo_url,
     normalize_company_key,
     resolve_company_logo,
 )
 from app.jobs.job_eligibility_service import evaluate_eligibility
-from app.jobs.job_ingestion_service import build_profile_view, discover_jobs, rematch_user
-from app.jobs.job_ingestion_service import _job_view  # noqa: PLC2701 - internal shared mapper
+from app.jobs.job_ingestion_service import (
+    _job_view,  # noqa: PLC2701 - internal shared mapper
+    build_profile_view,
+    discover_jobs,
+    rematch_user,
+)
 from app.jobs.job_normalization_service import DEMO_COMPANIES, is_placeholder_url
 from app.jobs.job_search_criteria_service import build_search_criteria
 from app.jobs.safe_fetch import FetchFailedError, UnsafeUrlError, safe_fetch_image
@@ -37,11 +47,6 @@ from app.models.entities import (
     User,
     UserProfile,
 )
-from app.documents.cover_letter_generation_service import generate_cover_letter
-from app.documents.filenames import build_document_filename
-from app.documents.resume_generation_service import generate_resume
-from app.documents.store import export_document as render_document_file
-from app.documents.store import persist_document, serialize_document
 from app.schemas.jobs import (
     ApplicationTrackerIn,
     DiscoverJobsIn,
@@ -368,7 +373,10 @@ def _serialize_card(
     company_domain = job.company_domain or ""
     company_logo_url = (
         ""
-        if is_untrusted_simplify_logo_url(job.company_logo_url)
+        if (
+            is_untrusted_simplify_logo_url(job.company_logo_url)
+            or not is_safe_logo_url(job.company_logo_url)
+        )
         else (job.company_logo_url or "")
     )
     if not company_logo_url:
@@ -461,26 +469,33 @@ def _profile_filter_payload(profile: UserProfile | None) -> dict:
     }
 
 
-@router.get("/tracker/all")
-def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    submitted_statuses = [
-        ApplicationStatus.applied,
-        ApplicationStatus.interview,
-        ApplicationStatus.offer,
-        ApplicationStatus.rejected,
-    ]
+SUBMITTED_APPLICATION_STATUSES = (
+    ApplicationStatus.applied,
+    ApplicationStatus.interview,
+    ApplicationStatus.offer,
+    ApplicationStatus.rejected,
+)
+
+
+def _tracker_payload(
+    db: Session,
+    user_id: int,
+    *,
+    statuses: tuple[ApplicationStatus, ...] | None = None,
+) -> dict:
+    """Serialize the user-owned ledger, optionally limited to submissions."""
+    filters = [ApplicationTracker.user_id == user_id]
+    if statuses is not None:
+        filters.append(ApplicationTracker.status.in_(statuses))
     rows = db.execute(
         select(ApplicationTracker, JobPosting)
         .join(JobPosting, JobPosting.id == ApplicationTracker.job_id)
-        .where(
-            (ApplicationTracker.user_id == user.id)
-            & (ApplicationTracker.status.in_(submitted_statuses))
-        )
+        .where(*filters)
         .order_by(ApplicationTracker.updated_at.desc(), ApplicationTracker.id.desc())
     ).all()
     matches = {
         match.job_id: match
-        for match in db.scalars(select(JobMatch).where(JobMatch.user_id == user.id)).all()
+        for match in db.scalars(select(JobMatch).where(JobMatch.user_id == user_id)).all()
     }
     sources = {source.id: source for source in db.scalars(select(JobSource)).all()}
     return {
@@ -503,6 +518,28 @@ def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(g
             for tracker, job in rows
         ]
     }
+
+
+@router.get("/tracker/all")
+def list_tracker(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Complete ledger, including saved and in-progress jobs."""
+    return _tracker_payload(db, user.id)
+
+
+@router.get("/tracker/submitted")
+def list_submitted_tracker(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Only confirmed submissions and their downstream outcomes."""
+    return _tracker_payload(
+        db,
+        user.id,
+        statuses=SUBMITTED_APPLICATION_STATUSES,
+    )
 
 
 def _tracker_job_payload(

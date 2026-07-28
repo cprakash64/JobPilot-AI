@@ -77,7 +77,7 @@ export function TrackerClient() {
 
   useEffect(() => {
     let active = true;
-    void api<{ applications: TrackerApplication[] }>("/jobs/tracker/all")
+    void api<{ applications: TrackerApplication[] }>("/jobs/tracker/submitted")
       .then((result) => {
         if (!active) return;
         setError("");
