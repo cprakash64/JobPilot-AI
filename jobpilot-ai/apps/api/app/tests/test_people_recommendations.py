@@ -199,7 +199,10 @@ def test_title_ontology_normalizes_semantic_variants() -> None:
 
 def test_category_queries_are_staged_and_use_correct_filters() -> None:
     job = _job()
-    job.title = "Agentic Software Engineer Intern"
+    job.title = "Software Engineer Intern"
+    job.description_clean = (
+        "Build backend services, application APIs, and software platforms."
+    )
     profile = extract_job_people_profile(job)
     recruiter_queries = build_category_search_queries(profile, "likely_recruiter")
     manager_queries = build_category_search_queries(profile, "potential_hiring_manager")
@@ -215,6 +218,36 @@ def test_category_queries_are_staged_and_use_correct_filters() -> None:
     assert not (
         {title for query in recruiter_queries for title in query.titles}
         & {title for query in referrer_queries for title in query.titles}
+    )
+    referral_titles = {
+        title
+        for query in referrer_queries
+        for title in query.titles
+    }
+    assert {
+        "Software Engineer",
+        "Software Developer",
+        "Backend Engineer",
+        "Frontend Engineer",
+        "Full Stack Engineer",
+        "Platform Engineer",
+        "Application Engineer",
+        "Systems Engineer",
+        "Senior Software Engineer",
+        "Staff Software Engineer",
+        "Principal Software Engineer",
+    } <= referral_titles
+    assert not any(
+        marker in title.lower()
+        for title in referral_titles
+        for marker in (
+            "recruiter",
+            "manager",
+            "director",
+            "head of",
+            "vice president",
+            "chief ",
+        )
     )
 
 
@@ -2376,7 +2409,7 @@ def test_transient_provider_error_requires_explicit_retry_after_timestamp(
 ) -> None:
     from app.people import service
 
-    monkeypatch.setattr(settings, "people_primary_provider", "apollo")
+    monkeypatch.setattr(settings, "people_primary_provider", "pdl")
     user = User(
         email="timed-provider-retry@example.com",
         hashed_password=hash_password("password123"),
@@ -2388,7 +2421,7 @@ def test_transient_provider_error_requires_explicit_retry_after_timestamp(
         job_id=job.id,
         user_id=user.id,
         status="provider_unavailable",
-        provider="apollo",
+        provider="pdl",
         query_fingerprint=service.query_fingerprint(job, "exact"),
         failure_code="provider_timeout",
         safe_failure_message="The people search provider took too long to respond.",
@@ -2635,6 +2668,94 @@ def test_hunter_is_explicit_cached_and_never_displays_risky_email(
     assert person.professional_email_ciphertext is None
     assert person.professional_email_hash is None
     assert "private-address@" not in caplog.text
+
+
+def test_hunter_may_run_for_exact_current_unverified_employment(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user, job, _person, recommendation = _persist_recommendation(
+        db,
+        status="exact_company_current_but_unverified_freshness",
+    )
+
+    class NotFoundEmailProvider:
+        calls = 0
+
+        async def find_work_email(self, request):
+            self.calls += 1
+            assert request.company_domain == "acme.example"
+            return WorkEmailResult(
+                status="not_found",
+                email=None,
+                professional=True,
+                provider="hunter",
+            )
+
+        async def verify_work_email(self, _email):
+            raise AssertionError("There is no email to verify")
+
+    provider = NotFoundEmailProvider()
+    monkeypatch.setattr(settings, "people_email_discovery_enabled", True)
+    monkeypatch.setattr(settings, "people_email_daily_credit_budget", 20)
+    monkeypatch.setattr(settings, "people_email_per_user_daily_limit", 10)
+    monkeypatch.setattr(service, "get_email_provider", lambda: provider)
+
+    result = asyncio.run(find_email(db, user, job.id, recommendation.id))
+
+    assert result["status"] == "not_found"
+    assert provider.calls == 1
+
+
+def test_hunter_remains_blocked_for_a_former_employee(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user, job, _person, recommendation = _persist_recommendation(
+        db,
+        status="former_employee",
+    )
+    provider_called = False
+
+    def unexpected_provider():
+        nonlocal provider_called
+        provider_called = True
+        raise AssertionError("Hunter must not be called for a former employee")
+
+    monkeypatch.setattr(settings, "people_email_discovery_enabled", True)
+    monkeypatch.setattr(service, "get_email_provider", unexpected_provider)
+
+    result = asyncio.run(find_email(db, user, job.id, recommendation.id))
+
+    assert result["status"] == "identity_uncertain"
+    assert result["professional_email"] is None
+    assert provider_called is False
+
+
+def test_lowercase_display_names_are_corrected_without_rewriting_mixed_case(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.people import service
+
+    user, job, person, _recommendation = _persist_recommendation(db)
+    person.canonical_full_name = "rita recruiter"
+    person.normalized_full_name = "rita recruiter"
+    db.commit()
+    monkeypatch.setattr(settings, "people_recommendations_enabled", True)
+    monkeypatch.setattr(settings, "people_rollout_mode", "all")
+
+    payload = recommendations_payload(db, user, job.id)
+
+    assert payload["categories"]["likely_recruiters"][0]["full_name"] == (
+        "Rita Recruiter"
+    )
+    assert service._display_name("iPhone McTest") == "iPhone McTest"
+    assert service._display_name("single") == "single"
 
 
 def test_grounded_drafts_differ_by_category_and_respect_linkedin_limit(
@@ -3502,6 +3623,57 @@ def test_pdl_search_is_the_profile_operation_and_reuses_normalized_records(
     assert provider.credits == 1
 
 
+def test_pdl_search_never_returns_more_than_its_bounded_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method: str, url: str, **_kwargs):
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "data": [
+                        {
+                            "id": f"bounded-record-{index}",
+                            "full_name": f"Synthetic Person {index}",
+                            "job_title": "Software Engineer",
+                            "job_company_name": "Acme AI",
+                            "job_company_website": "acme.example",
+                        }
+                        for index in range(20)
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(
+        providers.httpx,
+        "AsyncClient",
+        lambda **_kwargs: FakeClient(),
+    )
+    provider = providers.PDLPeopleProvider(api_key="synthetic-test-key")
+    results = asyncio.run(
+        provider.search_people(
+            PeopleSearchQuery(
+                category="potential_referrer",
+                company_name="Acme AI",
+                company_domain="acme.example",
+                titles=["Software Engineer"],
+                limit=4,
+            )
+        )
+    )
+
+    assert len(results) == 4
+    assert provider.last_search_raw_count == 20
+    assert provider.last_search_normalized_count == 4
+
+
 def test_normal_discovery_cannot_select_apollo_without_diagnostic_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3529,7 +3701,7 @@ def test_same_name_company_and_title_do_not_merge_without_strong_identity() -> N
     assert len(deduplicate([first, second])) == 2
 
 
-def test_one_pdl_identity_is_assigned_only_to_its_strongest_category() -> None:
+def test_clear_recruiter_stays_in_recruiter_despite_cross_category_score() -> None:
     from app.people import service
 
     person = _records()[0].model_copy(
@@ -3550,11 +3722,36 @@ def test_one_pdl_identity_is_assigned_only_to_its_strongest_category() -> None:
 
     assigned = service._strongest_category_candidates(candidates)
 
-    assert assigned["likely_recruiter"] == []
-    assert assigned["potential_hiring_manager"] == []
-    assert assigned["potential_referrer"] == [
-        (85.0, "potential_referrer", person, None, None)
+    assert assigned["likely_recruiter"] == [
+        (70.0, "likely_recruiter", person, None, None)
     ]
+    assert assigned["potential_hiring_manager"] == []
+    assert assigned["potential_referrer"] == []
+
+
+def test_clear_individual_contributor_stays_in_referral_category() -> None:
+    from app.people import service
+
+    person = _records()[2].model_copy(
+        update={
+            "provider": "pdl",
+            "provider_person_id": "pdl-referral-category",
+        }
+    )
+    assigned = service._strongest_category_candidates(
+        {
+            "likely_recruiter": [],
+            "potential_hiring_manager": [
+                (90.0, "potential_hiring_manager", person, None, None)
+            ],
+            "potential_referrer": [
+                (75.0, "potential_referrer", person, None, None)
+            ],
+        }
+    )
+
+    assert assigned["potential_hiring_manager"] == []
+    assert len(assigned["potential_referrer"]) == 1
 
 
 def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
@@ -3572,6 +3769,7 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
     db.add_all([job, user])
     db.commit()
     provider_calls: list[str] = []
+    provider_sizes: list[int] = []
     private_ids = {
         "Technical Recruiter": "pdl-private-recruiter",
         "Engineering Manager": "pdl-private-manager",
@@ -3587,6 +3785,7 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
 
         async def request(self, method: str, url: str, **kwargs):
             provider_calls.append(url)
+            provider_sizes.append(kwargs["json"]["size"])
             sql = kwargs["json"]["sql"]
             matched_titles = [
                 value
@@ -3753,7 +3952,9 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
     assert discovered.json()["categories"]["potential_hiring_managers"][0][
         "professional_profile_url"
     ] is None
-    assert len(provider_calls) == calls_after_discovery == 1
+    assert len(provider_calls) == calls_after_discovery == 3
+    assert provider_sizes == [4, 4, 8]
+    assert sum(provider_sizes) == 16
     assert all(
         url == "https://api.peopledatalabs.com/v5/person/search"
         for url in provider_calls
@@ -3766,10 +3967,32 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
             PeopleProviderOperationUsage.provider == "pdl"
         )
     ).all()
-    assert len(usage_rows) == 1
+    assert len(usage_rows) == 3
     assert all(row.credits_reported is None for row in usage_rows)
-    assert all(row.credits_estimated == 3 for row in usage_rows)
+    assert all(row.credits_estimated == 1 for row in usage_rows)
     assert all(row.credit_status == "estimated" for row in usage_rows)
+    latest_run = db.scalar(
+        select(PeopleDiscoveryRun)
+        .where(
+            PeopleDiscoveryRun.job_id == job.id,
+            PeopleDiscoveryRun.provider == "pdl",
+        )
+        .order_by(PeopleDiscoveryRun.id.desc())
+    )
+    assert latest_run is not None
+    assert latest_run.category_diagnostics is not None
+    for category in (
+        "likely_recruiter",
+        "potential_hiring_manager",
+        "potential_referrer",
+    ):
+        category_diagnostics = latest_run.category_diagnostics[category]
+        assert category_diagnostics["query_executed"] is True
+        assert category_diagnostics["provider_call_count"] == 1
+        assert category_diagnostics["raw_search_result_count"] == 1
+        assert category_diagnostics["normalized_profile_count"] == 1
+        assert category_diagnostics["exact_company_current_profiles"] == 1
+        assert category_diagnostics["accepted"] == 1
     rendered_logs = caplog.text
     assert all(value not in rendered_logs for value in private_ids.values())
     assert "Synthetic Technical Recruiter" not in rendered_logs

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterator
@@ -466,6 +467,13 @@ def _provider_pipeline_outcomes(
 
 def _normalized_linkedin(value: str | None) -> str | None:
     return safe_profile_url(value)
+
+
+def _display_name(value: str) -> str:
+    stripped = value.strip()
+    if re.fullmatch(r"[a-z]+(?: [a-z]+)+", stripped):
+        return " ".join(part.capitalize() for part in stripped.split())
+    return stripped
 
 
 def _same_identity(left: ProviderPerson, right: ProviderPerson) -> bool:
@@ -1078,6 +1086,51 @@ def _budget_check(db: Session, user_id: int) -> None:
         )
 
 
+def _pdl_budget_allows_call(
+    db: Session,
+    user_id: int,
+    requested_maximum: int,
+) -> bool:
+    start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    global_used = int(
+        db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(PeopleProviderOperationUsage.budget_units),
+                    0,
+                )
+            ).where(
+                PeopleProviderOperationUsage.provider == "pdl",
+                PeopleProviderOperationUsage.occurred_at >= start,
+            )
+        )
+        or 0
+    )
+    user_used = int(
+        db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(PeopleProviderOperationUsage.budget_units),
+                    0,
+                )
+            ).where(
+                PeopleProviderOperationUsage.provider == "pdl",
+                PeopleProviderOperationUsage.user_id == user_id,
+                PeopleProviderOperationUsage.occurred_at >= start,
+            )
+        )
+        or 0
+    )
+    return bool(
+        settings.people_pdl_daily_credit_budget > 0
+        and settings.people_pdl_per_user_daily_limit > 0
+        and global_used + requested_maximum
+        <= settings.people_pdl_daily_credit_budget
+        and user_used + requested_maximum
+        <= settings.people_pdl_per_user_daily_limit
+    )
+
+
 def _email_budget_exceeded(db: Session, user_id: int) -> bool:
     start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
     global_used = db.scalar(
@@ -1138,10 +1191,17 @@ def _strongest_category_candidates(
         for item in candidates.get(category, []):
             key = (item[2].provider, item[2].provider_person_id)
             incumbent = winners.get(key)
+            affinity = _title_category_affinity(item[2].current_title)
+            item_affinity = item[1] == affinity
+            incumbent_affinity = bool(
+                incumbent and incumbent[1] == affinity
+            )
             if incumbent is None or (
+                item_affinity,
                 item[0],
                 -category_order[item[1]],
             ) > (
+                incumbent_affinity,
                 incumbent[0],
                 -category_order[incumbent[1]],
             ):
@@ -1154,21 +1214,30 @@ def _strongest_category_candidates(
     return selected
 
 
-def _matches_combined_title_criteria(
-    person: ProviderPerson,
-    queries: list[PeopleSearchQuery],
-) -> bool:
-    current_title = normalize_text(person.current_title)
-    if not current_title:
-        return False
-    return any(
-        candidate_title == current_title
-        or candidate_title in current_title
-        or current_title in candidate_title
-        for query in queries
-        for title in query.titles
-        if (candidate_title := normalize_text(title))
-    )
+def _title_category_affinity(title: str) -> PeopleCategory:
+    normalized = normalize_text(title)
+    if any(
+        marker in normalized
+        for marker in (
+            "recruiter",
+            "recruiting",
+            "talent acquisition",
+            "talent partner",
+        )
+    ):
+        return "likely_recruiter"
+    leadership_markers = {
+        "manager",
+        "director",
+        "head",
+        "vp",
+        "president",
+        "chief",
+        "executive",
+    }
+    if leadership_markers & set(normalized.split()):
+        return "potential_hiring_manager"
+    return "potential_referrer"
 
 
 def _category_threshold(category: PeopleCategory) -> float:
@@ -1585,6 +1654,20 @@ async def discover(
                 "seniorities_used": [],
                 "location_filter_mode": "soft",
                 "raw_search_result_count": 0,
+                "query_executed": False,
+                "provider_call_count": 0,
+                "normalized_profile_count": 0,
+                "exact_company_current_profiles": 0,
+                "former_employees": 0,
+                "conflicting_employees": 0,
+                "stale_or_insufficient_evidence": 0,
+                "below_title_relevance": 0,
+                "below_confidence_threshold": 0,
+                "deduplicated_into_another_identity": 0,
+                "assigned_to_another_category": 0,
+                "assigned_to_stronger_category": 0,
+                "accepted": 0,
+                "display_cap_excluded": 0,
                 "unique_candidate_count": 0,
                 "preliminary_score_distribution": _score_distribution([]),
                 "selected_for_enrichment": 0,
@@ -1618,15 +1701,24 @@ async def discover(
                 )
                 for category in _PEOPLE_CATEGORIES
             }
-            combined_pdl_search = bool(
+            category_pdl_search = bool(
                 strategy == "exact"
                 and settings.people_primary_provider == "pdl"
-                and hasattr(provider, "search_people_combined")
+                and hasattr(provider, "search_people_category")
             )
-            combined_rows: list[ProviderPerson] = []
-            if combined_pdl_search:
-                for category in _PEOPLE_CATEGORIES:
-                    for query in exact_queries[category]:
+            total_pdl_remaining = (
+                settings.people_pdl_max_results_per_discovery
+            )
+            category_limits = {
+                "likely_recruiter": settings.people_pdl_recruiter_results,
+                "potential_hiring_manager": settings.people_pdl_manager_results,
+                "potential_referrer": settings.people_pdl_referral_results,
+            }
+            for category in _PEOPLE_CATEGORIES:
+                category_rows: list[ProviderPerson] = []
+                queries = exact_queries[category]
+                if category_pdl_search:
+                    for query in queries:
                         diagnostics[category]["search_queries"].append({
                             "title_group": query.title_group,
                             "titles": query.titles,
@@ -1638,28 +1730,59 @@ async def discover(
                         diagnostics[category]["seniorities_used"].extend(
                             query.seniorities
                         )
-                try:
-                    combined_rows = await provider.search_people_combined(
-                        exact_queries
+                    call_limit = max(
+                        0,
+                        min(
+                            category_limits[category],
+                            total_pdl_remaining,
+                        ),
                     )
-                except ProviderUnavailable as exc:
-                    failures.append(exc.reason)
-                    _log_provider_failure(exc, run.id)
-                searched = len(combined_rows)
-            for category in _PEOPLE_CATEGORIES:
-                category_rows: list[ProviderPerson] = []
-                queries = exact_queries[category]
-                if combined_pdl_search:
-                    category_rows.extend(
-                        person
-                        for person in combined_rows
-                        if _matches_combined_title_criteria(
-                            person,
-                            queries,
+                    if call_limit and _pdl_budget_allows_call(
+                        db,
+                        user.id,
+                        call_limit,
+                    ):
+                        diagnostics[category]["query_executed"] = True
+                        diagnostics[category]["provider_call_count"] = 1
+                        try:
+                            category_rows = (
+                                await provider.search_people_category(
+                                    queries,
+                                    limit=call_limit,
+                                )
+                            )
+                        except ProviderUnavailable as exc:
+                            failures.append(exc.reason)
+                            _log_provider_failure(exc, run.id)
+                        raw_count = int(
+                            getattr(
+                                provider,
+                                "last_search_raw_count",
+                                len(category_rows),
+                            )
                         )
-                    )
+                        normalized_count = int(
+                            getattr(
+                                provider,
+                                "last_search_normalized_count",
+                                len(category_rows),
+                            )
+                        )
+                        diagnostics[category][
+                            "raw_search_result_count"
+                        ] = raw_count
+                        diagnostics[category][
+                            "normalized_profile_count"
+                        ] = normalized_count
+                        searched += normalized_count
+                        total_pdl_remaining -= raw_count
+                    elif call_limit:
+                        failures.append("provider_budget_exceeded")
+                        diagnostics[category]["rejection_reason_counts"][
+                            "provider_budget_insufficient"
+                        ] = 1
                 for query in queries:
-                    if combined_pdl_search:
+                    if category_pdl_search:
                         continue
                     diagnostics[category]["search_queries"].append({
                         "title_group": query.title_group,
@@ -1679,10 +1802,9 @@ async def discover(
                     category_rows.extend(rows)
                     searched += len(rows)
                     diagnostics[category]["raw_search_result_count"] += len(rows)
-                if combined_pdl_search:
-                    diagnostics[category][
-                        "raw_search_result_count"
-                    ] = len(combined_rows)
+                    diagnostics[category]["normalized_profile_count"] += len(rows)
+                    diagnostics[category]["query_executed"] = True
+                    diagnostics[category]["provider_call_count"] += 1
                 categories[category] = deduplicate(category_rows)
                 diagnostics[category]["unique_candidate_count"] = len(categories[category])
                 duplicate_count = max(
@@ -1692,6 +1814,9 @@ async def discover(
                 )
                 if duplicate_count:
                     diagnostics[category]["rejection_reason_counts"]["duplicate_person"] = duplicate_count
+                    diagnostics[category][
+                        "deduplicated_into_another_identity"
+                    ] += duplicate_count
                 if not category_rows:
                     diagnostics[category]["rejection_reason_counts"]["no_search_results"] = 1
                 metric(
@@ -1758,15 +1883,28 @@ async def discover(
                         counts.get("weaker_category_assignment", 0)
                         + weaker_assignments
                     )
+                    diagnostics[category][
+                        "assigned_to_another_category"
+                    ] += weaker_assignments
+                    diagnostics[category][
+                        "assigned_to_stronger_category"
+                    ] += weaker_assignments
             complete_person_only = getattr(
                 provider, "bulk_capability_state", "unknown"
             ) in {"temporarily_rejected", "account_not_supported"}
+            pdl_direct_profiles = category_pdl_search
             enrich_targets = allocate_enrichment_targets(
                 assigned_by_category,
                 total=(
                     settings.people_apollo_complete_person_max_per_job
                     if complete_person_only
-                    else settings.people_max_enrichments_per_job
+                    else (
+                        settings.people_max_displayed_recruiters
+                        + settings.people_max_displayed_managers
+                        + settings.people_max_displayed_referrers
+                        if pdl_direct_profiles
+                        else settings.people_max_enrichments_per_job
+                    )
                 ),
                 reservations=(
                     {
@@ -1781,11 +1919,31 @@ async def discover(
                         ),
                     }
                     if complete_person_only
-                    else {
-                        "likely_recruiter": settings.people_recruiter_enrichment_reserve,
-                        "potential_hiring_manager": settings.people_manager_enrichment_reserve,
-                        "potential_referrer": settings.people_referrer_enrichment_reserve,
-                    }
+                    else (
+                        {
+                            "likely_recruiter": (
+                                settings.people_max_displayed_recruiters
+                            ),
+                            "potential_hiring_manager": (
+                                settings.people_max_displayed_managers
+                            ),
+                            "potential_referrer": (
+                                settings.people_max_displayed_referrers
+                            ),
+                        }
+                        if pdl_direct_profiles
+                        else {
+                            "likely_recruiter": (
+                                settings.people_recruiter_enrichment_reserve
+                            ),
+                            "potential_hiring_manager": (
+                                settings.people_manager_enrichment_reserve
+                            ),
+                            "potential_referrer": (
+                                settings.people_referrer_enrichment_reserve
+                            ),
+                        }
+                    )
                 ),
             )
             for _score, category, _person, _school, _employer in enrich_targets:
@@ -1858,6 +2016,8 @@ async def discover(
             }
             for _, category, initial, school, employer in enrich_targets:
                 if displayed[category] >= caps[category]:
+                    diagnostics[category]["display_cap_excluded"] += 1
+                    diagnostics[category]["candidates_rejected"] += 1
                     continue
                 person = enriched_by_id.get(initial.provider_person_id)
                 if person is None:
@@ -1961,6 +2121,24 @@ async def discover(
                         }:
                             employment = secondary_result
                 employment_outcomes[employment.status] += 1
+                if employment.status in {
+                    "confirmed_exact_company_verified",
+                    "exact_company_current_but_unverified_freshness",
+                }:
+                    diagnostics[category][
+                        "exact_company_current_profiles"
+                    ] += 1
+                elif employment.status == "former_employee":
+                    diagnostics[category]["former_employees"] += 1
+                elif employment.status == "conflicting_current_employment":
+                    diagnostics[category]["conflicting_employees"] += 1
+                elif employment.status in {
+                    "stale_or_uncertain",
+                    "insufficient_evidence",
+                }:
+                    diagnostics[category][
+                        "stale_or_insufficient_evidence"
+                    ] += 1
                 diagnostics[category].setdefault(
                     "employment_validation_outcomes", {}
                 )
@@ -1985,6 +2163,19 @@ async def discover(
                     ]
                 rejection_reasons.extend(employment.rejection_codes)
                 rejection_reasons = list(dict.fromkeys(rejection_reasons))
+                if any(
+                    reason in {
+                        "weak_role_similarity",
+                        "title_mismatch",
+                        "below_relevance_threshold",
+                    }
+                    for reason in rejection_reasons
+                ):
+                    diagnostics[category]["below_title_relevance"] += 1
+                if "below_confidence_threshold" in rejection_reasons:
+                    diagnostics[category][
+                        "below_confidence_threshold"
+                    ] += 1
                 if (
                     rejection_reasons == ["weak_company_confidence"]
                     and category != "potential_referrer"
@@ -2107,6 +2298,7 @@ async def discover(
                 canonical.employment_revalidation_required = False
                 canonical.employment_conflict_detected_at = None
                 displayed[category] += 1
+                diagnostics[category]["accepted"] += 1
                 diagnostics[category]["final_displayed_count"] += 1
                 metric(
                     "people_discovery_candidates_displayed",
@@ -2325,7 +2517,10 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             continue
         email_lookup_allowed = (
             candidate.employment_validation_status
-            == "confirmed_exact_company_verified"
+            in {
+                "confirmed_exact_company_verified",
+                "exact_company_current_but_unverified_freshness",
+            }
             and not person.employment_revalidation_required
         )
         email = (
@@ -2337,7 +2532,7 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         categories[key_map[candidate.candidate_category]].append(
             {
                 "recommendation_id": recommendation.id,
-                "full_name": person.canonical_full_name,
+                "full_name": _display_name(person.canonical_full_name),
                 "current_title": person.current_title,
                 "current_company": person.current_company_name,
                 "category": candidate.candidate_category,
@@ -2360,7 +2555,12 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
                     == "confirmed_exact_company_verified"
                     else None
                 ),
-                "employment_warning": None,
+                "employment_warning": (
+                    "Currently listed at the hiring company. Current employment has not been independently verified."
+                    if candidate.employment_validation_status
+                    == "exact_company_current_but_unverified_freshness"
+                    else None
+                ),
                 "email_lookup_allowed": email_lookup_allowed,
                 "reasons": [*candidate.recommendation_reasons, *recommendation.personalized_reasons][:3],
                 "limitations": candidate.recommendation_limitations,
@@ -2398,12 +2598,20 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         warnings.append(
             "Contact discovery has been upgraded. Refresh to check again."
         )
-    elif latest_run and latest_run.status in {"running"}:
+    elif not has_results and latest_run and latest_run.status in {"running"}:
         response_status = "in_progress"
-    elif latest_run and latest_run.status == "provider_unavailable":
+    elif (
+        not has_results
+        and latest_run
+        and latest_run.status == "provider_unavailable"
+    ):
         response_status = "provider_unavailable"
         warnings.append(latest_run.safe_failure_message or "Professional data provider unavailable.")
-    elif latest_run and latest_run.status == "persistence_error":
+    elif (
+        not has_results
+        and latest_run
+        and latest_run.status == "persistence_error"
+    ):
         response_status = "persistence_error"
         warnings.append(
             latest_run.safe_failure_message
@@ -2412,7 +2620,7 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
                 "results. No additional search will run unless you retry."
             )
         )
-    elif latest_run and latest_run.status == "partial":
+    elif not has_results and latest_run and latest_run.status == "partial":
         response_status = "partial"
         warnings.append("Some professional data sources were unavailable; showing reliable partial results.")
     elif latest_run and not has_results:
@@ -2572,9 +2780,14 @@ async def find_email(db: Session, user: User, job_id: int, recommendation_id: in
         db, user, job_id, recommendation_id
     )
     if (
+        recommendation.suppressed_at is not None
+        or
         candidate.employment_validation_version != EMPLOYMENT_VALIDATION_VERSION
         or candidate.employment_validation_status
-        != "confirmed_exact_company_verified"
+        not in {
+            "confirmed_exact_company_verified",
+            "exact_company_current_but_unverified_freshness",
+        }
         or person.employment_revalidation_required
     ):
         status_value = (

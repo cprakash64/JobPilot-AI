@@ -222,13 +222,39 @@ def test_enabled_pdl_discovery_accepts_independent_limits() -> None:
             people_pdl_discovery_enabled=True,
             pdl_api_key="configured-secret",
             people_pdl_daily_credit_budget=50,
-            people_pdl_per_user_daily_limit=5,
+            people_pdl_per_user_daily_limit=16,
             people_pdl_result_ttl_days=30,
+            people_pdl_recruiter_results=4,
+            people_pdl_manager_results=4,
+            people_pdl_referral_results=8,
+            people_pdl_max_results_per_discovery=16,
         )
     )
     assert not any(
         finding.setting.startswith("PEOPLE_PDL")
         or finding.setting in {"PDL_API_KEY", "PEOPLE_PRIMARY_PROVIDER"}
+        for finding in findings
+    )
+
+
+def test_pdl_category_limits_must_fit_the_discovery_cap() -> None:
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="pdl",
+            people_pdl_discovery_enabled=True,
+            pdl_api_key="configured-secret",
+            people_pdl_daily_credit_budget=50,
+            people_pdl_per_user_daily_limit=16,
+            people_pdl_result_ttl_days=30,
+            people_pdl_recruiter_results=4,
+            people_pdl_manager_results=4,
+            people_pdl_referral_results=8,
+            people_pdl_max_results_per_discovery=15,
+        )
+    )
+    assert any(
+        finding.setting == "PEOPLE_PDL_MAX_RESULTS_PER_DISCOVERY"
         for finding in findings
     )
 

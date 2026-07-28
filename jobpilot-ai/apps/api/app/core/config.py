@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     people_result_ttl_days: int = 30
     people_pdl_result_ttl_days: int = 30
     people_pdl_results_per_query: int = 20
+    people_pdl_recruiter_results: int = 4
+    people_pdl_manager_results: int = 4
+    people_pdl_referral_results: int = 8
+    people_pdl_max_results_per_discovery: int = 16
     people_pdl_daily_credit_budget: int = 0
     people_pdl_per_user_daily_limit: int = 0
     people_employment_freshness_days: int = 180

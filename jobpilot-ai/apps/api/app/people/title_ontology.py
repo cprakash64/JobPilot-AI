@@ -43,6 +43,7 @@ _EARLY_CAREER_MARKERS = (
 )
 
 RECRUITER_CORE_TITLES = [
+    "Recruiter",
     "Technical Recruiter",
     "Engineering Recruiter",
     "Software Recruiter",
@@ -50,10 +51,14 @@ RECRUITER_CORE_TITLES = [
     "Technology Recruiter",
 ]
 RECRUITER_BROAD_TITLES = [
+    "Talent Acquisition",
     "Talent Acquisition Partner",
     "Talent Partner",
     "Senior Technical Recruiter",
     "Recruiting Manager",
+    "University Recruiter",
+    "Campus Recruiter",
+    "Early Careers Recruiter",
 ]
 RECRUITER_EARLY_CAREER_TITLES = [
     "University Recruiter",
@@ -69,10 +74,14 @@ _MANAGER_TITLES = {
     "software_engineering": [
         "Software Engineering Manager",
         "Engineering Manager",
+        "Senior Engineering Manager",
         "Software Development Manager",
+        "Application Development Manager",
+        "Technical Manager",
         "Director of Software Engineering",
         "Director of Engineering",
         "Head of Engineering",
+        "Head of Software Engineering",
         "Engineering Lead",
     ],
     "machine_learning": [
@@ -119,7 +128,20 @@ _MANAGER_TITLES = {
 }
 
 _TEAM_TITLES = {
-    "software_engineering": ["Software Engineer", "Software Developer", "Platform Engineer"],
+    "software_engineering": [
+        "Software Engineer",
+        "Software Developer",
+        "Backend Engineer",
+        "Frontend Engineer",
+        "Full Stack Engineer",
+        "Platform Engineer",
+        "Application Engineer",
+        "Systems Engineer",
+        "Senior Software Engineer",
+        "Staff Software Engineer",
+        "Principal Software Engineer",
+        "Technical Lead",
+    ],
     "machine_learning": ["AI Engineer", "Machine Learning Engineer", "Applied Scientist"],
     "embedded_systems": [
         "Embedded Software Engineer",

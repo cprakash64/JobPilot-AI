@@ -453,6 +453,34 @@ describe("PeopleWhoCanHelp", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the honest unverified-employment warning while allowing explicit email lookup", async () => {
+    const unverified = response({
+      categories: {
+        likely_recruiters: [{
+          ...recommendation,
+          employment_validation_status: "exact_company_current_but_unverified_freshness",
+          employment_warning:
+            "Currently listed at the hiring company. Current employment has not been independently verified.",
+          email_lookup_allowed: true
+        }],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      }
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => unverified,
+      text: async () => JSON.stringify(unverified)
+    }));
+
+    render(<PeopleWhoCanHelp jobId={7} />);
+
+    expect(await screen.findByText(
+      "Currently listed at the hiring company. Current employment has not been independently verified."
+    )).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Find work email/ })).toBeInTheDocument();
+  });
+
   it("opens an editable manual-review dialog for a grounded draft", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({

@@ -255,6 +255,40 @@ def _check_people_discovery_configuration(settings) -> list[Finding]:
                 "must be positive while PDL discovery is enabled",
             )
         )
+    category_limits = (
+        ("PEOPLE_PDL_RECRUITER_RESULTS", "people_pdl_recruiter_results"),
+        ("PEOPLE_PDL_MANAGER_RESULTS", "people_pdl_manager_results"),
+        ("PEOPLE_PDL_REFERRAL_RESULTS", "people_pdl_referral_results"),
+    )
+    for setting, attribute in category_limits:
+        if int(getattr(settings, attribute, 0) or 0) <= 0:
+            findings.append(
+                Finding(
+                    setting,
+                    "must be positive while PDL discovery is enabled",
+                )
+            )
+    total_limit = int(
+        getattr(settings, "people_pdl_max_results_per_discovery", 0) or 0
+    )
+    configured_total = sum(
+        max(0, int(getattr(settings, attribute, 0) or 0))
+        for _setting, attribute in category_limits
+    )
+    if total_limit <= 0:
+        findings.append(
+            Finding(
+                "PEOPLE_PDL_MAX_RESULTS_PER_DISCOVERY",
+                "must be positive while PDL discovery is enabled",
+            )
+        )
+    elif configured_total > total_limit:
+        findings.append(
+            Finding(
+                "PEOPLE_PDL_MAX_RESULTS_PER_DISCOVERY",
+                "must cover the configured category result limits",
+            )
+        )
     return findings
 
 

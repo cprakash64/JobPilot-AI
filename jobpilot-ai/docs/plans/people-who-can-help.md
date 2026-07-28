@@ -865,14 +865,14 @@ other provider request is authorized or performed by this phase.
 ### Architecture and decisions
 
 - Normal People discovery selects PDL and fingerprints the effective strategy
-  as `pdl-person-search-v1`. Apollo remains compiled for diagnostics, but
+  as `pdl-category-search-v2`. Apollo remains compiled for diagnostics, but
   selecting it requires the discovery gate, diagnostic gate, and internal
   rollout simultaneously. There is no automatic Apollo fallback.
-- PDL Person Search is the discovery and profile operation. Each exact-company
-  category query uses the canonical company domain and name, bounded title and
-  seniority filters, and a configured result-size cap. Search results are
-  normalized once and reused by employment-v2.1; `enrich_people` performs no
-  network operation.
+- PDL Person Search is the discovery and profile operation. One explicit
+  mutation orchestrates independently bounded recruiter, manager, and referral
+  searches using the same canonical company domain and name. Search results
+  are normalized once and reused by employment-v2.1; `enrich_people` performs
+  no network operation.
 - PDL `job_last_changed` and `job_last_verified` are provider employment
   freshness, not independent verification time. Retrieval time remains
   `provider_record_observed_at`. The allowlisted LinkedIn URL is the only
@@ -946,3 +946,78 @@ not initiate provider work or remove durable usage rows.
   diagnostic duplicate counter to count only actual within-category
   duplicates; it did not alter the persisted live recommendations or issue a
   provider request.
+
+## PDL category coverage and Hunter eligibility (2026-07-28)
+
+Status: offline implementation and validation complete. No provider
+request is authorized or performed in this phase.
+
+### Architecture and decisions
+
+- One user mutation and discovery run may execute no more than three PDL
+  searches: recruiter (4), potential manager (4), and referral candidate (8),
+  with a hard total returned-profile cap of 16. All four limits are
+  configurable and production validation rejects non-positive or internally
+  inconsistent limits.
+- Every category search uses the canonical exact-company domain/name, bounded
+  category-specific titles, and soft location handling. Related-company
+  broadening, retries, Apollo, secondary verification, network matching, and
+  Hunter are not part of this orchestrated discovery.
+- A conservative budget preflight occurs before every category call using its
+  maximum possible record charge. The existing durable operation ledger
+  remains the source for global and per-user consumption, and provider
+  operation idempotency remains scoped to the discovery run, operation type,
+  ordinal, and effective PDL strategy.
+- Software referral discovery has an independent individual-contributor title
+  pool. Recruiter and leadership affinity is applied only after all three
+  result pools exist, so managers cannot consume referral query capacity and a
+  clear recruiter, manager, or relevant individual contributor remains in its
+  plausible primary category. Cross-category deduplication still produces one
+  persisted identity.
+- Each category persists identifier-free pipeline counts for query execution,
+  raw/normalized results, employment outcomes, title/confidence suppression,
+  deduplication/reassignment, acceptance, and display-cap exclusion. These
+  counts explain empty categories without another provider request.
+- PDL strategy v2 invalidates old Apollo and v1 no-match/error fingerprints
+  without hiding compatible successful recommendations. A newer success wins
+  over an older error; GET/open/browser refresh remains read-only and only an
+  explicit coalesced refresh mutation can perform discovery.
+- Hunter remains an explicit, separately budgeted action. It is eligible for
+  confirmed exact employment and exact-company current-but-unverified
+  freshness, while the UI states that the latter has not been independently
+  verified. Former, conflicting, stale, insufficient, related-company,
+  suppressed, or obsolete-version recommendations remain blocked.
+- Display-only casing corrects simple all-lowercase multiword names. Stored
+  source observations and mixed, punctuated, initialed, suffixed, or
+  non-English casing remain unchanged.
+
+### Rollout and rollback
+
+Deploy API and web together after offline validation. Keep Hunter/email,
+Apollo, PDL fallback, secondary verification, network matching, and automatic
+broadening disabled until separately authorized. Rollback restores the v1
+orchestration and fingerprint but must not delete discovery runs, category
+diagnostics, recommendations, or durable provider-usage rows.
+
+### Validation checklist
+
+- [x] Focused backend coverage includes independent 4/4/8 quotas, three-call
+  orchestration, hard provider return bounding, referral title expansion,
+  category affinity, safe diagnostics, current PDL retry behavior, stale
+  fingerprints, later-success precedence, Hunter eligibility/blocking,
+  conservative name display, cache reuse, and private-log exclusions.
+- [x] Focused frontend coverage includes the honest unverified-employment
+  limitation and explicit email action, plus existing read-only reopen and
+  mutation coalescing behavior.
+- [x] Focused People backend: 84 passed. Complete API: 685 passed.
+- [x] Focused People frontend: 40 passed. Complete web: 14 files / 209 tests
+  passed.
+- [x] Web lint, typecheck, and production build passed.
+- [x] Extension typecheck, 30 files / 284 tests, and build passed.
+- [x] The synthetic/redacted People evaluation passed all release thresholds.
+- [x] Docker Compose validation, migration head
+  `0024_people_persistence_usage`, API readiness, changed-code Ruff, and
+  `git diff --check`.
+- [ ] One controlled live validation remains gated on separate approval: one
+  job, one explicit exact-company refresh, up to three PDL searches, and no
+  Apollo, Hunter/email, broadening, network matching, or retry.

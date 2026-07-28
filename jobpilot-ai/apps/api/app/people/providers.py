@@ -49,8 +49,7 @@ APOLLO_ENRICHMENT_STRATEGY_VERSION = (
     "apollo-enrichment-v4-complete-person"
 )
 APOLLO_ENRICHMENT_ADAPTER_VERSION = APOLLO_ENRICHMENT_STRATEGY_VERSION
-PDL_DISCOVERY_STRATEGY_VERSION = "pdl-person-search-v1"
-PDL_COMBINED_TITLES_PER_CATEGORY = 6
+PDL_DISCOVERY_STRATEGY_VERSION = "pdl-category-search-v2"
 # Bulk request compatibility did not change with the Complete Person rollout.
 # Keep its account-scoped rejection state on the existing key so a strategy
 # fingerprint change cannot accidentally re-enable a known-rejected operation.
@@ -853,8 +852,12 @@ class PDLPeopleProvider(_HttpProvider):
         super().__init__("pdl")
         self.api_key = api_key or settings.pdl_api_key
         self._search_profiles: dict[str, ProviderPerson] = {}
+        self.last_search_raw_count = 0
+        self.last_search_normalized_count = 0
 
     async def search_people(self, query: PeopleSearchQuery) -> list[ProviderPerson]:
+        self.last_search_raw_count = 0
+        self.last_search_normalized_count = 0
         if not self.api_key:
             raise ProviderUnavailable("provider_not_configured", provider=self.provider_name)
         if not query.company_domain:
@@ -893,6 +896,11 @@ class PDLPeopleProvider(_HttpProvider):
                 f"job_title_levels IN ({seniority_clause})"
             )
         sql = "SELECT * FROM person WHERE " + " AND ".join(filters)
+        result_limit = min(
+            query.limit,
+            settings.people_pdl_results_per_query,
+            100,
+        )
         data = await self._request(
             "POST", "https://api.peopledatalabs.com/v5/person/search",
             operation_type="people_search",
@@ -903,11 +911,7 @@ class PDLPeopleProvider(_HttpProvider):
             },
             json={
                 "sql": sql,
-                "size": min(
-                    query.limit,
-                    settings.people_pdl_results_per_query,
-                    100,
-                ),
+                "size": result_limit,
             },
         )
         rows = data.get("data")
@@ -921,43 +925,33 @@ class PDLPeopleProvider(_HttpProvider):
             )
         normalized = [
             person
-            for row in rows
+            for row in rows[:result_limit]
             if (person := _normalize_pdl(row))
         ]
+        self.last_search_raw_count = len(rows)
+        self.last_search_normalized_count = len(normalized)
         self.credits += len(rows)
         for person in normalized:
             self._search_profiles[person.provider_person_id] = person
         return normalized
 
-    async def search_people_combined(
+    async def search_people_category(
         self,
-        queries: dict[str, list[PeopleSearchQuery]],
+        queries: list[PeopleSearchQuery],
+        *,
+        limit: int,
     ) -> list[ProviderPerson]:
-        """Run one bounded exact-company search for all UI categories."""
-        first = next(
-            (
-                query
-                for category_queries in queries.values()
-                for query in category_queries
-            ),
-            None,
-        )
-        if first is None:
+        first = queries[0] if queries else None
+        if first is None or limit <= 0:
             return []
-        titles: list[str] = []
-        for category_queries in queries.values():
-            category_titles: list[str] = []
-            for query in category_queries:
-                for title in query.titles:
-                    if (
-                        title not in category_titles
-                        and len(category_titles)
-                        < PDL_COMBINED_TITLES_PER_CATEGORY
-                    ):
-                        category_titles.append(title)
-            for title in category_titles:
-                if title not in titles:
-                    titles.append(title)
+        titles = list(
+            dict.fromkeys(
+                title
+                for query in queries
+                for title in query.titles
+                if title.strip()
+            )
+        )[:20]
         return await self.search_people(
             PeopleSearchQuery(
                 category=first.category,
@@ -965,14 +959,14 @@ class PDLPeopleProvider(_HttpProvider):
                 company_domain=first.company_domain,
                 company_aliases=first.company_aliases,
                 titles=titles,
-                title_group="combined_exact_company",
+                title_group=f"{first.category}_bounded",
                 seniorities=[],
                 location=first.location,
                 location_filter_mode="soft",
                 company_match_kind="canonical",
                 role_family=first.role_family,
                 department=first.department,
-                limit=settings.people_pdl_results_per_query,
+                limit=limit,
             )
         )
 
