@@ -1154,6 +1154,23 @@ def _strongest_category_candidates(
     return selected
 
 
+def _matches_combined_title_criteria(
+    person: ProviderPerson,
+    queries: list[PeopleSearchQuery],
+) -> bool:
+    current_title = normalize_text(person.current_title)
+    if not current_title:
+        return False
+    return any(
+        candidate_title == current_title
+        or candidate_title in current_title
+        or current_title in candidate_title
+        for query in queries
+        for title in query.titles
+        if (candidate_title := normalize_text(title))
+    )
+
+
 def _category_threshold(category: PeopleCategory) -> float:
     return {
         "likely_recruiter": settings.people_min_recruiter_relevance,
@@ -1593,14 +1610,57 @@ async def discover(
         employment_outcomes: dict[str, int] = defaultdict(int)
         pipeline_stage = "search"
         try:
-            for category in _PEOPLE_CATEGORIES:
-                category_rows: list[ProviderPerson] = []
-                queries = (
+            exact_queries = {
+                category: (
                     build_category_search_queries(profile, category)
                     if strategy == "exact"
                     else build_broadened_search_queries(profile, category)
                 )
+                for category in _PEOPLE_CATEGORIES
+            }
+            combined_pdl_search = bool(
+                strategy == "exact"
+                and settings.people_primary_provider == "pdl"
+                and hasattr(provider, "search_people_combined")
+            )
+            combined_rows: list[ProviderPerson] = []
+            if combined_pdl_search:
+                for category in _PEOPLE_CATEGORIES:
+                    for query in exact_queries[category]:
+                        diagnostics[category]["search_queries"].append({
+                            "title_group": query.title_group,
+                            "titles": query.titles,
+                            "company_match_kind": query.company_match_kind,
+                        })
+                        diagnostics[category]["title_groups"].append(
+                            query.title_group
+                        )
+                        diagnostics[category]["seniorities_used"].extend(
+                            query.seniorities
+                        )
+                try:
+                    combined_rows = await provider.search_people_combined(
+                        exact_queries
+                    )
+                except ProviderUnavailable as exc:
+                    failures.append(exc.reason)
+                    _log_provider_failure(exc, run.id)
+                searched = len(combined_rows)
+            for category in _PEOPLE_CATEGORIES:
+                category_rows: list[ProviderPerson] = []
+                queries = exact_queries[category]
+                if combined_pdl_search:
+                    category_rows.extend(
+                        person
+                        for person in combined_rows
+                        if _matches_combined_title_criteria(
+                            person,
+                            queries,
+                        )
+                    )
                 for query in queries:
+                    if combined_pdl_search:
+                        continue
                     diagnostics[category]["search_queries"].append({
                         "title_group": query.title_group,
                         "titles": query.titles,
@@ -1619,11 +1679,15 @@ async def discover(
                     category_rows.extend(rows)
                     searched += len(rows)
                     diagnostics[category]["raw_search_result_count"] += len(rows)
+                if combined_pdl_search:
+                    diagnostics[category][
+                        "raw_search_result_count"
+                    ] = len(combined_rows)
                 categories[category] = deduplicate(category_rows)
                 diagnostics[category]["unique_candidate_count"] = len(categories[category])
                 duplicate_count = max(
                     0,
-                    diagnostics[category]["raw_search_result_count"]
+                    len(category_rows)
                     - diagnostics[category]["unique_candidate_count"],
                 )
                 if duplicate_count:

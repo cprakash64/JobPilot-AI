@@ -50,6 +50,7 @@ APOLLO_ENRICHMENT_STRATEGY_VERSION = (
 )
 APOLLO_ENRICHMENT_ADAPTER_VERSION = APOLLO_ENRICHMENT_STRATEGY_VERSION
 PDL_DISCOVERY_STRATEGY_VERSION = "pdl-person-search-v1"
+PDL_COMBINED_TITLES_PER_CATEGORY = 6
 # Bulk request compatibility did not change with the Complete Person rollout.
 # Keep its account-scoped rejection state on the existing key so a strategy
 # fingerprint change cannot accidentally re-enable a known-rejected operation.
@@ -927,6 +928,53 @@ class PDLPeopleProvider(_HttpProvider):
         for person in normalized:
             self._search_profiles[person.provider_person_id] = person
         return normalized
+
+    async def search_people_combined(
+        self,
+        queries: dict[str, list[PeopleSearchQuery]],
+    ) -> list[ProviderPerson]:
+        """Run one bounded exact-company search for all UI categories."""
+        first = next(
+            (
+                query
+                for category_queries in queries.values()
+                for query in category_queries
+            ),
+            None,
+        )
+        if first is None:
+            return []
+        titles: list[str] = []
+        for category_queries in queries.values():
+            category_titles: list[str] = []
+            for query in category_queries:
+                for title in query.titles:
+                    if (
+                        title not in category_titles
+                        and len(category_titles)
+                        < PDL_COMBINED_TITLES_PER_CATEGORY
+                    ):
+                        category_titles.append(title)
+            for title in category_titles:
+                if title not in titles:
+                    titles.append(title)
+        return await self.search_people(
+            PeopleSearchQuery(
+                category=first.category,
+                company_name=first.company_name,
+                company_domain=first.company_domain,
+                company_aliases=first.company_aliases,
+                titles=titles,
+                title_group="combined_exact_company",
+                seniorities=[],
+                location=first.location,
+                location_filter_mode="soft",
+                company_match_kind="canonical",
+                role_family=first.role_family,
+                department=first.department,
+                limit=settings.people_pdl_results_per_query,
+            )
+        )
 
     async def enrich_people(self, people: list[PersonEnrichmentRequest]) -> list[ProviderPerson]:
         # Person Search already returns the profile and employment fields used

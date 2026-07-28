@@ -919,3 +919,30 @@ not initiate provider work or remove durable usage rows.
   `git diff --check`.
 - [ ] One controlled live PDL validation requires separate explicit approval
   after all offline validation passes.
+
+### Controlled live validation (2026-07-28)
+
+- [x] Approved Okta job 7637 started one explicit exact-company refresh.
+- [x] Exact discovery used one bounded combined PDL Person Search operation:
+  six titles per category maximum, one result cap, canonical company
+  name/domain, and soft-only location handling.
+- [x] Provider outcome was HTTP 200 with 10 returned and normalized profiles.
+  Durable usage added one PDL operation, zero Apollo operations, and zero
+  Hunter operations. PDL reported no explicit credits; 10 were recorded as
+  estimated and 10 conservative budget units were charged.
+- [x] Employment-v2.1 persisted five displayable exact-company,
+  current-but-unverified-freshness candidates and suppressed two former
+  employees. The five displayed identities were unique across categories.
+- [x] The UI rendered zero recruiters, two potential managers, and three
+  potential referral candidates. No professional-profile action was rendered
+  because none of the displayed records had an allowlisted provider URL.
+  Hunter/email and broaden actions remained absent.
+- [x] Two authenticated reopen checks and one browser refresh left the PDL
+  provider-operation count unchanged at one.
+- [x] The current complete PDL state superseded the older provider-unavailable
+  card state. No retry, broadening, secondary verification, comparison,
+  network matching, or additional provider operation occurred.
+- [x] A post-validation offline correction changed the combined-search
+  diagnostic duplicate counter to count only actual within-category
+  duplicates; it did not alter the persisted live recommendations or issue a
+  provider request.

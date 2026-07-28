@@ -3588,11 +3588,11 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
         async def request(self, method: str, url: str, **kwargs):
             provider_calls.append(url)
             sql = kwargs["json"]["sql"]
-            title = next(
+            matched_titles = [
                 value
                 for value in private_ids
                 if f"'{value}'" in sql
-            )
+            ]
             return httpx.Response(
                 200,
                 request=httpx.Request(method, url),
@@ -3621,6 +3621,7 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
                                 else "https://profiles.invalid/not-allowed"
                             ),
                         }
+                        for title in matched_titles
                     ]
                 },
             )
@@ -3752,7 +3753,7 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
     assert discovered.json()["categories"]["potential_hiring_managers"][0][
         "professional_profile_url"
     ] is None
-    assert len(provider_calls) == calls_after_discovery == 3
+    assert len(provider_calls) == calls_after_discovery == 1
     assert all(
         url == "https://api.peopledatalabs.com/v5/person/search"
         for url in provider_calls
@@ -3765,9 +3766,9 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
             PeopleProviderOperationUsage.provider == "pdl"
         )
     ).all()
-    assert len(usage_rows) == 3
+    assert len(usage_rows) == 1
     assert all(row.credits_reported is None for row in usage_rows)
-    assert all(row.credits_estimated == 1 for row in usage_rows)
+    assert all(row.credits_estimated == 3 for row in usage_rows)
     assert all(row.credit_status == "estimated" for row in usage_rows)
     rendered_logs = caplog.text
     assert all(value not in rendered_logs for value in private_ids.values())
