@@ -483,13 +483,7 @@ def _tracker_payload(
     *,
     statuses: tuple[ApplicationStatus, ...] | None = None,
 ) -> dict:
-    """Serialize the user-owned tracking ledger, optionally narrowed by status.
-
-    `/tracker/all` is an established dashboard contract and therefore includes
-    every lifecycle state: bookmarks, prepared/applying jobs, and confirmed
-    submissions. Callers that must distinguish an actual submission use the
-    explicit `/tracker/submitted` view instead of inferring from row existence.
-    """
+    """Serialize the user-owned ledger, optionally limited to submissions."""
     filters = [ApplicationTracker.user_id == user_id]
     if statuses is not None:
         filters.append(ApplicationTracker.status.in_(statuses))
@@ -527,17 +521,25 @@ def _tracker_payload(
 
 
 @router.get("/tracker/all")
-def list_tracker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    """Complete tracking ledger, including saved and in-progress jobs."""
+def list_tracker(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Complete ledger, including saved and in-progress jobs."""
     return _tracker_payload(db, user.id)
 
 
 @router.get("/tracker/submitted")
 def list_submitted_tracker(
-    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Only confirmed submissions and their downstream outcomes."""
-    return _tracker_payload(db, user.id, statuses=SUBMITTED_APPLICATION_STATUSES)
+    return _tracker_payload(
+        db,
+        user.id,
+        statuses=SUBMITTED_APPLICATION_STATUSES,
+    )
 
 
 def _tracker_job_payload(

@@ -13,28 +13,6 @@ function jsonResponse(body: unknown, status = 200) {
 
 const APPLICATIONS = [
   {
-    id: 10,
-    job_id: 100,
-    status: "saved",
-    applied_at: null,
-    created_at: "2026-07-18T12:00:00Z",
-    updated_at: "2026-07-22T12:00:00Z",
-    job: {
-      id: 100,
-      title: "ML Platform Engineer",
-      company: "Pine Labs",
-      company_domain: "pine.example",
-      company_logo_url: null,
-      company_logo_proxy_path: null,
-      location: "Remote",
-      workplace_type: "remote",
-      employment_type: "Full-time",
-      posted_at: "2026-07-18T12:00:00Z",
-      application_url: "https://pine.example/jobs/100",
-      match: { fit_score: 89 }
-    }
-  },
-  {
     id: 11,
     job_id: 101,
     status: "applied",
@@ -85,7 +63,7 @@ describe("TrackerClient", () => {
     localStorage.setItem("jobpilot_token", "token");
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
-      if (url.endsWith("/jobs/tracker/all")) {
+      if (url.endsWith("/jobs/tracker/submitted")) {
         return Promise.resolve(jsonResponse({ applications: APPLICATIONS }));
       }
       if (url.endsWith("/jobs/101/tracker") && init?.method === "PUT") {
@@ -112,9 +90,10 @@ describe("TrackerClient", () => {
     expect(screen.getByText("Total tracked")).toBeInTheDocument();
     expect(screen.getAllByText("Applied").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /Load applications/i })).not.toBeInTheDocument();
-    expect(
-      screen.getAllByRole("link", { name: /View job/i }).map((link) => link.getAttribute("href"))
-    ).toContain("https://careers.acme.com/101");
+    expect(screen.getAllByRole("link", { name: /View job/i })[0]).toHaveAttribute(
+      "href",
+      "https://careers.acme.com/101"
+    );
   });
 
   it("updates status from the application card", async () => {
@@ -141,15 +120,5 @@ describe("TrackerClient", () => {
     await userEvent.click(screen.getByRole("button", { name: "Interviews" }));
     expect(screen.getByText("Backend Engineer")).toBeInTheDocument();
     expect(screen.queryByText("Software Engineer")).not.toBeInTheDocument();
-  });
-
-  it("documents that the all-ledger response includes bookmarks", async () => {
-    render(React.createElement(TrackerClient));
-    await screen.findByText("ML Platform Engineer");
-
-    await userEvent.click(screen.getByRole("button", { name: "Saved" }));
-    expect(screen.getByText("ML Platform Engineer")).toBeInTheDocument();
-    expect(screen.queryByText("Software Engineer")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Update status for ML Platform Engineer")).toHaveValue("saved");
   });
 });
