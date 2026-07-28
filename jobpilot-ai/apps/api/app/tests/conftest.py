@@ -51,5 +51,9 @@ def _reset_rate_limiter() -> None:
 @pytest.fixture(autouse=True)
 def _reset_people_bulk_capability() -> None:
     from app.people.bulk_capability import clear_local_bulk_capabilities
+    from app.people.complete_person_cache import (
+        clear_local_complete_person_cache,
+    )
 
     clear_local_bulk_capabilities()
+    clear_local_complete_person_cache()

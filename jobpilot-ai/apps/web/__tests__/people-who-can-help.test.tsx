@@ -95,10 +95,16 @@ describe("PeopleWhoCanHelp", () => {
   it.each([
     ["provider_unauthorized", "The people data provider credentials could not be verified."],
     ["provider_forbidden", "The configured provider account does not have access to people search."],
+    [
+      "provider_master_key_required_or_forbidden",
+      "Apollo complete-profile access is unavailable for the configured account."
+    ],
     ["provider_rate_limited", "The people data provider rate limit has been reached."],
     ["provider_timeout", "The people search provider took too long to respond."],
     ["provider_circuit_open", "People search is temporarily paused after repeated provider failures."],
-    ["provider_schema_error", "The people provider returned an unsupported response."]
+    ["provider_schema_error", "The people provider returned an unsupported response."],
+    ["provider_request_invalid", "The people provider could not accept the profile request."],
+    ["provider_response_invalid", "The people provider returned an unsupported response."]
   ])("shows the safe %s message", async (availabilityReason, expected) => {
     const unavailable = response({
       status: "provider_unavailable",
@@ -787,6 +793,9 @@ describe("PeopleWhoCanHelpSummary", () => {
   it("renders a stale persisted state and refreshes only after explicit action", async () => {
     const stale = response({
       status: "stale",
+      warnings: [
+        "Contact discovery has been upgraded. Refresh to check again."
+      ],
       categories: {
         likely_recruiters: [],
         potential_hiring_managers: [],
@@ -809,13 +818,73 @@ describe("PeopleWhoCanHelpSummary", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View people" }));
     expect(
-      await screen.findByText("Saved people results need revalidation.")
+      await screen.findByText(
+        "Contact discovery has been upgraded. Refresh to check again."
+      )
     ).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "Broaden search" })
+    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh people" }));
     expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces repeated stale Refresh people clicks into one mutation", async () => {
+    const stale = response({
+      status: "stale",
+      warnings: [
+        "Contact discovery has been upgraded. Refresh to check again."
+      ],
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      },
+      search_scope: {
+        company_scope: "Hiring company only",
+        location_filter: "soft",
+        parent_company_matches_included: false,
+        refresh_eligible: true,
+        exact_company_search_completed: false,
+        related_company_search_attempted: false,
+        broaden_eligible: false,
+        broaden_attempted: false
+      }
+    });
+    let resolveDiscovery!: (value: Response) => void;
+    const discoveryResponse = new Promise<Response>((resolve) => {
+      resolveDiscovery = resolve;
+    });
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") return discoveryResponse;
+      return Promise.resolve({
+        ok: true,
+        json: async () => stale,
+        text: async () => JSON.stringify(stale)
+      } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PeopleWhoCanHelpSummary jobId={7506} onViewAll={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+    const refresh = await screen.findByRole("button", { name: "Refresh people" });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")
+      ).toHaveLength(1);
+    });
+    resolveDiscovery({
+      ok: true,
+      json: async () => response(),
+      text: async () => JSON.stringify(response())
+    } as Response);
+    expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
   });
 
   it("does not offer Retry for a non-retryable provider account limitation", async () => {
@@ -840,6 +909,34 @@ describe("PeopleWhoCanHelpSummary", () => {
     expect(
       await screen.findByText(
         "The configured provider account does not have access to people search."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry discovery" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer Retry when complete-profile access requires a master key", async () => {
+    const data = response({
+      status: "provider_unavailable",
+      availability_reason: "provider_master_key_required_or_forbidden",
+      retry_eligible: false,
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [],
+        potential_referrers: []
+      },
+      warnings: ["Apollo complete-profile access is unavailable for the configured account."]
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => data,
+      text: async () => JSON.stringify(data)
+    }));
+    render(<PeopleWhoCanHelpSummary jobId={7600} onViewAll={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+
+    expect(
+      await screen.findByText(
+        "Apollo complete-profile access is unavailable for the configured account."
       )
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry discovery" })).not.toBeInTheDocument();
@@ -946,5 +1043,60 @@ describe("PeopleWhoCanHelpSummary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Find people" }));
     expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("limits the compact preview to two people per category", async () => {
+    const person = (
+      recommendationId: number,
+      fullName: string,
+      category: string
+    ) => ({
+      ...recommendation,
+      recommendation_id: recommendationId,
+      full_name: fullName,
+      category
+    });
+    const current = response({
+      categories: {
+        likely_recruiters: [
+          person(101, "Recruiter One", "likely_recruiter"),
+          person(102, "Recruiter Two", "likely_recruiter"),
+          person(103, "Recruiter Three", "likely_recruiter")
+        ],
+        potential_hiring_managers: [
+          person(201, "Manager One", "potential_hiring_manager"),
+          person(202, "Manager Two", "potential_hiring_manager"),
+          person(203, "Manager Three", "potential_hiring_manager")
+        ],
+        potential_referrers: [
+          person(301, "Referrer One", "potential_referrer"),
+          person(302, "Referrer Two", "potential_referrer"),
+          person(303, "Referrer Three", "potential_referrer")
+        ]
+      }
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => current,
+      text: async () => JSON.stringify(current)
+    }));
+    render(
+      <PeopleWhoCanHelpSummary
+        jobId={7800}
+        onViewAll={() => undefined}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "View people" }));
+
+    expect(await screen.findByText("Recruiter One")).toBeInTheDocument();
+    expect(screen.getByText("Recruiter Two")).toBeInTheDocument();
+    expect(screen.getByText("Manager One")).toBeInTheDocument();
+    expect(screen.getByText("Manager Two")).toBeInTheDocument();
+    expect(screen.getByText("Referrer One")).toBeInTheDocument();
+    expect(screen.getByText("Referrer Two")).toBeInTheDocument();
+    expect(screen.queryByText("Recruiter Three")).not.toBeInTheDocument();
+    expect(screen.queryByText("Manager Three")).not.toBeInTheDocument();
+    expect(screen.queryByText("Referrer Three")).not.toBeInTheDocument();
   });
 });

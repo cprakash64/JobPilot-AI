@@ -64,6 +64,8 @@ class PeopleSearchQuery(BaseModel):
 
 class PersonEnrichmentRequest(BaseModel):
     provider_person_id: str
+    category: PeopleCategory | None = None
+    rank_score: float | None = None
 
 
 class ProviderPerson(BaseModel):

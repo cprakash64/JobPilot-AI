@@ -205,6 +205,59 @@ def _check_people_employment_verification_configuration(settings) -> list[Findin
     return findings
 
 
+def _check_people_discovery_configuration(settings) -> list[Finding]:
+    if not bool(getattr(settings, "people_recommendations_enabled", False)):
+        return []
+    provider = str(
+        getattr(settings, "people_primary_provider", "")
+    ).strip().lower()
+    findings: list[Finding] = []
+    if provider != "pdl":
+        findings.append(
+            Finding(
+                "PEOPLE_PRIMARY_PROVIDER",
+                "must be pdl for normal People discovery",
+            )
+        )
+        return findings
+    if not bool(getattr(settings, "people_pdl_discovery_enabled", False)):
+        findings.append(
+            Finding(
+                "PEOPLE_PDL_DISCOVERY_ENABLED",
+                "must be enabled when PDL is the primary provider",
+            )
+        )
+    if not (getattr(settings, "pdl_api_key", None) or "").strip():
+        findings.append(
+            Finding(
+                "PDL_API_KEY",
+                "is missing while PDL discovery is enabled",
+            )
+        )
+    for setting, attribute in (
+        ("PEOPLE_PDL_DAILY_CREDIT_BUDGET", "people_pdl_daily_credit_budget"),
+        (
+            "PEOPLE_PDL_PER_USER_DAILY_LIMIT",
+            "people_pdl_per_user_daily_limit",
+        ),
+    ):
+        if int(getattr(settings, attribute, 0) or 0) <= 0:
+            findings.append(
+                Finding(
+                    setting,
+                    "must be a positive limit while PDL discovery is enabled",
+                )
+            )
+    if int(getattr(settings, "people_pdl_result_ttl_days", 0) or 0) <= 0:
+        findings.append(
+            Finding(
+                "PEOPLE_PDL_RESULT_TTL_DAYS",
+                "must be positive while PDL discovery is enabled",
+            )
+        )
+    return findings
+
+
 def _check_cors(origins: list[str] | None, *, allow_credentials: bool) -> list[Finding]:
     values = [o.strip() for o in (origins or []) if o and o.strip()]
     if not values:
@@ -288,6 +341,7 @@ def collect_findings(settings) -> list[Finding]:
     )
     findings += _check_people_email_configuration(settings)
     findings += _check_people_employment_verification_configuration(settings)
+    findings += _check_people_discovery_configuration(settings)
     findings += _check_cors(
         getattr(settings, "cors_origins", None),
         allow_credentials=bool(getattr(settings, "cors_allow_credentials", True)),

@@ -92,10 +92,14 @@ function providerFailureMessage(data: PeopleResponse): string {
   const messages: Record<string, string> = {
     provider_unauthorized: "The people data provider credentials could not be verified.",
     provider_forbidden: "The configured provider account does not have access to people search.",
+    provider_master_key_required_or_forbidden:
+      "Apollo complete-profile access is unavailable for the configured account.",
     provider_rate_limited: "The people data provider rate limit has been reached.",
     provider_timeout: "The people search provider took too long to respond.",
     provider_circuit_open: "People search is temporarily paused after repeated provider failures.",
     provider_schema_error: "The people provider returned an unsupported response.",
+    provider_request_invalid: "The people provider could not accept the profile request.",
+    provider_response_invalid: "The people provider returned an unsupported response.",
     recommendation_commit_failed:
       "JobPilot found potential contacts but could not save the results. No additional search will run unless you retry."
   };
@@ -554,8 +558,8 @@ export function PeopleWhoCanHelpSummary({
 
   const compactPeople = data
     ? [
-        ...data.categories.likely_recruiters.slice(0, 1),
-        ...data.categories.potential_hiring_managers.slice(0, 1),
+        ...data.categories.likely_recruiters.slice(0, 2),
+        ...data.categories.potential_hiring_managers.slice(0, 2),
         ...data.categories.potential_referrers.slice(0, 2)
       ]
     : [];
@@ -632,7 +636,10 @@ export function PeopleWhoCanHelpSummary({
           ) : null}
           {data?.status === "stale" && !discovering ? (
             <StateWithRetry
-              text="Saved people results need revalidation."
+              text={
+                data.warnings[0] ??
+                "Contact discovery has been upgraded. Refresh to check again."
+              }
               onRetry={() => void controller.discover()}
               label="Refresh people"
             />

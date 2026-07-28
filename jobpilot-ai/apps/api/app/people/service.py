@@ -49,6 +49,7 @@ from app.people.provider_usage import (
 )
 from app.people.providers import (
     APOLLO_ENRICHMENT_ADAPTER_VERSION,
+    PDL_DISCOVERY_STRATEGY_VERSION,
     PDLPeopleProvider,
     ProviderUnavailable,
     get_email_provider,
@@ -100,10 +101,15 @@ DISPLAYABLE_EMPLOYMENT_STATUSES = frozenset(
 _SAFE_PROVIDER_MESSAGES = {
     "provider_unauthorized": "The people data provider credentials could not be verified.",
     "provider_forbidden": "The configured provider account does not have access to people search.",
+    "provider_master_key_required_or_forbidden": (
+        "Apollo complete-profile access is unavailable for the configured account."
+    ),
     "provider_rate_limited": "The people data provider rate limit has been reached.",
     "provider_timeout": "The people search provider took too long to respond.",
     "provider_circuit_open": "People search is temporarily paused after repeated provider failures.",
     "provider_schema_error": "The people provider returned an unsupported response.",
+    "provider_request_invalid": "The people provider could not accept the profile request.",
+    "provider_response_invalid": "The people provider returned an unsupported response.",
 }
 
 
@@ -154,6 +160,8 @@ def query_fingerprint(
     payload["employment_evidence_version"] = EMPLOYMENT_EVIDENCE_VERSION
     if settings.people_primary_provider == "apollo":
         payload["provider_adapter_version"] = APOLLO_ENRICHMENT_ADAPTER_VERSION
+    elif settings.people_primary_provider == "pdl":
+        payload["provider_adapter_version"] = PDL_DISCOVERY_STRATEGY_VERSION
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -168,11 +176,24 @@ def _job_or_404(db: Session, job_id: int) -> JobPosting:
     return job
 
 
-def _fresh_candidates(db: Session, job_id: int) -> list[JobPeopleCandidate]:
+def _fresh_candidates(
+    db: Session,
+    job_id: int,
+    user_id: int,
+) -> list[JobPeopleCandidate]:
     return list(
         db.scalars(
-            select(JobPeopleCandidate).where(
+            select(JobPeopleCandidate)
+            .join(
+                UserJobPeopleRecommendation,
+                UserJobPeopleRecommendation.job_people_candidate_id
+                == JobPeopleCandidate.id,
+            )
+            .where(
                 JobPeopleCandidate.job_id == job_id,
+                UserJobPeopleRecommendation.user_id == user_id,
+                UserJobPeopleRecommendation.job_id == job_id,
+                UserJobPeopleRecommendation.suppressed_at.is_(None),
                 JobPeopleCandidate.expires_at > _now(),
                 JobPeopleCandidate.scoring_version == SCORING_VERSION,
                 JobPeopleCandidate.employment_validation_version
@@ -192,7 +213,7 @@ def _fresh_no_match_run(
     user_id: int,
     fingerprint: str,
 ) -> PeopleDiscoveryRun | None:
-    cutoff = _now() - timedelta(days=settings.people_result_ttl_days)
+    cutoff = _now() - timedelta(days=_people_result_ttl_days())
     runs = db.scalars(
         select(PeopleDiscoveryRun)
         .where(
@@ -260,6 +281,9 @@ _NON_RETRYABLE_PROVIDER_ERRORS = frozenset(
         "provider_not_configured",
         "provider_unauthorized",
         "provider_forbidden",
+        "provider_master_key_required_or_forbidden",
+        "provider_request_invalid",
+        "provider_response_invalid",
         "provider_budget_exceeded",
         "provider_user_limit_exceeded",
     }
@@ -326,7 +350,11 @@ def _provider_error_context(reason: str, *, now: datetime) -> dict[str, object]:
             "provider_error_retry_policy": "bounded_explicit_retry",
             "retry_eligible_at": retry_at.isoformat(),
         }
-    if reason == "provider_schema_error":
+    if reason in {
+        "provider_schema_error",
+        "provider_request_invalid",
+        "provider_response_invalid",
+    }:
         return {
             "provider_error_retry_policy": "adapter_version_change_required",
             "retry_eligible_at": None,
@@ -419,9 +447,7 @@ def _provider_pipeline_outcomes(
         operation_counts = {}
     metrics = getattr(provider, "enrichment_safe_metrics", {})
     bulk_calls = int(operation_counts.get("bulk_enrichment", 0))
-    single_calls = int(
-        operation_counts.get("single_person_enrichment", 0)
-    )
+    single_calls = int(operation_counts.get("complete_person_by_id", 0))
     if metrics.get("bulk_payload_validation_failed"):
         bulk_outcome = "request_rejected_fallback_continued"
     elif metrics.get("bulk_capability_skipped"):
@@ -448,13 +474,10 @@ def _same_identity(left: ProviderPerson, right: ProviderPerson) -> bool:
         return left_url == right_url
     if left.provider == right.provider and left.provider_person_id == right.provider_person_id:
         return True
-    # Conservative fallback: exact normalized name + domain + title. Never name alone.
-    return bool(
-        normalize_text(left.full_name) == normalize_text(right.full_name)
-        and left.current_company_domain
-        and left.current_company_domain == right.current_company_domain
-        and normalize_text(left.current_title) == normalize_text(right.current_title)
-    )
+    # Names, employers, and titles are not stable identity keys. Without a
+    # provider identifier or an allowlisted professional profile URL, keep the
+    # records separate.
+    return False
 
 
 def deduplicate(people: list[ProviderPerson]) -> list[ProviderPerson]:
@@ -499,14 +522,6 @@ def _person_for_provider(db: Session, value: ProviderPerson) -> ProfessionalPers
     if canonical is None and linkedin:
         canonical = db.scalar(
             select(ProfessionalPerson).where(ProfessionalPerson.linkedin_url_normalized == linkedin)
-        )
-    if canonical is None:
-        canonical = db.scalar(
-            select(ProfessionalPerson).where(
-                ProfessionalPerson.normalized_full_name == normalize_text(value.full_name),
-                ProfessionalPerson.current_company_domain == value.current_company_domain,
-                ProfessionalPerson.normalized_title == normalize_text(value.current_title),
-            )
         )
     if canonical is None:
         canonical = ProfessionalPerson(
@@ -982,6 +997,17 @@ def _ensure_recommendation(
 
 def _budget_check(db: Session, user_id: int) -> None:
     start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    provider = settings.people_primary_provider.lower()
+    global_budget = (
+        settings.people_pdl_daily_credit_budget
+        if provider == "pdl"
+        else settings.people_daily_credit_budget
+    )
+    per_user_budget = (
+        settings.people_pdl_per_user_daily_limit
+        if provider == "pdl"
+        else settings.people_per_user_daily_limit
+    )
     has_durable_usage = (
         select(PeopleProviderOperationUsage.id)
         .where(
@@ -993,7 +1019,7 @@ def _budget_check(db: Session, user_id: int) -> None:
     legacy_global_used = db.scalar(
         select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0)).where(
             PeopleDiscoveryRun.started_at >= start,
-            PeopleDiscoveryRun.provider != "hunter",
+            PeopleDiscoveryRun.provider == provider,
             ~has_durable_usage,
         )
     ) or 0
@@ -1001,7 +1027,7 @@ def _budget_check(db: Session, user_id: int) -> None:
         select(func.coalesce(func.sum(PeopleDiscoveryRun.provider_credits_used), 0)).where(
             PeopleDiscoveryRun.user_id == user_id,
             PeopleDiscoveryRun.started_at >= start,
-            PeopleDiscoveryRun.provider != "hunter",
+            PeopleDiscoveryRun.provider == provider,
             ~has_durable_usage,
         )
     ) or 0
@@ -1013,7 +1039,7 @@ def _budget_check(db: Session, user_id: int) -> None:
             )
         ).where(
             PeopleProviderOperationUsage.occurred_at >= start,
-            PeopleProviderOperationUsage.provider != "hunter",
+            PeopleProviderOperationUsage.provider == provider,
         )
     ) or 0
     durable_user_used = db.scalar(
@@ -1025,12 +1051,12 @@ def _budget_check(db: Session, user_id: int) -> None:
         ).where(
             PeopleProviderOperationUsage.user_id == user_id,
             PeopleProviderOperationUsage.occurred_at >= start,
-            PeopleProviderOperationUsage.provider != "hunter",
+            PeopleProviderOperationUsage.provider == provider,
         )
     ) or 0
     global_used = int(legacy_global_used) + int(durable_global_used)
     user_used = int(legacy_user_used) + int(durable_user_used)
-    if settings.people_daily_credit_budget and global_used >= settings.people_daily_credit_budget:
+    if global_budget and global_used >= global_budget:
         raise HTTPException(
             status_code=429,
             detail={
@@ -1040,7 +1066,7 @@ def _budget_check(db: Session, user_id: int) -> None:
                 "retryable": False,
             },
         )
-    if settings.people_per_user_daily_limit and user_used >= settings.people_per_user_daily_limit:
+    if per_user_budget and user_used >= per_user_budget:
         raise HTTPException(
             status_code=429,
             detail={
@@ -1086,6 +1112,46 @@ _PEOPLE_CATEGORIES: tuple[PeopleCategory, ...] = (
     "potential_hiring_manager",
     "potential_referrer",
 )
+
+
+def _people_result_ttl_days() -> int:
+    if settings.people_primary_provider.lower() == "pdl":
+        return settings.people_pdl_result_ttl_days
+    return settings.people_result_ttl_days
+
+
+def _strongest_category_candidates(
+    candidates: dict[PeopleCategory, list[PreliminaryCandidate]],
+) -> dict[PeopleCategory, list[PreliminaryCandidate]]:
+    """Assign each provider identity to its strongest-scoring category.
+
+    Category scoring still evaluates every plausible role. The UI-facing
+    candidate set is exclusive, preventing one paid PDL record from appearing
+    as a recruiter, manager, and referrer simultaneously.
+    """
+    category_order = {
+        category: index
+        for index, category in enumerate(_PEOPLE_CATEGORIES)
+    }
+    winners: dict[tuple[str, str], PreliminaryCandidate] = {}
+    for category in _PEOPLE_CATEGORIES:
+        for item in candidates.get(category, []):
+            key = (item[2].provider, item[2].provider_person_id)
+            incumbent = winners.get(key)
+            if incumbent is None or (
+                item[0],
+                -category_order[item[1]],
+            ) > (
+                incumbent[0],
+                -category_order[incumbent[1]],
+            ):
+                winners[key] = item
+    selected = {
+        category: [] for category in _PEOPLE_CATEGORIES
+    }
+    for item in winners.values():
+        selected[item[1]].append(item)
+    return selected
 
 
 def _category_threshold(category: PeopleCategory) -> float:
@@ -1332,7 +1398,7 @@ async def discover(
         scoring_version=SCORING_VERSION,
     )
     job = _job_or_404(db, job_id)
-    fresh = _fresh_candidates(db, job_id)
+    fresh = _fresh_candidates(db, job_id, user.id)
     if fresh:
         run = PeopleDiscoveryRun(
             job_id=job_id, user_id=user.id, status="complete", provider="cache",
@@ -1429,7 +1495,7 @@ async def discover(
                 },
             }
         # Recheck after lock acquisition.
-        if _fresh_candidates(db, job_id):
+        if _fresh_candidates(db, job_id, user.id):
             return recommendations_payload(db, user, job_id)
         if _fresh_no_match_run(
             db,
@@ -1465,6 +1531,8 @@ async def discover(
             "provider_adapter_version": (
                 APOLLO_ENRICHMENT_ADAPTER_VERSION
                 if settings.people_primary_provider == "apollo"
+                else PDL_DISCOVERY_STRATEGY_VERSION
+                if settings.people_primary_provider == "pdl"
                 else "provider-neutral-v1"
             ),
             "secondary_employment_verification_enabled": (
@@ -1570,7 +1638,11 @@ async def discover(
                     scoring_version=SCORING_VERSION,
                 )
             pipeline_stage = "enrichment"
-            if not any(categories.values()) and settings.people_pdl_fallback_enabled:
+            if (
+                not any(categories.values())
+                and settings.people_pdl_fallback_enabled
+                and settings.people_primary_provider != "pdl"
+            ):
                 fallback = PDLPeopleProvider()
                 _configure_provider_usage(
                     fallback,
@@ -1606,25 +1678,69 @@ async def discover(
                 diagnostics[category]["preliminary_score_distribution"] = _score_distribution(
                     [item[0] for item in preliminary_by_category[category]]
                 )
+            assigned_by_category = _strongest_category_candidates(
+                preliminary_by_category
+            )
+            for category in _PEOPLE_CATEGORIES:
+                weaker_assignments = (
+                    len(preliminary_by_category[category])
+                    - len(assigned_by_category[category])
+                )
+                if weaker_assignments:
+                    counts = diagnostics[category][
+                        "rejection_reason_counts"
+                    ]
+                    counts["weaker_category_assignment"] = (
+                        counts.get("weaker_category_assignment", 0)
+                        + weaker_assignments
+                    )
+            complete_person_only = getattr(
+                provider, "bulk_capability_state", "unknown"
+            ) in {"temporarily_rejected", "account_not_supported"}
             enrich_targets = allocate_enrichment_targets(
-                preliminary_by_category,
-                total=settings.people_max_enrichments_per_job,
-                reservations={
-                    "likely_recruiter": settings.people_recruiter_enrichment_reserve,
-                    "potential_hiring_manager": settings.people_manager_enrichment_reserve,
-                    "potential_referrer": settings.people_referrer_enrichment_reserve,
-                },
+                assigned_by_category,
+                total=(
+                    settings.people_apollo_complete_person_max_per_job
+                    if complete_person_only
+                    else settings.people_max_enrichments_per_job
+                ),
+                reservations=(
+                    {
+                        "likely_recruiter": (
+                            settings.people_apollo_complete_person_max_recruiters
+                        ),
+                        "potential_hiring_manager": (
+                            settings.people_apollo_complete_person_max_managers
+                        ),
+                        "potential_referrer": (
+                            settings.people_apollo_complete_person_max_referrers
+                        ),
+                    }
+                    if complete_person_only
+                    else {
+                        "likely_recruiter": settings.people_recruiter_enrichment_reserve,
+                        "potential_hiring_manager": settings.people_manager_enrichment_reserve,
+                        "potential_referrer": settings.people_referrer_enrichment_reserve,
+                    }
+                ),
             )
             for _score, category, _person, _school, _employer in enrich_targets:
                 diagnostics[category]["selected_for_enrichment"] += 1
-            unique_enrichment_requests = list(dict.fromkeys(
-                item[2].provider_person_id for item in enrich_targets
-            ))
+            unique_enrichment_requests = list(
+                dict.fromkeys(
+                    item[2].provider_person_id for item in enrich_targets
+                )
+            )
             try:
                 enriched = await provider.enrich_people(
                     [
-                        PersonEnrichmentRequest(provider_person_id=provider_person_id)
-                        for provider_person_id in unique_enrichment_requests
+                        PersonEnrichmentRequest(
+                            provider_person_id=person.provider_person_id,
+                            category=category,
+                            rank_score=score,
+                        )
+                        for score, category, person, _school, _employer
+                        in enrich_targets
                     ]
                 )
             except ProviderUnavailable as exc:
@@ -1663,14 +1779,14 @@ async def discover(
             for category in _PEOPLE_CATEGORIES:
                 not_selected = max(
                     0,
-                    len(preliminary_by_category[category])
+                    len(assigned_by_category[category])
                     - diagnostics[category]["selected_for_enrichment"],
                 )
                 diagnostics[category]["candidates_rejected"] += not_selected
                 if not_selected:
                     counts = diagnostics[category]["rejection_reason_counts"]
                     counts["enrichment_budget_exhausted"] = not_selected
-            expires = _now() + timedelta(days=settings.people_result_ttl_days)
+            expires = _now() + timedelta(days=_people_result_ttl_days())
             caps = {
                 "likely_recruiter": settings.people_max_displayed_recruiters,
                 "potential_hiring_manager": settings.people_max_displayed_managers,
@@ -1812,6 +1928,63 @@ async def discover(
                 ):
                     rejection_reasons = []
                 if rejection_reasons:
+                    pipeline_stage = "recommendation_persistence"
+                    canonical = _person_for_provider(db, person)
+                    db.flush()
+                    candidate = db.scalar(
+                        select(JobPeopleCandidate).where(
+                            JobPeopleCandidate.job_id == job_id,
+                            JobPeopleCandidate.person_id == canonical.id,
+                            JobPeopleCandidate.candidate_category == category,
+                        )
+                    )
+                    if candidate is None:
+                        candidate = JobPeopleCandidate(
+                            job_id=job_id,
+                            person_id=canonical.id,
+                            candidate_category=category,
+                            category_score=score,
+                            data_confidence=data_confidence,
+                            current_employment_confidence=employment.confidence,
+                            employment_validation_status=employment.status,
+                            employment_validation_version=(
+                                EMPLOYMENT_VALIDATION_VERSION
+                            ),
+                            employment_validation_checked_at=_now(),
+                            recommendation_reasons=[],
+                            recommendation_limitations=rejection_reasons,
+                            scoring_version=SCORING_VERSION,
+                            expires_at=expires,
+                        )
+                        db.add(candidate)
+                        db.flush()
+                    else:
+                        candidate.category_score = score
+                        candidate.data_confidence = data_confidence
+                        candidate.current_employment_confidence = (
+                            employment.confidence
+                        )
+                        candidate.employment_validation_status = (
+                            employment.status
+                        )
+                        candidate.employment_validation_version = (
+                            EMPLOYMENT_VALIDATION_VERSION
+                        )
+                        candidate.employment_validation_checked_at = _now()
+                        candidate.recommendation_reasons = []
+                        candidate.recommendation_limitations = (
+                            rejection_reasons
+                        )
+                        candidate.scoring_version = SCORING_VERSION
+                        candidate.expires_at = expires
+                    suppressed = _ensure_recommendation(
+                        db,
+                        user.id,
+                        candidate,
+                        school,
+                        employer,
+                    )
+                    suppressed.suppressed_at = _now()
                     diagnostics[category]["candidates_rejected"] += 1
                     counts = diagnostics[category]["rejection_reason_counts"]
                     for reason in rejection_reasons:
@@ -1859,7 +2032,14 @@ async def discover(
                     candidate.recommendation_reasons = reasons
                     candidate.recommendation_limitations = limitations
                     candidate.expires_at = expires
-                _ensure_recommendation(db, user.id, candidate, school, employer)
+                recommendation = _ensure_recommendation(
+                    db,
+                    user.id,
+                    candidate,
+                    school,
+                    employer,
+                )
+                recommendation.suppressed_at = None
                 canonical.employment_revalidation_required = False
                 canonical.employment_conflict_detected_at = None
                 displayed[category] += 1
@@ -2144,25 +2324,16 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     )
     latest_any_run = _latest_run(db, job_id=job_id, user_id=user.id)
     latest_run = latest_current_run or latest_any_run
-    stale_version = latest_any_run is not None and latest_current_run is None
     has_results = any(categories.values())
+    stale_version = latest_any_run is not None and latest_current_run is None
+    stale_strategy_without_results = stale_version and not has_results
     response_status = "complete" if has_results else "not_started"
     warnings: list[str] = []
-    if (
-        stale_version
-        and latest_run
-        and latest_run.status
-        in {"provider_unavailable", "persistence_error"}
-        and latest_run.failure_code != "provider_schema_error"
-    ):
-        response_status = latest_run.status
-        warnings.append(
-            latest_run.safe_failure_message
-            or "Professional data provider unavailable."
-        )
-    elif stale_version:
+    if stale_strategy_without_results:
         response_status = "stale"
-        warnings.append("Previous search results used an older search version. Refresh is available.")
+        warnings.append(
+            "Contact discovery has been upgraded. Refresh to check again."
+        )
     elif latest_run and latest_run.status in {"running"}:
         response_status = "in_progress"
     elif latest_run and latest_run.status == "provider_unavailable":
@@ -2188,8 +2359,14 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     availability_reason = (
         latest_run.failure_code
         if latest_run
-        and latest_run.status
-        in {"provider_unavailable", "persistence_error"}
+        and (
+            response_status in {"provider_unavailable", "persistence_error"}
+            or (
+                response_status == "stale"
+                and latest_run.status
+                in {"provider_unavailable", "persistence_error"}
+            )
+        )
         else "available"
     )
     retry_eligible = False

@@ -97,7 +97,12 @@ class Settings(BaseSettings):
     people_rollout_percentage: int = 0
     people_internal_emails: list[str] = []
     people_beta_user_ids: list[str] = []
-    people_primary_provider: str = "apollo"
+    people_primary_provider: str = "pdl"
+    # Apollo is retained for explicit internal diagnostics only. Normal
+    # discovery cannot select it unless both gates are enabled.
+    people_apollo_discovery_enabled: bool = False
+    people_apollo_diagnostic_enabled: bool = False
+    people_pdl_discovery_enabled: bool = True
     people_email_discovery_enabled: bool = False
     people_pdl_fallback_enabled: bool = False
     people_outreach_drafting_enabled: bool = False
@@ -115,11 +120,15 @@ class Settings(BaseSettings):
     pdl_api_key: str | None = None
     people_data_encryption_key: str | None = None
     people_result_ttl_days: int = 30
+    people_pdl_result_ttl_days: int = 30
+    people_pdl_results_per_query: int = 20
+    people_pdl_daily_credit_budget: int = 0
+    people_pdl_per_user_daily_limit: int = 0
     people_employment_freshness_days: int = 180
     people_email_result_ttl_days: int = 30
     people_max_discovery_results_per_category: int = 20
-    people_max_displayed_recruiters: int = 2
-    people_max_displayed_managers: int = 2
+    people_max_displayed_recruiters: int = 3
+    people_max_displayed_managers: int = 3
     people_max_displayed_referrers: int = 5
     people_max_enrichments_per_job: int = 8
     people_daily_credit_budget: int = 0
@@ -132,6 +141,13 @@ class Settings(BaseSettings):
     people_apollo_bulk_capability_enabled: bool = True
     people_apollo_bulk_rejection_threshold: int = 2
     people_apollo_bulk_capability_ttl_seconds: int = 3600
+    people_apollo_complete_person_max_recruiters: int = 1
+    people_apollo_complete_person_max_managers: int = 1
+    people_apollo_complete_person_max_referrers: int = 1
+    people_apollo_complete_person_max_per_job: int = 3
+    people_apollo_complete_person_cache_ttl_seconds: int = 2_592_000
+    people_apollo_complete_person_not_found_ttl_seconds: int = 86_400
+    people_apollo_complete_person_error_ttl_seconds: int = 300
     people_min_relevance_score: float = 60.0
     people_min_recruiter_relevance: float = 60.0
     people_min_manager_relevance: float = 60.0

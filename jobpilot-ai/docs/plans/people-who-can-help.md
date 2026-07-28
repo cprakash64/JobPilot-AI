@@ -735,3 +735,187 @@ Rollout and rollback:
 - Roll back application code first. Migration downgrade is allowed only while every employment
   status fits the former 40-character column; otherwise it fails closed and requires deliberate
   data remediation. The circuit breaker remains enabled and unchanged.
+
+## Apollo Complete Person Info fallback (2026-07-28)
+
+Status: offline implementation complete; validation in progress. No live provider request is
+authorized or performed by this phase.
+
+### Architecture and decisions
+
+- Adapter v4 replaces the ID-only `POST /api/v1/people/match` fallback with Apollo's dedicated
+  `GET /api/v1/people/{id}` Complete Person Info operation. The documented People Search `id` is
+  copied unchanged, validated locally, and URL encoded into the path. The request sends only
+  `x-api-key` and `Accept: application/json`; it has no query, JSON body, reveal, waterfall,
+  webhook, or email option.
+- Complete-profile failures retain safe typed reasons. In particular, HTTP 403 is
+  `provider_master_key_required_or_forbidden`, HTTP 404 and a valid empty response are
+  `enrichment_record_not_found`, and malformed HTTP 200 data is `provider_response_invalid`.
+  Credentials, identifiers, people fields, headers, and provider bodies are never logged.
+- The existing account-scoped bulk capability remains bounded by its TTL. While it is
+  `temporarily_rejected`, bulk is skipped and the service reserves at most one top-ranked
+  recruiter, manager, and referrer (three total by default). The caps are configurable. A person
+  shared by categories is fetched once and the normalized record is reused for category-specific
+  scoring.
+- Only the provider-neutral fields required by People Who Can Help are normalized. Complete
+  profile retrieval records a provider observation separately from a genuinely supplied
+  employment-update or employment-verification timestamp; retrieval time is not represented as
+  employment verification. ID correlation is mandatory before employment-v2.1, company
+  validation, scoring, suppression, or persistence.
+- Normalized successful profiles are cached by account hash, person-ID hash, adapter version, and
+  evidence version. Not-found and error states have bounded TTLs; 401/403 remain non-retryable for
+  the current account/configuration key. Adapter or evidence changes make old entries
+  refreshable but cannot start provider traffic.
+- Each external Complete Person request has an independently committed
+  `complete_person_by_id` ledger row. Explicit provider credits win; a found profile without
+  reported credits estimates one; definitive no-profile responses record zero; indeterminate
+  failures retain unknown credit status and conservative budget units.
+- No schema migration is added. Migration `0024_people_persistence_usage` remains required for
+  the 46-character `exact_company_current_but_unverified_freshness` outcome.
+
+### Rollout and rollback
+
+Deploy migration 0024 before adapter v4. Keep PDL fallback, secondary PDL verification,
+Hunter/email discovery, network matching, and broadened discovery disabled for the separately
+approved controlled validation. Rollback restores adapter v3 fingerprints; do not clear durable
+usage, recommendation, or bulk-capability data. The temporary bulk state naturally returns to
+unknown after its TTL or an explicit internal reset.
+
+### Validation checklist
+
+- [x] Synthetic provider tests cover GET path transport, no body/query, unchanged/correlated IDs,
+  URL encoding, successful normalization, not-found, safe 403/422 mapping, category caps,
+  cross-category deduplication, cache reuse, private-log exclusions, and existing bulk behavior.
+- [x] Synthetic integration coverage exercises employment-v2.1, persistence of the 46-character
+  status, conflict suppression, partial-success preservation, durable usage across downstream
+  rollback, and read-only reopen behavior.
+- [x] UI coverage includes the safe master-key/access message and hides explicit retry for this
+  account limitation.
+- [x] Focused People backend: 69 passed. Complete API: 667 passed.
+- [x] Focused People frontend: 37 passed. Complete web: 14 files / 206 tests passed.
+- [x] Web lint, typecheck, and production build passed.
+- [x] Extension typecheck, 30 files / 284 tests, and production build passed.
+- [x] Changed-code Ruff, Docker Compose configuration, health/readiness, and `git diff --check`
+  passed.
+- [x] PostgreSQL current revision and sole head are both `0024_people_persistence_usage`.
+  `alembic check` still reports the repository's pre-existing broad ORM/migration drift across
+  unrelated tables; adapter v4 adds no model or schema operation.
+- [ ] One exact-company live validation with at most three Complete Person GETs requires separate
+  explicit approval after offline validation passes.
+
+## Complete Person strategy rollout and stale transition (2026-07-28)
+
+Status: offline implementation complete; full validation pending. No live provider request is
+authorized or performed by this phase.
+
+### Decisions
+
+- The effective Apollo enrichment strategy and discovery fingerprint are explicitly versioned as
+  `apollo-enrichment-v4-complete-person`. This version covers the Complete Person transport,
+  three-category selection cap, correlation, employment-v2.1, and suppression behavior rather
+  than merely identifying the provider class.
+- Bulk compatibility retains the prior `apollo-enrichment-v4` account-capability key. Changing the
+  discovery strategy therefore makes obsolete no-match/error fingerprints stale without resetting
+  a known `temporarily_rejected` bulk state or accidentally issuing bulk again.
+- An older-strategy no-match or provider error with no compatible recommendations returns
+  read-only `stale`, the message “Contact discovery has been upgraded. Refresh to check again.”,
+  `Refresh people`, and no broaden eligibility. GET/open/browser refresh cannot start discovery.
+  Only the explicit coalesced refresh mutation creates the new exact-company run.
+- Compatible, fresh, previously verified recommendations remain visible as `complete`; an obsolete
+  provider error cannot override them. Unrelated providers and jobs are unaffected because the
+  Apollo strategy participates only in Apollo fingerprints for the selected job.
+- Broaden eligibility is derived only from a successfully committed, current-strategy exact
+  no-match. An older no-match never satisfies that precondition.
+- Complete Person candidate failures remain isolated where safe: not-found, malformed/schema, and
+  candidate-level transport failures are suppressed per candidate, while successful correlated
+  candidates continue through employment, scoring, diagnostics, and recommendation persistence.
+  Account-wide authorization/access and rate-limit failures retain their typed availability state.
+- Accepted and rejected enriched evaluations both persist as versioned candidate rows. Rejected
+  evaluations receive a suppressed user-recommendation marker and safe limitation codes, are
+  excluded from display and fresh-result cache reuse, and can be unsuppressed only by a later
+  qualifying current evaluation.
+
+### Rollout and rollback
+
+Deploy the API and web changes together after migration 0024. Do not clear discovery runs,
+recommendations, durable usage, Complete Person cache entries, or bulk capability state. Rollback
+restores the prior fingerprint behavior but must not trigger discovery or broaden automatically.
+
+### Validation checklist
+
+- [x] Focused People backend tests cover v3 no-match staleness, compatible verified results,
+  read-only GET/reopen, explicit refresh idempotency, current exact no-match broadening eligibility,
+  Complete Person caps/deduplication, successful persistence, and conflict suppression.
+- [x] Focused People frontend tests cover the upgraded-discovery message, Refresh action
+  precedence, absent stale Broaden action, repeated-click coalescing, safe 403 access messaging,
+  and current-strategy Broaden behavior.
+- [x] Focused People backend: 72 passed. Complete API: 670 passed.
+- [x] Focused People frontend: 38 passed. Complete web: 14 files / 207 tests passed.
+- [x] Web lint, typecheck, and production build passed.
+- [x] Extension typecheck, 30 files / 284 tests, and production build passed.
+- [x] Docker Compose configuration, API health/readiness, changed-code Ruff, and
+  `git diff --check` passed.
+- [ ] A controlled live refresh remains gated on separate explicit approval.
+
+## PDL primary-profile provider rollout (2026-07-28)
+
+Status: offline implementation in progress. No live Apollo, PDL, Hunter, or
+other provider request is authorized or performed by this phase.
+
+### Architecture and decisions
+
+- Normal People discovery selects PDL and fingerprints the effective strategy
+  as `pdl-person-search-v1`. Apollo remains compiled for diagnostics, but
+  selecting it requires the discovery gate, diagnostic gate, and internal
+  rollout simultaneously. There is no automatic Apollo fallback.
+- PDL Person Search is the discovery and profile operation. Each exact-company
+  category query uses the canonical company domain and name, bounded title and
+  seniority filters, and a configured result-size cap. Search results are
+  normalized once and reused by employment-v2.1; `enrich_people` performs no
+  network operation.
+- PDL `job_last_changed` and `job_last_verified` are provider employment
+  freshness, not independent verification time. Retrieval time remains
+  `provider_record_observed_at`. The allowlisted LinkedIn URL is the only
+  provider profile URL exposed.
+- Identity correlation requires a provider/record ID or an allowlisted
+  LinkedIn URL. Matching name, employer, and title alone cannot merge people.
+  A candidate may be scored in multiple categories internally, but only its
+  strongest category proceeds to persistence/display.
+- PDL usage is tracked in the durable operation ledger. Explicit provider
+  credit reporting wins; otherwise a successful Person Search records returned
+  rows as estimated credits. Independent global/per-user PDL budgets, result
+  size, and TTL controls do not share Hunter or Apollo limits.
+- Existing compatible successful recommendations remain readable. Old Apollo
+  no-match/error fingerprints are stale and read-only, with “Contact discovery
+  has been upgraded. Refresh to check again.” Only the coalesced explicit
+  refresh mutation may start PDL discovery.
+- Full-panel caps are three recruiters, three managers, and five referrers.
+  The compact card preview is independently limited to two per category.
+  Hunter remains a separate, user-triggered email action and is not part of PDL
+  discovery.
+
+### Rollout and rollback
+
+Deploy API and web together. Before enabling recommendations in a production
+environment, configure a backend-only PDL key and positive independent PDL
+global/per-user budgets; leave Apollo discovery/diagnostic, PDL fallback,
+secondary employment verification, Hunter/email, network matching, and
+automatic broadening disabled. Do not clear old runs or recommendations.
+Rollback restores the prior provider setting and fingerprint behavior but must
+not initiate provider work or remove durable usage rows.
+
+### Validation checklist
+
+- [x] PDL adapter transport/profile reuse, exact-company inputs, bounded result
+  size, freshness mapping, previous-employer normalization, and zero follow-up
+  enrichment calls have synthetic coverage.
+- [x] Apollo normal-routing denial, PDL production configuration, and
+  strong-identity-only deduplication have offline coverage.
+- [x] Focused People backend: 126 passed. Complete API: 679 passed.
+- [x] Focused People frontend: 39 passed. Complete web: 14 files / 208 tests.
+- [x] Web lint, typecheck, and production build.
+- [x] Extension typecheck, 30 files / 284 tests, and production build.
+- [x] Docker Compose configuration, migration head, health/readiness, Ruff, and
+  `git diff --check`.
+- [ ] One controlled live PDL validation requires separate explicit approval
+  after all offline validation passes.

@@ -182,6 +182,57 @@ def test_secondary_employment_verification_accepts_separate_positive_limits() ->
     )
 
 
+def test_enabled_people_discovery_requires_pdl_and_independent_limits() -> None:
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="apollo",
+        )
+    )
+    assert any(
+        finding.setting == "PEOPLE_PRIMARY_PROVIDER"
+        for finding in findings
+    )
+
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="pdl",
+            people_pdl_discovery_enabled=True,
+            pdl_api_key=None,
+            people_pdl_daily_credit_budget=0,
+            people_pdl_per_user_daily_limit=0,
+            people_pdl_result_ttl_days=0,
+        )
+    )
+    names = {finding.setting for finding in findings}
+    assert {
+        "PDL_API_KEY",
+        "PEOPLE_PDL_DAILY_CREDIT_BUDGET",
+        "PEOPLE_PDL_PER_USER_DAILY_LIMIT",
+        "PEOPLE_PDL_RESULT_TTL_DAYS",
+    } <= names
+
+
+def test_enabled_pdl_discovery_accepts_independent_limits() -> None:
+    findings = collect_findings(
+        make_settings(
+            people_recommendations_enabled=True,
+            people_primary_provider="pdl",
+            people_pdl_discovery_enabled=True,
+            pdl_api_key="configured-secret",
+            people_pdl_daily_credit_budget=50,
+            people_pdl_per_user_daily_limit=5,
+            people_pdl_result_ttl_days=30,
+        )
+    )
+    assert not any(
+        finding.setting.startswith("PEOPLE_PDL")
+        or finding.setting in {"PDL_API_KEY", "PEOPLE_PRIMARY_PROVIDER"}
+        for finding in findings
+    )
+
+
 # --------------------------------------------------------------------------- #
 # CORS
 # --------------------------------------------------------------------------- #

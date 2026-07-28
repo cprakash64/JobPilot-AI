@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -17,6 +18,13 @@ from app.people.bulk_capability import (
     record_bulk_request_level_422,
     record_bulk_supported,
 )
+from app.people.complete_person_cache import (
+    cache_complete_person_error,
+    cache_complete_person_not_found,
+    cache_complete_person_success,
+    get_complete_person,
+)
+from app.people.employment_validation import EMPLOYMENT_EVIDENCE_VERSION
 from app.people.provider_usage import (
     ProviderUsageContext,
     ProviderUsageRecorder,
@@ -37,7 +45,15 @@ from app.people.security import safe_profile_url
 
 logger = logging.getLogger("jobpilot.people.provider")
 
-APOLLO_ENRICHMENT_ADAPTER_VERSION = "apollo-enrichment-v3"
+APOLLO_ENRICHMENT_STRATEGY_VERSION = (
+    "apollo-enrichment-v4-complete-person"
+)
+APOLLO_ENRICHMENT_ADAPTER_VERSION = APOLLO_ENRICHMENT_STRATEGY_VERSION
+PDL_DISCOVERY_STRATEGY_VERSION = "pdl-person-search-v1"
+# Bulk request compatibility did not change with the Complete Person rollout.
+# Keep its account-scoped rejection state on the existing key so a strategy
+# fingerprint change cannot accidentally re-enable a known-rejected operation.
+APOLLO_BULK_CAPABILITY_VERSION = "apollo-enrichment-v4"
 _APOLLO_PERSON_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _APOLLO_PLACEHOLDER_IDS = frozenset(
     {"unknown", "none", "null", "placeholder", "redacted", "n/a"}
@@ -131,13 +147,52 @@ class _HttpProvider:
         *,
         http_outcome: str,
         payload: object = None,
+        operation_type: str | None = None,
+        http_status: int | None = None,
+        response_was_malformed: bool = False,
     ) -> None:
         if key is None or self._usage_recorder is None:
             return
+        credits_reported = reported_credits(payload)
+        credits_estimated: int | None = None
+        estimate_when_unknown = True
+        if operation_type == "complete_person_by_id":
+            person_found = bool(
+                isinstance(payload, dict)
+                and _single_apollo_person(payload) is not None
+            )
+            if response_was_malformed:
+                estimate_when_unknown = False
+            elif credits_reported is None and http_status == 200 and person_found:
+                credits_estimated = 1
+            elif credits_reported is None and http_status in {200, 404}:
+                credits_reported = 0
+            elif credits_reported is None:
+                estimate_when_unknown = False
+        elif (
+            self.provider_name == "pdl"
+            and operation_type == "people_search"
+            and credits_reported is None
+        ):
+            if (
+                http_status == 200
+                and isinstance(payload, dict)
+                and isinstance(payload.get("data"), list)
+            ):
+                # PDL Person Search is record-metered. When the response does
+                # not carry an explicit charge, the returned record count is a
+                # bounded estimate rather than a fabricated reported value.
+                credits_estimated = len(payload["data"])
+            else:
+                # Indeterminate failures keep a conservative budget unit but
+                # never invent either a reported or estimated credit count.
+                estimate_when_unknown = False
         self._usage_recorder.finish(
             idempotency_key=key,
             http_outcome=http_outcome,
-            credits_reported=reported_credits(payload),
+            credits_reported=credits_reported,
+            credits_estimated=credits_estimated,
+            estimate_when_unknown=estimate_when_unknown,
         )
 
     def _failure(self) -> None:
@@ -156,6 +211,8 @@ class _HttpProvider:
         url: str,
         *,
         operation_type: str,
+        status_reason_overrides: dict[int, str] | None = None,
+        malformed_response_reason: str = "provider_schema_error",
         **kwargs,
     ) -> dict:
         _, opened = _CIRCUITS.get(self.provider_name, (0, None))
@@ -174,7 +231,11 @@ class _HttpProvider:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 response = await client.request(method, url, **kwargs)
         except httpx.TimeoutException as exc:
-            self._finish_usage(usage_key, http_outcome="provider_timeout")
+            self._finish_usage(
+                usage_key,
+                http_outcome="provider_timeout",
+                operation_type=operation_type,
+            )
             self._failure()
             raise ProviderUnavailable(
                 "provider_timeout",
@@ -185,6 +246,7 @@ class _HttpProvider:
             self._finish_usage(
                 usage_key,
                 http_outcome="provider_network_error",
+                operation_type=operation_type,
             )
             self._failure()
             raise ProviderUnavailable(
@@ -208,8 +270,11 @@ class _HttpProvider:
             usage_key,
             http_outcome=f"http_{response.status_code}",
             payload=parsed_payload,
+            operation_type=operation_type,
+            http_status=response.status_code,
+            response_was_malformed=parsed_payload is None,
         )
-        reason = {
+        reason = (status_reason_overrides or {}).get(response.status_code) or {
             401: "provider_unauthorized",
             403: "provider_forbidden",
             429: "provider_rate_limited",
@@ -253,6 +318,14 @@ class _HttpProvider:
                 http_status=response.status_code,
                 duration_ms=duration_ms,
             )
+        if parsed_payload is None:
+            self._failure()
+            raise ProviderUnavailable(
+                malformed_response_reason,
+                provider=self.provider_name,
+                http_status=response.status_code,
+                duration_ms=duration_ms,
+            )
         if response.status_code >= 400:
             self._failure()
             raise ProviderUnavailable(
@@ -261,18 +334,10 @@ class _HttpProvider:
                 http_status=response.status_code,
                 duration_ms=duration_ms,
             )
-        if parsed_payload is None:
-            self._failure()
-            raise ProviderUnavailable(
-                "provider_schema_error",
-                provider=self.provider_name,
-                http_status=response.status_code,
-                duration_ms=duration_ms,
-            )
         if not isinstance(parsed_payload, dict):
             self._failure()
             raise ProviderUnavailable(
-                "provider_schema_error",
+                malformed_response_reason,
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
@@ -293,7 +358,7 @@ class ApolloPeopleProvider(_HttpProvider):
         self.search_identifier_safe_metrics: dict[str, object] = {}
         self.bulk_capability_state = bulk_capability_state(
             self.provider_name,
-            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            APOLLO_BULK_CAPABILITY_VERSION,
             self._bulk_account_scope,
         )
 
@@ -303,6 +368,17 @@ class ApolloPeopleProvider(_HttpProvider):
         return {
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def _complete_person_headers(self) -> dict[str, str]:
+        if not self.api_key:
+            raise ProviderUnavailable(
+                "provider_not_configured",
+                provider=self.provider_name,
+            )
+        return {
+            "x-api-key": self.api_key,
             "Accept": "application/json",
         }
 
@@ -397,7 +473,7 @@ class ApolloPeopleProvider(_HttpProvider):
         enriched: list[ProviderPerson] = []
         self.bulk_capability_state = bulk_capability_state(
             self.provider_name,
-            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            APOLLO_BULK_CAPABILITY_VERSION,
             self._bulk_account_scope,
         )
         if self.bulk_capability_state in {
@@ -405,13 +481,7 @@ class ApolloPeopleProvider(_HttpProvider):
             "account_not_supported",
         }:
             self._increment_enrichment_metric("bulk_capability_skipped")
-            for identifier in identifiers[
-                : settings.people_max_enrichments_per_job
-            ]:
-                person = await self._single_enrichment_after_bulk_422(identifier)
-                if person is not None:
-                    enriched.append(person)
-            return enriched
+            return await self._complete_selected_people(people)
         for offset in range(0, len(identifiers), 10):
             batch = identifiers[offset : offset + 10]
             try:
@@ -431,18 +501,14 @@ class ApolloPeopleProvider(_HttpProvider):
                     self.bulk_capability_state = (
                         record_bulk_request_level_422(
                             self.provider_name,
-                            APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                            APOLLO_BULK_CAPABILITY_VERSION,
                             self._bulk_account_scope,
                         )
                     )
-                for identifier in batch:
-                    person = await self._single_enrichment_after_bulk_422(identifier)
-                    if person is not None:
-                        enriched.append(person)
-                continue
+                return await self._complete_selected_people(people)
             record_bulk_supported(
                 self.provider_name,
-                APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                APOLLO_BULK_CAPABILITY_VERSION,
                 self._bulk_account_scope,
             )
             self.bulk_capability_state = "supported"
@@ -477,18 +543,242 @@ class ApolloPeopleProvider(_HttpProvider):
             json=payload,
         )
 
+    def _select_complete_person_requests(
+        self,
+        people: list[PersonEnrichmentRequest],
+    ) -> list[PersonEnrichmentRequest]:
+        category_caps = {
+            "likely_recruiter": (
+                settings.people_apollo_complete_person_max_recruiters
+            ),
+            "potential_hiring_manager": (
+                settings.people_apollo_complete_person_max_managers
+            ),
+            "potential_referrer": (
+                settings.people_apollo_complete_person_max_referrers
+            ),
+        }
+        ranked = sorted(
+            enumerate(people),
+            key=lambda item: (
+                -(item[1].rank_score or 0),
+                item[0],
+            ),
+        )
+        selected: list[PersonEnrichmentRequest] = []
+        selected_ids: set[str] = set()
+        category_counts: dict[str, int] = defaultdict(int)
+        total_cap = max(
+            0, settings.people_apollo_complete_person_max_per_job
+        )
+        for _, request in ranked:
+            identifier = _valid_apollo_person_id(
+                request.provider_person_id
+            )
+            if identifier is None:
+                continue
+            if identifier in selected_ids:
+                continue
+            category = request.category
+            if category is not None:
+                cap = max(0, category_caps.get(category, 0))
+                if category_counts[category] >= cap:
+                    continue
+                category_counts[category] += 1
+            if len(selected) >= total_cap:
+                break
+            selected.append(request)
+            selected_ids.add(identifier)
+        self._increment_enrichment_metric(
+            "complete_person_selected", len(selected)
+        )
+        return selected
+
+    async def _complete_selected_people(
+        self,
+        people: list[PersonEnrichmentRequest],
+    ) -> list[ProviderPerson]:
+        enriched: list[ProviderPerson] = []
+        first_candidate_failure: ProviderUnavailable | None = None
+        for request in self._select_complete_person_requests(people):
+            try:
+                person = await self.complete_person_by_id(request)
+            except ProviderUnavailable as exc:
+                if exc.reason in {
+                    "provider_unauthorized",
+                    "provider_master_key_required_or_forbidden",
+                    "provider_rate_limited",
+                    "provider_circuit_open",
+                }:
+                    raise
+                self.enrichment_rejection_reasons[
+                    request.provider_person_id
+                ] = exc.reason
+                self._increment_enrichment_metric(exc.reason)
+                first_candidate_failure = first_candidate_failure or exc
+                continue
+            if person is None:
+                self.enrichment_rejection_reasons[
+                    request.provider_person_id
+                ] = "enrichment_record_not_found"
+                self._increment_enrichment_metric(
+                    "enrichment_record_not_found"
+                )
+                continue
+            enriched.append(person)
+        if not enriched and first_candidate_failure is not None:
+            raise first_candidate_failure
+        return enriched
+
+    async def complete_person_by_id(
+        self,
+        request: PersonEnrichmentRequest,
+    ) -> ProviderPerson | None:
+        identifier = _valid_apollo_person_id(request.provider_person_id)
+        if identifier is None:
+            raise ProviderUnavailable(
+                "provider_request_invalid",
+                provider=self.provider_name,
+            )
+        cached = get_complete_person(
+            provider=self.provider_name,
+            account_scope=self._bulk_account_scope,
+            provider_person_id=identifier,
+            adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+        )
+        if cached:
+            state = cached.get("state")
+            if state == "success" and isinstance(
+                cached.get("person"), dict
+            ):
+                try:
+                    person = ProviderPerson.model_validate(cached["person"])
+                except ValueError:
+                    person = None
+                if person is not None:
+                    self._increment_enrichment_metric(
+                        "complete_person_cache_hit"
+                    )
+                    return person
+            if state == "not_found":
+                self._increment_enrichment_metric(
+                    "complete_person_cache_hit"
+                )
+                return None
+            if state == "error":
+                reason = str(
+                    cached.get("reason") or "provider_unavailable"
+                )
+                raise ProviderUnavailable(
+                    reason,
+                    provider=self.provider_name,
+                )
+        try:
+            data = await self._request(
+                "GET",
+                _complete_person_url(identifier),
+                operation_type="complete_person_by_id",
+                status_reason_overrides={
+                    400: "provider_request_invalid",
+                    401: "provider_unauthorized",
+                    403: "provider_master_key_required_or_forbidden",
+                    404: "enrichment_record_not_found",
+                    422: "provider_schema_error",
+                    429: "provider_rate_limited",
+                },
+                malformed_response_reason="provider_response_invalid",
+                headers=self._complete_person_headers(),
+            )
+        except ProviderUnavailable as exc:
+            if exc.reason == "enrichment_record_not_found":
+                cache_complete_person_not_found(
+                    provider=self.provider_name,
+                    account_scope=self._bulk_account_scope,
+                    provider_person_id=identifier,
+                    adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                    evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+                )
+                return None
+            cache_complete_person_error(
+                exc.reason,
+                provider=self.provider_name,
+                account_scope=self._bulk_account_scope,
+                provider_person_id=identifier,
+                adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+                non_retryable=exc.reason
+                in {
+                    "provider_unauthorized",
+                    "provider_master_key_required_or_forbidden",
+                },
+            )
+            raise
+        row = _single_apollo_person(data)
+        if row is None:
+            cache_complete_person_not_found(
+                provider=self.provider_name,
+                account_scope=self._bulk_account_scope,
+                provider_person_id=identifier,
+                adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+            )
+            return None
+        person = _normalize_apollo(
+            row,
+            identifier_kind="complete_person",
+        )
+        if person is None:
+            cache_complete_person_error(
+                "provider_response_invalid",
+                provider=self.provider_name,
+                account_scope=self._bulk_account_scope,
+                provider_person_id=identifier,
+                adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+                non_retryable=False,
+            )
+            raise ProviderUnavailable(
+                "provider_response_invalid",
+                provider=self.provider_name,
+                http_status=self.last_http_status,
+                duration_ms=self.last_duration_ms,
+            )
+        if person.provider_person_id != identifier:
+            self._increment_enrichment_metric(
+                "enrichment_correlation_failed"
+            )
+            cache_complete_person_error(
+                "provider_response_invalid",
+                provider=self.provider_name,
+                account_scope=self._bulk_account_scope,
+                provider_person_id=identifier,
+                adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+                evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+                non_retryable=False,
+            )
+            raise ProviderUnavailable(
+                "provider_response_invalid",
+                provider=self.provider_name,
+                http_status=self.last_http_status,
+                duration_ms=self.last_duration_ms,
+            )
+        self._record_credits(data)
+        cache_complete_person_success(
+            person,
+            account_scope=self._bulk_account_scope,
+            adapter_version=APOLLO_ENRICHMENT_ADAPTER_VERSION,
+            evidence_version=EMPLOYMENT_EVIDENCE_VERSION,
+        )
+        return person
+
     async def _single_enrichment_after_bulk_422(
         self, identifier: str
     ) -> ProviderPerson | None:
+        """Compatibility shim for callers; the ID is now a GET path parameter."""
         try:
-            data = await self._request(
-                "POST",
-                "https://api.apollo.io/api/v1/people/match",
-                operation_type="single_person_enrichment",
-                headers=self._headers(),
-                params={
-                    "id": identifier,
-                },
+            return await self.complete_person_by_id(
+                PersonEnrichmentRequest(provider_person_id=identifier)
             )
         except ProviderUnavailable as exc:
             if exc.reason == "provider_schema_error" and exc.http_status == 422:
@@ -499,27 +789,11 @@ class ApolloPeopleProvider(_HttpProvider):
                     "single_enrichment_validation_failed"
                 )
                 _log_safe_apollo_validation(
-                    endpoint="/api/v1/people/match",
+                    endpoint="/api/v1/people/{id}",
                     metadata=exc.safe_metadata,
                 )
                 return None
             raise
-        self._record_credits(data)
-        row = _single_apollo_person(data)
-        if row is None:
-            self.enrichment_rejection_reasons[identifier] = (
-                "enrichment_record_not_found"
-            )
-            self._increment_enrichment_metric("enrichment_record_not_found")
-            return None
-        person = _normalize_apollo(row, identifier_kind="enrichment")
-        if person is None or person.provider_person_id != identifier:
-            self.enrichment_rejection_reasons[identifier] = (
-                "enrichment_correlation_failed"
-            )
-            self._increment_enrichment_metric("enrichment_correlation_failed")
-            return None
-        return person
 
     def _normalize_bulk_matches(
         self, data: dict, requested_identifiers: list[str]
@@ -560,9 +834,13 @@ class ApolloPeopleProvider(_HttpProvider):
         if isinstance(credits, int) and not isinstance(credits, bool) and credits >= 0:
             self.credits += credits
 
-    def _increment_enrichment_metric(self, reason: str) -> None:
+    def _increment_enrichment_metric(
+        self,
+        reason: str,
+        value: int = 1,
+    ) -> None:
         self.enrichment_safe_metrics[reason] = (
-            self.enrichment_safe_metrics.get(reason, 0) + 1
+            self.enrichment_safe_metrics.get(reason, 0) + value
         )
 
     async def get_usage(self) -> ProviderUsage:
@@ -573,30 +851,97 @@ class PDLPeopleProvider(_HttpProvider):
     def __init__(self, api_key: str | None = None) -> None:
         super().__init__("pdl")
         self.api_key = api_key or settings.pdl_api_key
+        self._search_profiles: dict[str, ProviderPerson] = {}
 
     async def search_people(self, query: PeopleSearchQuery) -> list[ProviderPerson]:
         if not self.api_key:
             raise ProviderUnavailable("provider_not_configured", provider=self.provider_name)
         if not query.company_domain:
             return []
+        safe_domain = _pdl_sql_value(
+            _provider_company_domain(query.company_domain)
+        )
+        safe_company = _pdl_sql_value(query.company_name)
         safe_titles = [
-            re.sub(r"[^A-Za-z0-9 /,&+().-]", "", title)[:120]
-            for title in query.titles[:10]
+            _pdl_sql_value(title)
+            for title in query.titles[:20]
+            if _pdl_sql_value(title)
         ]
-        sql = (
-            f"SELECT * FROM person WHERE job_company_website='{query.company_domain}' "
-            f"AND job_title IN ({','.join(repr(v) for v in safe_titles)})"
-        )
+        if not safe_domain or not safe_titles:
+            return []
+        company_clause = f"job_company_website='{safe_domain}'"
+        if safe_company:
+            company_clause = (
+                f"({company_clause} OR job_company_name='{safe_company}')"
+            )
+        title_clause = ",".join(f"'{value}'" for value in safe_titles)
+        filters = [
+            company_clause,
+            f"job_title IN ({title_clause})",
+        ]
+        safe_seniorities = [
+            _pdl_sql_value(value)
+            for value in query.seniorities[:10]
+            if _pdl_sql_value(value)
+        ]
+        if safe_seniorities:
+            seniority_clause = ",".join(
+                f"'{value}'" for value in safe_seniorities
+            )
+            filters.append(
+                f"job_title_levels IN ({seniority_clause})"
+            )
+        sql = "SELECT * FROM person WHERE " + " AND ".join(filters)
         data = await self._request(
-            "GET", "https://api.peopledatalabs.com/v5/person/search",
+            "POST", "https://api.peopledatalabs.com/v5/person/search",
             operation_type="people_search",
-            headers={"X-Api-Key": self.api_key}, params={"sql": sql, "size": query.limit},
+            headers={
+                "X-Api-Key": self.api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={
+                "sql": sql,
+                "size": min(
+                    query.limit,
+                    settings.people_pdl_results_per_query,
+                    100,
+                ),
+            },
         )
-        self.credits += 1
-        return [person for row in (data.get("data") or []) if (person := _normalize_pdl(row))]
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            self._failure()
+            raise ProviderUnavailable(
+                "provider_schema_error",
+                provider=self.provider_name,
+                http_status=self.last_http_status,
+                duration_ms=self.last_duration_ms,
+            )
+        normalized = [
+            person
+            for row in rows
+            if (person := _normalize_pdl(row))
+        ]
+        self.credits += len(rows)
+        for person in normalized:
+            self._search_profiles[person.provider_person_id] = person
+        return normalized
 
     async def enrich_people(self, people: list[PersonEnrichmentRequest]) -> list[ProviderPerson]:
-        return []
+        # Person Search already returns the profile and employment fields used
+        # by employment-v2.1. Reusing those normalized records avoids a second
+        # provider and a second metered operation.
+        wanted = {
+            item.provider_person_id
+            for item in people
+            if item.provider_person_id
+        }
+        return [
+            person
+            for identifier, person in self._search_profiles.items()
+            if identifier in wanted
+        ]
 
     async def get_usage(self) -> ProviderUsage:
         return ProviderUsage(provider="pdl", credits_used=self.credits, requests=self.requests)
@@ -662,13 +1007,31 @@ class MockPeopleProvider:
 
 
 def get_people_provider() -> PeopleDiscoveryProvider:
-    if settings.people_primary_provider == "mock":
+    provider = settings.people_primary_provider.strip().lower()
+    if provider == "mock":
         if settings.app_env not in {"test", "development"}:
             raise ProviderUnavailable("mock_provider_forbidden")
         return MockPeopleProvider()
-    if settings.people_primary_provider == "pdl":
+    if provider == "pdl":
+        if not settings.people_pdl_discovery_enabled:
+            raise ProviderUnavailable(
+                "provider_not_configured", provider="pdl"
+            )
         return PDLPeopleProvider()
-    return ApolloPeopleProvider()
+    if provider == "apollo":
+        if not (
+            settings.people_apollo_discovery_enabled
+            and settings.people_apollo_diagnostic_enabled
+            and settings.people_rollout_mode == "internal"
+        ):
+            raise ProviderUnavailable(
+                "provider_not_configured", provider="apollo"
+            )
+        return ApolloPeopleProvider()
+    raise ProviderUnavailable(
+        "provider_not_configured",
+        provider=provider or "unknown",
+    )
 
 
 def get_email_provider() -> WorkEmailProvider:
@@ -685,6 +1048,13 @@ def _valid_apollo_person_id(value: object) -> str | None:
     if "*" in value or not _APOLLO_PERSON_ID.fullmatch(value):
         return None
     return value
+
+
+def _complete_person_url(identifier: str) -> str:
+    return (
+        "https://api.apollo.io/api/v1/people/"
+        f"{quote(identifier, safe='')}"
+    )
 
 
 def _invalid_apollo_person_id_shape(value: object) -> str:
@@ -774,7 +1144,21 @@ def _single_apollo_person(data: dict) -> object | None:
     nested = data.get("data")
     if isinstance(nested, dict):
         candidates.extend([nested.get("person"), nested.get("match")])
+        if _looks_like_apollo_person(nested):
+            candidates.append(nested)
+    if _looks_like_apollo_person(data):
+        candidates.append(data)
     return next((value for value in candidates if isinstance(value, dict)), None)
+
+
+def _looks_like_apollo_person(value: dict) -> bool:
+    return bool(
+        _valid_apollo_person_id(value.get("id"))
+        and (
+            isinstance(value.get("organization"), dict)
+            or isinstance(value.get("employment_history"), list)
+        )
+    )
 
 
 def _safe_validation_token(value: object) -> str | None:
@@ -899,10 +1283,41 @@ def _normalize_apollo(
     if isinstance(linkedin_url, str) and linkedin_url.startswith("http://"):
         linkedin_url = f"https://{linkedin_url.removeprefix('http://')}"
     observed_at = datetime.now(UTC)
-    employment_updated = _provider_datetime(
+    is_complete_person = identifier_kind == "complete_person"
+    employment_verified = _provider_datetime(
         row.get("employment_verified_at")
-        or row.get("last_refreshed_at")
-        or row.get("updated_at")
+    )
+    employment_updated = _provider_datetime(
+        row.get("employment_updated_at")
+        if is_complete_person
+        else (
+            row.get("employment_verified_at")
+            or row.get("last_refreshed_at")
+            or row.get("updated_at")
+        )
+    )
+    record_observed = _provider_datetime(
+        row.get("last_refreshed_at") or row.get("updated_at")
+    )
+    if not record_observed:
+        record_observed = observed_at
+    employment_history = (
+        row.get("employment_history")
+        if isinstance(row.get("employment_history"), list)
+        else []
+    )
+    previous_employers = [
+        str(item.get("organization_name") or "").strip()
+        for item in employment_history
+        if isinstance(item, dict)
+        and str(item.get("organization_name") or "").strip()
+        and str(item.get("organization_name") or "").strip().lower()
+        != company.lower()
+    ]
+    employment_source = (
+        "complete_person_by_id"
+        if is_complete_person
+        else "provider_current_listing"
     )
     return ProviderPerson(
         provider="apollo", provider_person_id=identifier, full_name=name,
@@ -917,24 +1332,26 @@ def _normalize_apollo(
         linkedin_url=safe_profile_url(linkedin_url),
         source_profile_url=safe_profile_url(linkedin_url),
         source_last_updated_at=employment_updated,
-        provider_record_observed_at=observed_at,
+        provider_record_observed_at=record_observed,
         provider_employment_updated_at=employment_updated,
-        employment_verified_at=None,
-        employment_source="provider_current_listing",
+        employment_verified_at=employment_verified,
+        employment_source=employment_source,
         current_role_indicator=True,
         education=[str(v.get("school_name")) for v in row.get("education", []) if isinstance(v, dict) and v.get("school_name")],
-        previous_employers=[str(v.get("organization_name")) for v in row.get("employment_history", [])[1:] if isinstance(v, dict) and v.get("organization_name")],
+        previous_employers=previous_employers,
         evidence={
-            "employment_source": "provider_current_employment",
+            "employment_source": employment_source,
             "current_company_name": company,
             "current_company_domain": (
                 str(organization.get("primary_domain") or "").lower() or None
             ),
             "current_title": title,
             "employment_verified_at": (
-                None
+                employment_verified.isoformat()
+                if employment_verified
+                else None
             ),
-            "provider_record_observed_at": observed_at.isoformat(),
+            "provider_record_observed_at": record_observed.isoformat(),
             "provider_employment_updated_at": (
                 employment_updated.isoformat() if employment_updated else None
             ),
@@ -954,12 +1371,51 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
     if not all((name, title, company, identifier)):
         return None
     observed_at = datetime.now(UTC)
-    employment_updated = _provider_datetime(
-        row.get("job_last_changed")
-        or row.get("last_updated")
-        or row.get("updated_at")
-    )
-    company_domain = str(row.get("job_company_website") or "").lower() or None
+    employment_updated = _provider_datetime(row.get("job_last_changed"))
+    provider_verified = _provider_datetime(row.get("job_last_verified"))
+    if (
+        provider_verified
+        and (
+            employment_updated is None
+            or provider_verified > employment_updated
+        )
+    ):
+        employment_updated = provider_verified
+    company_domain = _provider_company_domain(row.get("job_company_website"))
+    experience = row.get("experience")
+    experience_rows = experience if isinstance(experience, list) else []
+    employment_start = row.get("job_start_date")
+    employment_end = row.get("job_end_date")
+    current_role_indicator = not bool(employment_end)
+    conflicting_current_role = False
+    previous_employers: list[str] = []
+    for value in experience_rows:
+        if not isinstance(value, dict):
+            continue
+        employer = value.get("company")
+        employer_name = (
+            str(employer.get("name") or "").strip()
+            if isinstance(employer, dict)
+            else ""
+        )
+        is_current = not bool(value.get("end_date"))
+        if (
+            normalize_provider_text(employer_name)
+            == normalize_provider_text(company)
+        ):
+            employment_start = (
+                value.get("start_date") or employment_start
+            )
+            employment_end = value.get("end_date") or employment_end
+            current_role_indicator = not bool(employment_end)
+        elif employer_name and is_current:
+            conflicting_current_role = True
+        if (
+            employer_name
+            and normalize_provider_text(employer_name)
+            != normalize_provider_text(company)
+        ):
+            previous_employers.append(employer_name)
     return ProviderPerson(
         provider="pdl", provider_person_id=identifier, full_name=name,
         current_company_name=company, current_company_domain=company_domain,
@@ -973,9 +1429,12 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
         provider_employment_updated_at=employment_updated,
         employment_verified_at=None,
         employment_source="provider_current_listing",
-        current_role_indicator=True,
+        current_role_indicator=current_role_indicator,
+        conflicting_employer_observed_at=(
+            observed_at if conflicting_current_role else None
+        ),
         education=[str(v.get("school", {}).get("name")) for v in row.get("education", []) if isinstance(v, dict) and isinstance(v.get("school"), dict) and v["school"].get("name")],
-        previous_employers=[str(v.get("company", {}).get("name")) for v in row.get("experience", [])[1:] if isinstance(v, dict) and isinstance(v.get("company"), dict) and v["company"].get("name")],
+        previous_employers=list(dict.fromkeys(previous_employers)),
         evidence={
             "employment_source": "provider_current_employment",
             "current_company_name": company,
@@ -988,10 +1447,37 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
             "provider_employment_updated_at": (
                 employment_updated.isoformat() if employment_updated else None
             ),
-            "current_role_indicator": True,
+            "current_role_indicator": current_role_indicator,
+            "employment_start_date": employment_start,
+            "employment_end_date": employment_end,
+            "conflicting_current_employment": conflicting_current_role,
         },
         field_provenance={"name": "pdl", "title": "pdl", "company": "pdl"},
     )
+
+
+def _pdl_sql_value(value: object) -> str:
+    cleaned = re.sub(
+        r"[^A-Za-z0-9 /,&+().:_-]",
+        "",
+        str(value or ""),
+    ).strip()[:120]
+    return cleaned.replace("'", "''")
+
+
+def _provider_company_domain(value: object) -> str | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    parsed = urlsplit(
+        raw if "://" in raw else f"https://{raw}"
+    )
+    host = (parsed.hostname or "").strip(".")
+    return host.removeprefix("www.") or None
+
+
+def normalize_provider_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
 def _provider_datetime(value: object) -> datetime | None:
