@@ -2,14 +2,12 @@ import { AppShell } from "@/components/AppShell";
 import { JobDiscovery } from "@/components/JobDiscovery";
 
 export default function JobsPage() {
+  // The Jobs workspace manages its own page container: in list mode it centres
+  // a readable column, and with a job open it fills the viewport with the
+  // compact list and the detail panel.
   return (
-    <AppShell>
-      <header className="mb-6">
-        <h1 className="text-3xl font-semibold">Job discovery</h1>
-        <p className="mt-2 text-[var(--text-muted)]">Fresh jobs matched to your profile from official application sources.</p>
-      </header>
+    <AppShell workspace>
       <JobDiscovery />
     </AppShell>
   );
 }
-

@@ -1,19 +1,12 @@
-import Link from "next/link";
-import { AppShell } from "@/components/AppShell";
-import { PeopleWhoCanHelp } from "@/components/PeopleWhoCanHelp";
+import { redirect } from "next/navigation";
 
+/**
+ * A job is not a separate screen: it opens inside the Jobs workspace, next to
+ * the list it came from. This route stays as a permalink so existing links and
+ * bookmarks keep working, and hands off to the workspace URL.
+ */
 export default async function JobDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  return (
-    <AppShell>
-      <header className="mb-6">
-        <h1 className="text-3xl font-semibold">Job details</h1>
-        <p className="mt-2 text-[var(--text-muted)]">Job ID {id}. Use the discovery page to generate documents and open the official application link.</p>
-      </header>
-      <div className="rounded-lg border border-line bg-white p-5">
-        <Link className="text-pine" href="/jobs">Back to job discovery</Link>
-      </div>
-      <PeopleWhoCanHelp jobId={id} />
-    </AppShell>
-  );
+  const numeric = Number.parseInt(id, 10);
+  redirect(Number.isFinite(numeric) && numeric > 0 ? `/jobs?job=${numeric}` : "/jobs");
 }

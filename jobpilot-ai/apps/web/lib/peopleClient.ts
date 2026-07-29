@@ -51,44 +51,75 @@ export function subscribeToPeople(jobId: JobId, listener: Listener): () => void 
   return () => entry.listeners.delete(listener);
 }
 
-export async function loadPeople(jobId: JobId, force = false): Promise<PeopleResponse> {
+/**
+ * Every request below is keyed by job id and de-duplicated while in flight, so
+ * a double-click or a rerender can never produce a second provider-backed call.
+ * A caller may pass an AbortSignal to drop its own interest in the result (card
+ * unmounted, query changed) without cancelling the shared request for others.
+ */
+function withSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new DOMException("Aborted", "AbortError"));
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+    promise
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+export async function loadPeople(
+  jobId: JobId,
+  force = false,
+  signal?: AbortSignal
+): Promise<PeopleResponse> {
   const entry = entryFor(jobId);
   const cached = getCachedPeople(jobId);
   if (!force && cached) return cached;
-  if (entry.load) return entry.load;
-
-  entry.load = api<PeopleResponse>(`/jobs/${jobId}/people`)
-    .then((data) => publish(entry, data))
-    .finally(() => {
-      entry.load = undefined;
-    });
-  return entry.load;
+  if (!entry.load) {
+    entry.load = api<PeopleResponse>(`/jobs/${jobId}/people`)
+      .then((data) => publish(entry, data))
+      .finally(() => {
+        entry.load = undefined;
+      });
+  }
+  return withSignal(entry.load, signal);
 }
 
-export async function discoverPeople(jobId: JobId): Promise<PeopleResponse> {
+export async function discoverPeople(
+  jobId: JobId,
+  signal?: AbortSignal
+): Promise<PeopleResponse> {
   const entry = entryFor(jobId);
-  if (entry.discovery) return entry.discovery;
-
-  entry.discovery = api<PeopleResponse>(`/jobs/${jobId}/people/discover`, { method: "POST" })
-    .then((data) => publish(entry, data))
-    .finally(() => {
-      entry.discovery = undefined;
-    });
-  return entry.discovery;
+  if (!entry.discovery) {
+    entry.discovery = api<PeopleResponse>(`/jobs/${jobId}/people/discover`, { method: "POST" })
+      .then((data) => publish(entry, data))
+      .finally(() => {
+        entry.discovery = undefined;
+      });
+  }
+  return withSignal(entry.discovery, signal);
 }
 
-export async function broadenPeople(jobId: JobId): Promise<PeopleResponse> {
+export async function broadenPeople(
+  jobId: JobId,
+  signal?: AbortSignal
+): Promise<PeopleResponse> {
   const entry = entryFor(jobId);
-  if (entry.broaden) return entry.broaden;
-
-  entry.broaden = api<PeopleResponse>(`/jobs/${jobId}/people/broaden`, {
-    method: "POST"
-  })
-    .then((data) => publish(entry, data))
-    .finally(() => {
-      entry.broaden = undefined;
-    });
-  return entry.broaden;
+  if (!entry.broaden) {
+    entry.broaden = api<PeopleResponse>(`/jobs/${jobId}/people/broaden`, {
+      method: "POST"
+    })
+      .then((data) => publish(entry, data))
+      .finally(() => {
+        entry.broaden = undefined;
+      });
+  }
+  return withSignal(entry.broaden, signal);
 }
 
 export function clearPeopleCache(): void {

@@ -13,6 +13,12 @@ function isoDaysAgo(days: number) {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+/** The workspace keeps its state in the URL, so each test starts from a clean
+ * one — otherwise a filter or an open job leaks into the next test. */
+function resetUrl() {
+  window.history.replaceState(null, "", "/jobs");
+}
+
 function makeJob(overrides: Record<string, unknown> = {}) {
   return {
     id: 1,
@@ -63,6 +69,9 @@ function mockJobsFetch(
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+    if (url.includes("/jobs/tracker/")) {
+      return Promise.resolve(jsonResponse({ applications: [] }));
+    }
     if (url.match(/\/jobs\/\d+\/people$/) && method === "GET") {
       return Promise.resolve(
         jsonResponse(
@@ -163,10 +172,16 @@ function mockJobsFetch(
   });
 }
 
+/** Card body click — the whole card opens the job. */
+function cardOf(title: string): HTMLElement {
+  return screen.getByText(title).closest("article") as HTMLElement;
+}
+
 describe("JobDiscovery", () => {
   beforeEach(() => {
     cleanup();
     clearPeopleCache();
+    resetUrl();
     localStorage.setItem("jobpilot_token", "token");
     vi.restoreAllMocks();
   });
@@ -189,21 +204,29 @@ describe("JobDiscovery", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
 
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     expect(within(card).getByText("92")).toBeInTheDocument();
     expect(within(card).getByText("Strong fit")).toBeInTheDocument();
     expect(within(card).getByText("Posted 2 days ago")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: /Apply on official site/ })).toBeInTheDocument();
     // Source badge shows the ATS provider name.
     expect(within(card).getByText("Greenhouse")).toBeInTheDocument();
-    expect(within(card).getByRole("heading", { name: "People Who Can Help" })).toBeInTheDocument();
-    expect(within(card).getByRole("button", { name: "View people" })).toBeInTheDocument();
+  });
+
+  it("keeps the full People panel out of the card and makes no people request", async () => {
+    mockJobsFetch({ existing: [makeJob(), makeJob({ id: 2, title: "Data Platform Engineer" })] });
+    render(React.createElement(JobDiscovery));
+
+    await screen.findByText("Machine Learning Engineer");
+    // A compact, state-labelled action instead of an expanded results block.
+    expect(screen.queryByRole("heading", { name: "People Who Can Help" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Find people" })).toHaveLength(2);
     expect(
       vi.mocked(fetch).mock.calls.filter(([input]) => /\/jobs\/\d+\/people/.test(String(input)))
     ).toHaveLength(0);
   });
 
-  it("opens the real details modal, renders people below the match explanation, and uses the persisted job ID", async () => {
+  it("opens the job in the workspace and loads people only in Networking, by persisted ID", async () => {
     const persistedJob = makeJob({
       id: 731,
       title: "Persisted-ID Engineer",
@@ -226,57 +249,58 @@ describe("JobDiscovery", () => {
     });
     render(React.createElement(JobDiscovery));
 
-    const card = (await screen.findByText("Persisted-ID Engineer")).closest("article") as HTMLElement;
-    await userEvent.click(within(card).getByRole("button", { name: "View details" }));
+    await userEvent.click(await screen.findByText("Persisted-ID Engineer"));
 
-    const dialog = screen.getByRole("dialog", { name: "Persisted-ID Engineer" });
-    expect(within(dialog).getByRole("heading", { name: "Why this matches" })).toBeInTheDocument();
-    const peopleHeading = await within(dialog).findByRole("heading", { name: "People Who Can Help" });
-    const matchHeading = within(dialog).getByRole("heading", { name: "Why this matches" });
+    expect(await screen.findByRole("heading", { name: "Persisted-ID Engineer" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Why this matches" })).toBeInTheDocument();
+    // Overview alone must not reach the people API.
     expect(
-      matchHeading.compareDocumentPosition(peopleHeading) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+      vi.mocked(fetch).mock.calls.filter(([input]) => /\/jobs\/\d+\/people/.test(String(input)))
+    ).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Networking" }));
+    expect(await screen.findByRole("heading", { name: "People Who Can Help" })).toBeInTheDocument();
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
         "http://localhost:8000/jobs/731/people",
         expect.any(Object)
       )
     );
+    // Reading stored results is a GET; nothing paid runs without an explicit click.
+    expect(
+      vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/people/discover"))
+    ).toHaveLength(0);
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringMatching(/provider-9981|REQ-44/),
       expect.anything()
     );
   });
 
-  it("keeps disabled rollout visible and reloads status when details are closed and reopened", async () => {
-    mockJobsFetch({ existing: [makeJob({ id: 44, title: "Modal Lifecycle Role" })] });
+  it("keeps a disabled rollout visible and re-reads status when Networking is reopened", async () => {
+    mockJobsFetch({ existing: [makeJob({ id: 44, title: "Networking Lifecycle Role" })] });
     render(React.createElement(JobDiscovery));
 
-    const openDetails = async () => {
-      const card = (await screen.findByText("Modal Lifecycle Role")).closest("article") as HTMLElement;
-      await userEvent.click(within(card).getByRole("button", { name: "View details" }));
-      return screen.getByRole("dialog", { name: "Modal Lifecycle Role" });
-    };
+    await userEvent.click(await screen.findByText("Networking Lifecycle Role"));
+    await userEvent.click(screen.getByRole("tab", { name: "Networking" }));
 
-    let dialog = await openDetails();
     await waitFor(() =>
       expect(
         vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/jobs/44/people"))
       ).toHaveLength(1)
     );
-    expect(within(dialog).getByText("People Who Can Help")).toBeInTheDocument();
-    expect(within(dialog).getByText("People recommendations are not enabled for this account.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("People recommendations are not enabled for this account.")
+    ).toBeInTheDocument();
 
-    await userEvent.click(within(dialog).getByRole("button", { name: "Close details" }));
-    expect(screen.queryByRole("dialog", { name: "Modal Lifecycle Role" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Overview" }));
+    expect(screen.queryByRole("heading", { name: "People Who Can Help" })).not.toBeInTheDocument();
 
-    dialog = await openDetails();
+    await userEvent.click(screen.getByRole("tab", { name: "Networking" }));
     await waitFor(() =>
       expect(
         vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/jobs/44/people"))
       ).toHaveLength(2)
     );
-    expect(within(dialog).getByText("People Who Can Help")).toBeInTheDocument();
   });
 
   it("never renders demo jobs, 'via demo', or example.com apply links", async () => {
@@ -302,7 +326,7 @@ describe("JobDiscovery", () => {
     render(React.createElement(JobDiscovery));
 
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     expect(within(card).queryByRole("button", { name: /Apply on official site/ })).not.toBeInTheDocument();
     expect(within(card).getByText("No official link available")).toBeInTheDocument();
   });
@@ -340,6 +364,8 @@ describe("JobDiscovery", () => {
 
     await waitFor(() => expect(screen.queryByText("Machine Learning Engineer")).not.toBeInTheDocument());
     expect(screen.getByText("Warehouse Associate")).toBeInTheDocument();
+    // Filters live in the URL, so the filtered list is shareable and survives a reload.
+    expect(window.location.search).toContain("q=warehouse");
   });
 
   it("shows a concise results summary", async () => {
@@ -420,16 +446,16 @@ describe("JobDiscovery", () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     expect(within(card).getByRole("button", { name: "Resume" })).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "Cover Letter" })).toBeInTheDocument();
   });
 
-  it("Resume button generates and opens the resume modal", async () => {
+  it("Resume button generates and opens the resume modal without opening the job", async () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
 
     await waitFor(() =>
@@ -438,6 +464,8 @@ describe("JobDiscovery", () => {
         expect.objectContaining({ method: "POST" })
       )
     );
+    // An action inside the card does not also select the job.
+    expect(window.location.search).not.toContain("job=");
     // Preview mode is the default: a rendered document, not a raw markdown textarea.
     expect(await screen.findByRole("heading", { name: "Tailored Resume" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Chandra Pandey" })).toBeInTheDocument();
@@ -451,7 +479,7 @@ describe("JobDiscovery", () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
 
     await screen.findByRole("heading", { name: "Tailored Resume" });
@@ -465,7 +493,7 @@ describe("JobDiscovery", () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
 
     await screen.findByRole("heading", { name: "Tailored Resume" });
@@ -478,7 +506,7 @@ describe("JobDiscovery", () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
     await screen.findByRole("heading", { name: "Tailored Resume" });
 
@@ -494,7 +522,7 @@ describe("JobDiscovery", () => {
     mockJobsFetch({ resumeWarnings: [] });
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
 
     await screen.findByRole("heading", { name: "Tailored Resume" });
@@ -507,7 +535,7 @@ describe("JobDiscovery", () => {
     });
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
 
     await screen.findByRole("heading", { name: "Tailored Resume" });
@@ -520,7 +548,7 @@ describe("JobDiscovery", () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Cover Letter" }));
 
     await waitFor(() =>
@@ -542,7 +570,7 @@ describe("JobDiscovery", () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     await userEvent.click(within(card).getByRole("button", { name: "Resume" }));
     await screen.findByRole("heading", { name: "Tailored Resume" });
 
@@ -631,7 +659,7 @@ describe("JobDiscovery", () => {
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
 
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     const logo = within(card).getByRole("img", { name: "OpenAI logo" });
     expect(logo).toHaveAttribute("src", "https://logo.clearbit.com/openai.com");
   });
@@ -641,18 +669,18 @@ describe("JobDiscovery", () => {
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
 
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
+    const card = cardOf("Machine Learning Engineer");
     expect(within(card).getByRole("img", { name: "Acme generated company mark" })).toHaveTextContent("AC");
     expect(within(card).getByTestId("company-logo-generated")).toBeInTheDocument();
   });
 
-  it("saves a job via the official save action", async () => {
+  it("saves a job via the official save action and reflects tracker state", async () => {
     mockJobsFetch();
     render(React.createElement(JobDiscovery));
 
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
-    const card = (await screen.findByText("Machine Learning Engineer")).closest("article") as HTMLElement;
-    await userEvent.click(within(card).getByRole("button", { name: /Save/ }));
+    const card = cardOf("Machine Learning Engineer");
+    await userEvent.click(within(card).getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
@@ -660,5 +688,8 @@ describe("JobDiscovery", () => {
         expect.objectContaining({ method: "POST" })
       )
     );
+    expect(await within(card).findByRole("button", { name: "Saved" })).toBeInTheDocument();
+    // Saving from the card does not open the job.
+    expect(window.location.search).not.toContain("job=");
   });
 });

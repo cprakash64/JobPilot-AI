@@ -85,6 +85,9 @@ export type Job = {
   company_logo_proxy_path?: string | null;
   source: string | null;
   location: string | null;
+  /** Short label for narrow surfaces; `location` keeps the full multi-city
+   * value. Served by the API alongside `location`. */
+  location_display?: string | null;
   workplace_type: string | null;
   employment_type: string | null;
   seniority_level: string | null;
@@ -113,6 +116,14 @@ export type PeopleStatus =
   | "no_reliable_matches"
   | "provider_unavailable"
   | "persistence_error"
+  // Each failure below used to collapse into provider_unavailable, which made
+  // an unresolved company domain or a spent user budget look like an outage.
+  | "domain_unresolved"
+  | "invalid_request"
+  | "user_budget_exhausted"
+  | "provider_budget_exhausted"
+  | "provider_budget_exhausted"
+  | "provider_configuration_error"
   | "stale";
 
 export type PeopleAvailabilityReason =
@@ -134,7 +145,24 @@ export type PeopleAvailabilityReason =
   | "provider_budget_exceeded"
   | "provider_user_limit_exceeded"
   | "recommendation_commit_failed"
+  | "provider_configuration_circuit_open"
+  | "company_domain_unresolved"
+  | "provider_route_invalid"
+  | "user_daily_limit_reached"
+  | "provider_request_cancelled"
+  | "no_results"
   | "provider_unavailable";
+
+/** Counted in deliberate user actions, never in provider calls. */
+export type PeopleQuota = {
+  daily_limit: number;
+  daily_used: number;
+  daily_remaining: number;
+  /** ISO timestamp of the next reset, in the configured timezone. */
+  resets_at: string;
+  hourly_limit?: number;
+  broadened_search_cost?: number;
+};
 
 export type PeopleRecommendation = {
   recommendation_id: number;
@@ -187,6 +215,11 @@ export type PeopleResponse = {
   retry_eligible?: boolean;
   retry_after_seconds?: number | null;
   retry_eligible_at?: string | null;
+  /** "stale" means these results predate a provider outage and are cached. */
+  result_freshness?: "fresh" | "stale" | "none";
+  /** The user's remaining deliberate searches. Reading this costs nothing. */
+  quota?: PeopleQuota;
+  provider_circuit?: string;
   beta: boolean;
   generated_at?: string | null;
   expires_at?: string | null;
@@ -250,6 +283,7 @@ export type JobsResponse = {
 
 export type ApiErrorCode =
   | "network_unreachable"
+  | "request_cancelled"
   | "auth_expired"
   | "not_found"
   | "validation"
@@ -338,6 +372,16 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       }
     });
   } catch (cause) {
+    // An aborted request is a deliberate client-side cancellation (the card
+    // unmounted, the query changed). It is not a failure and must never be
+    // rendered as one.
+    if (options.signal?.aborted || (cause instanceof Error && cause.name === "AbortError")) {
+      throw new ApiError({
+        code: "request_cancelled",
+        message: "The request was cancelled.",
+        retryable: false
+      });
+    }
     // fetch() rejects (TypeError) only when NO HTTP response was obtained:
     // backend down, wrong URL/port, DNS failure, or a response blocked by CORS.
     if (process.env.NODE_ENV === "development") {

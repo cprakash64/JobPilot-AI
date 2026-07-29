@@ -1,5 +1,14 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+/**
+ * People Who Can Help, end to end against a mocked provider.
+ *
+ * The panel now lives in the Jobs workspace's Networking section rather than
+ * inside every job card. What must not change: rendering a list never touches
+ * the people API, every search is one explicit click, results are cached and
+ * scoped to the persisted job id, and nothing is ever sent on the user's behalf.
+ */
+
 const API = process.env.API_BASE_URL ?? "http://localhost:8000";
 
 const basePerson = {
@@ -46,7 +55,28 @@ async function json(route: Route, body: object) {
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-test("job card discovery is explicit, persisted-ID scoped, cached, and shared with the modal", async ({ page }) => {
+function jobsPayload(jobs: unknown[]) {
+  return {
+    profile_complete: true,
+    criteria: { role_queries: [], skills: [], seniority_targets: [] },
+    profile_filters: {
+      target_roles: [],
+      target_levels: [],
+      preferred_locations: [],
+      work_preference: "remote"
+    },
+    jobs
+  };
+}
+
+/** Opens a job by clicking its card body, then activates Networking. */
+async function openNetworking(page: Page, title: string) {
+  await page.getByTestId("job-card").filter({ hasText: title }).first().click({ position: { x: 60, y: 12 } });
+  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await page.getByRole("tab", { name: "Networking" }).click();
+}
+
+test("people discovery is explicit, persisted-ID scoped, and cached across the workspace", async ({ page }) => {
   const persistedJobId = 731;
   let discovered = false;
   let discoveryCount = 0;
@@ -106,12 +136,13 @@ test("job card discovery is explicit, persisted-ID scoped, cached, and shared wi
     ...job,
     id: 732,
     title: "Data Platform Engineer",
+    posted_at: "2026-07-24T12:00:00Z",
     application_url: "https://job-boards.greenhouse.io/acme/jobs/provider-9982",
     source_url: "https://job-boards.greenhouse.io/acme/jobs/provider-9982"
   };
 
   await page.addInitScript(() => localStorage.setItem("jobpilot_token", "synthetic-e2e-token"));
-  await page.setViewportSize({ width: 1024, height: 640 });
+  await page.setViewportSize({ width: 1280, height: 900 });
   await page.context().route("https://www.linkedin.com/**", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html", body: "<title>Provider profile</title>" });
   });
@@ -119,17 +150,10 @@ test("job card discovery is explicit, persisted-ID scoped, cached, and shared wi
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "GET" && url.pathname === "/jobs") {
-      return json(route, {
-        profile_complete: true,
-        criteria: { role_queries: [], skills: [], seniority_targets: [] },
-        profile_filters: {
-          target_roles: [],
-          target_levels: [],
-          preferred_locations: [],
-          work_preference: "remote"
-        },
-        jobs: [job, untouchedJob]
-      });
+      return json(route, jobsPayload([job, untouchedJob]));
+    }
+    if (url.pathname.startsWith("/jobs/tracker/")) {
+      return json(route, { applications: [] });
     }
     if (url.pathname === `/jobs/${persistedJobId}/people`) {
       peopleRequests.push(`${request.method()} ${url.pathname}`);
@@ -175,27 +199,43 @@ test("job card discovery is explicit, persisted-ID scoped, cached, and shared wi
         verified_at: recruiter.email_verified_at
       });
     }
+    if (url.pathname.match(/^\/jobs\/\d+\/people/)) {
+      peopleRequests.push(`${request.method()} ${url.pathname}`);
+      return json(route, payload(null, "not_started"));
+    }
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
   });
 
   await page.goto("/jobs");
-  const card = page.getByRole("article").filter({ hasText: "Machine Learning Engineer" });
-  const untouchedCard = page.getByRole("article").filter({ hasText: "Data Platform Engineer" });
-  await expect(card.getByRole("heading", { name: "People Who Can Help" })).toBeVisible();
-  await expect(untouchedCard.getByRole("heading", { name: "People Who Can Help" })).toBeVisible();
+
+  // The list holds a compact People action per card and no results block.
+  const cards = page.getByTestId("job-card");
+  await expect(cards).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "People Who Can Help" })).toHaveCount(0);
+  await expect(cards.first().getByRole("button", { name: "Find people" })).toBeVisible();
   expect(peopleRequests).toEqual([]);
 
-  await card.getByRole("button", { name: "Find people" }).click();
-  await expect(card.getByText("Rita Recruiter")).toBeVisible();
-  await expect(card.getByText("Pat Referrer")).toBeVisible();
-  await expect(card.getByText("1 recruiter · 1 potential manager · 1 referral candidate")).toBeVisible();
+  await openNetworking(page, "Machine Learning Engineer");
+  // Opening the section reads stored state for the persisted job id only. The
+  // control appears once that read lands, so waiting for it also proves the
+  // read happened — and that nothing else did.
+  await expect(page.getByRole("heading", { name: "People Who Can Help" })).toBeVisible();
+  const findPeople = page.getByRole("button", { name: "Find people" });
+  await expect(findPeople).toBeVisible();
+  expect(peopleRequests).toEqual([`GET /jobs/${persistedJobId}/people`]);
+
+  await findPeople.click();
+  await expect(page.getByText("Rita Recruiter")).toBeVisible();
+  await expect(page.getByText("Morgan Manager")).toBeVisible();
+  await expect(page.getByText("Pat Referrer")).toBeVisible();
+  await expect(page.getByText("1 recruiter · 1 potential manager · 1 referral candidate")).toBeVisible();
   expect(peopleRequests.slice(0, 2)).toEqual([
     `GET /jobs/${persistedJobId}/people`,
     `POST /jobs/${persistedJobId}/people/discover`
   ]);
   expect(peopleRequests.some((request) => request.includes("/jobs/732/people"))).toBe(false);
 
-  const profile = card.getByRole("link", { name: "LinkedIn profile" });
+  const profile = page.getByRole("link", { name: "LinkedIn profile" }).first();
   await expect(profile).toHaveAttribute("href", "https://www.linkedin.com/in/rita-recruiter");
   await expect(profile).toHaveAttribute("target", "_blank");
   await expect(profile).toHaveAttribute("rel", "noopener noreferrer");
@@ -207,34 +247,21 @@ test("job card discovery is explicit, persisted-ID scoped, cached, and shared wi
   await popup.close();
 
   expect(emailCount).toBe(0);
-  await card.getByRole("button", { name: "Find work email" }).first().click();
-  await expect(card.getByText("Verified work email: rita@acme.example")).toBeVisible();
+  await page.getByRole("button", { name: "Find work email" }).first().click();
+  await expect(page.getByText("Verified work email: rita@acme.example")).toBeVisible();
   expect(emailCount).toBe(1);
 
-  await card.getByRole("button", { name: "View all people" }).click();
-  const dialog = page.getByRole("dialog", { name: "Machine Learning Engineer" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Close details" })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: /Apply on official site/ })).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "People Who Can Help" })).toBeVisible();
-  await expect(dialog.getByText("Rita Recruiter")).toBeVisible();
-  await expect(dialog.getByText("Morgan Manager")).toBeVisible();
-  await expect(dialog.getByText("Pat Referrer")).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Likely Recruiters" })).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Potential Hiring Managers" })).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Potential Referral Candidates" })).toBeVisible();
-  const dialogBox = await dialog.boundingBox();
-  expect(dialogBox).not.toBeNull();
-  expect(dialogBox!.y).toBeGreaterThanOrEqual(0);
-  expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(640);
+  // Switching to the other job in the compact list starts nothing for it.
+  await page.getByTestId("compact-job-card").filter({ hasText: "Data Platform Engineer" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Data Platform Engineer" })).toBeVisible();
+  expect(peopleRequests.some((request) => request.includes("/jobs/732/people"))).toBe(false);
 
-  await dialog.getByRole("button", { name: "Close details" }).click();
-  await card.getByRole("button", { name: "View details" }).click();
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Rita Recruiter")).toBeVisible();
+  // Returning to the first job re-uses the cached search: still one discovery.
+  await page.getByTestId("compact-job-card").filter({ hasText: "Machine Learning Engineer" }).click();
+  await page.getByRole("tab", { name: "Networking" }).click();
+  await expect(page.getByText("Rita Recruiter")).toBeVisible();
   expect(discoveryCount).toBe(1);
   expect(emailCount).toBe(1);
-  expect(peopleRequests.some((request) => request.includes("/jobs/732/people"))).toBe(false);
 });
 
 test("complete people workflow remains manual, grounded, cached, and user-scoped", async ({ page }) => {
@@ -247,14 +274,42 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
   };
   let suppressed = false;
   let getCount = 0;
+  const job = {
+    id: 7,
+    title: "Machine Learning Engineer",
+    company: "Acme AI",
+    company_domain: "acme.example",
+    company_logo_url: "",
+    source: "greenhouse",
+    location: "Remote",
+    workplace_type: "remote",
+    employment_type: "full-time",
+    seniority_level: "mid",
+    posted_at: "2026-07-25T12:00:00Z",
+    discovered_at: "2026-07-25T12:00:00Z",
+    application_url: "https://job-boards.greenhouse.io/acme/jobs/7",
+    source_url: "https://job-boards.greenhouse.io/acme/jobs/7",
+    description_clean: "Build production machine-learning systems.",
+    required_skills: ["Python"],
+    preferred_skills: [],
+    responsibilities: ["Ship reliable models."],
+    match: null
+  };
 
   await page.addInitScript(() => localStorage.setItem("jobpilot_token", "synthetic-e2e-token"));
-  await page.route(`${API}/jobs/7/people**`, async (route) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route(`${API}/jobs**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
     expect(request.headers().authorization).toBe("Bearer synthetic-e2e-token");
 
+    if (request.method() === "GET" && path === "/jobs") {
+      return json(route, jobsPayload([job]));
+    }
+    if (path.startsWith("/jobs/tracker/")) {
+      return json(route, { applications: [] });
+    }
     if (request.method() === "GET" && path === "/jobs/7/people") {
       getCount += 1;
       return json(route, discovered ? payload(suppressed ? null : person) : payload(null, "not_started"));
@@ -301,10 +356,14 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
       suppressed = true;
       return json(route, { accepted: true, suppressed: true });
     }
-    return route.fulfill({ status: 404, body: "{}" });
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
   });
 
+  // The old per-job permalink still resolves — into the workspace.
   await page.goto("/jobs/7");
+  await expect(page).toHaveURL(/\/jobs\?job=7$/);
+  await page.getByRole("tab", { name: "Networking" }).click();
+
   await expect(page.getByText(/Find recruiters and referral candidates/)).toBeVisible();
   await page.getByRole("button", { name: "Find people" }).click();
   await expect(page.getByText("Rita Recruiter")).toBeVisible();
@@ -314,7 +373,7 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
   await page.getByRole("button", { name: /Find work email/ }).click();
   await expect(page.getByText(/Verified work email: rita@acme.example/)).toBeVisible();
 
-  await page.getByRole("button", { name: /Draft LinkedIn message/ }).click();
+  await page.getByRole("button", { name: /Create LinkedIn draft/ }).click();
   const dialog = page.getByRole("dialog", { name: "Review outreach draft" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(/never sends this message automatically/i)).toBeVisible();
@@ -325,7 +384,9 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
   await page.getByRole("button", { name: /Mark contacted/ }).click();
   await expect(page.getByRole("button", { name: "Contacted" })).toBeDisabled();
 
+  // A reload restores the same job and its saved contact state.
   await page.reload();
+  await page.getByRole("tab", { name: "Networking" }).click();
   await expect(page.getByRole("button", { name: "Saved" })).toBeVisible();
   expect(getCount).toBeGreaterThanOrEqual(2);
 
@@ -379,6 +440,7 @@ test("Toshiba no-result state broadens once and keeps its canonical logo", async
   });
 
   await page.addInitScript(() => localStorage.setItem("jobpilot_token", "synthetic-e2e-token"));
+  await page.setViewportSize({ width: 1280, height: 900 });
   await page.route("https://commerce.toshiba.com/images/tgcs/logo.png", async (route) => {
     await route.fulfill({
       status: 200,
@@ -393,17 +455,10 @@ test("Toshiba no-result state broadens once and keeps its canonical logo", async
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET" && path === "/jobs") {
-      return json(route, {
-        profile_complete: true,
-        criteria: { role_queries: [], skills: [], seniority_targets: [] },
-        profile_filters: {
-          target_roles: [],
-          target_levels: [],
-          preferred_locations: [],
-          work_preference: "hybrid"
-        },
-        jobs: [toshibaJob]
-      });
+      return json(route, jobsPayload([toshibaJob]));
+    }
+    if (path.startsWith("/jobs/tracker/")) {
+      return json(route, { applications: [] });
     }
     if (request.method() === "GET" && path === `/jobs/${jobId}/people`) {
       return json(route, peoplePayload());
@@ -422,27 +477,32 @@ test("Toshiba no-result state broadens once and keeps its canonical logo", async
   });
 
   await page.goto("/jobs");
-  const card = page.getByRole("article").filter({ hasText: "AI Engineer Intern" });
+  const card = page.getByTestId("job-card").filter({ hasText: "AI Engineer Intern" });
   await expect(card.getByRole("img", { name: "Toshiba Global Commerce logo" })).toHaveAttribute(
     "src",
     "https://commerce.toshiba.com/images/tgcs/logo.png"
   );
   expect(exactSearches).toBe(0);
 
-  await card.getByRole("button", { name: "Find people" }).click();
-  await expect(card.getByText("No reliable recruiting contact met JobPilot’s threshold.")).toBeVisible();
+  await openNetworking(page, "AI Engineer Intern");
+  await page.getByRole("button", { name: "Find people" }).click();
+  await expect(page.getByText("No reliable recruiting contact met JobPilot’s threshold.")).toBeVisible();
   expect(exactSearches).toBe(1);
 
-  await card.getByRole("button", { name: "Broaden search" }).dblclick();
-  await expect(card.getByText("Rita Recruiter")).toBeVisible();
+  // A double-click must still buy exactly one broadened search.
+  await page.getByRole("button", { name: "Broaden search" }).dblclick();
+  await expect(page.getByText("Rita Recruiter")).toBeVisible();
   expect(broadenedSearches).toBe(1);
 
-  await page.reload();
-  await card.getByRole("button", { name: "View details" }).click();
+  // The canonical logo survives into the detail header, and reloading the
+  // workspace URL keeps the cached results without a new search.
   await expect(
-    page.getByRole("dialog", { name: "AI Engineer Intern" }).getByText("Rita Recruiter")
+    page.getByRole("img", { name: "Toshiba Global Commerce logo" }).first()
   ).toBeVisible();
+  await page.reload();
+  await page.getByRole("tab", { name: "Networking" }).click();
+  await expect(page.getByText("Rita Recruiter")).toBeVisible();
   expect(exactSearches).toBe(1);
   expect(broadenedSearches).toBe(1);
-  expect(await card.getByRole("button", { name: "Find work email" }).count()).toBe(0);
+  expect(await page.getByRole("button", { name: "Find work email" }).count()).toBe(0);
 });

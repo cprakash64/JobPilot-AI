@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ExternalLink, Mail, MessageSquareText, Star, UserCheck, Users, X } from "lucide-react";
+import { Copy, ExternalLink, Mail, MessageSquareText, Star, UserCheck, X } from "lucide-react";
 import { api, ApiError, type PeopleRecommendation, type PeopleResponse } from "@/lib/api";
 import {
   broadenPeople,
@@ -11,6 +11,20 @@ import {
   subscribeToPeople
 } from "@/lib/peopleClient";
 import { Button } from "@/components/Button";
+import {
+  derivePeopleView,
+  formatResetTime,
+  PEOPLE_MESSAGES,
+  quotaSummary
+} from "@/lib/peopleState";
+import {
+  buildMailtoUrl,
+  copyText,
+  openExternal,
+  openMailClient,
+  safeEmailAddress,
+  safeLinkedInUrl
+} from "@/lib/outreachHandoff";
 
 type JobId = string | number;
 type PersonAction = "email" | "save" | "unsave" | "contacted" | "incorrect";
@@ -25,6 +39,16 @@ type OutreachDraftData = {
   omitted_uncertain_facts: string[];
   character_count: number;
   requires_manual_review: boolean;
+  /** How the draft was produced. Every draft is template-built today. */
+  generation_path?: string;
+  template_version?: string;
+  recipient_name?: string;
+  recipient_category?: string;
+  /** Supplied by the backend only when verified. Never derived client-side. */
+  linkedin_url?: string | null;
+  linkedin_available?: boolean;
+  professional_email?: string | null;
+  email_available?: boolean;
 };
 type DraftContext = {
   person: PeopleRecommendation;
@@ -64,6 +88,10 @@ function safePeopleError(error: unknown, fallback: string): string {
   if (error.code === "auth_expired") {
     return "Your session has expired. Sign in again before loading people recommendations.";
   }
+  if (error.serverCode === "PEOPLE_EMPLOYMENT_REVALIDATION_REQUIRED") {
+    // Specific, and actionable: refreshing the search re-validates employment.
+    return "This contact's current employment needs to be re-checked before drafting a message. Refresh people and try again.";
+  }
   return fallback;
 }
 
@@ -88,29 +116,24 @@ function availabilityMessage(data: PeopleResponse): string | null {
   return "People recommendations are not enabled for this account.";
 }
 
+/**
+ * Every message names the real cause. The old catch-all "temporarily paused
+ * after repeated provider failures" line is gone: it was shown for empty
+ * results, unresolved domains, and per-user budgets, none of which are outages.
+ */
 function providerFailureMessage(data: PeopleResponse): string {
-  const messages: Record<string, string> = {
-    provider_unauthorized: "The people data provider credentials could not be verified.",
-    provider_forbidden: "The configured provider account does not have access to people search.",
-    provider_master_key_required_or_forbidden:
-      "Apollo complete-profile access is unavailable for the configured account.",
-    provider_rate_limited: "The people data provider rate limit has been reached.",
-    provider_timeout: "The people search provider took too long to respond.",
-    provider_circuit_open: "People search is temporarily paused after repeated provider failures.",
-    provider_schema_error: "The people provider returned an unsupported response.",
-    provider_request_invalid: "The people provider could not accept the profile request.",
-    provider_response_invalid: "The people provider returned an unsupported response.",
-    recommendation_commit_failed:
-      "JobPilot found potential contacts but could not save the results. No additional search will run unless you retry."
-  };
-  const message = messages[data.availability_reason ?? ""] ??
-    "The professional data provider is temporarily unavailable. You can safely retry later.";
-  if (
-    data.availability_reason === "provider_circuit_open" &&
-    data.retry_eligible !== false &&
-    data.retry_after_seconds
-  ) {
-    return `${message} Retry is available in about ${data.retry_after_seconds} seconds.`;
+  const view = derivePeopleView({
+    data,
+    error: null,
+    loading: false,
+    requested: true
+  });
+  const message =
+    data.availability_reason === "recommendation_commit_failed"
+      ? PEOPLE_MESSAGES.persistence_error
+      : view.message || PEOPLE_MESSAGES.provider_unavailable;
+  if (view.state === "rate_limited" && view.retryAfterSeconds) {
+    return `${message} Retry in about ${view.retryAfterSeconds} seconds.`;
   }
   return message;
 }
@@ -138,22 +161,32 @@ function hasResults(data: PeopleResponse | null): data is PeopleResponse {
 function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   const [data, setData] = useState<PeopleResponse | null>(() => getCachedPeople(jobId));
   const [error, setError] = useState("");
+  const [errorValue, setErrorValue] = useState<unknown>(null);
   const [errorCanRetry, setErrorCanRetry] = useState(true);
   const [loading, setLoading] = useState(loadOnMount);
   const [discovering, setDiscovering] = useState(false);
   const [actionId, setActionId] = useState<number | null>(null);
   const [draft, setDraft] = useState<OutreachDraftData | null>(null);
   const [draftContext, setDraftContext] = useState<DraftContext | null>(null);
+  // Guards against a double-click or a rerender starting a second request.
   const discoveryInFlight = useRef(false);
+  // Abort obsolete work when the card unmounts or the job it renders changes.
+  const abortRef = useRef<AbortController | null>(null);
+
+  const isCancelled = (value: unknown) =>
+    value instanceof ApiError && value.code === "request_cancelled";
 
   const load = useCallback(async (force = true) => {
     setLoading(true);
     setError("");
+    setErrorValue(null);
     try {
-      const response = await loadPeople(jobId, force);
+      const response = await loadPeople(jobId, force, abortRef.current?.signal);
       setData(response);
       return response;
     } catch (loadError) {
+      if (isCancelled(loadError)) return null;
+      setErrorValue(loadError);
       setErrorCanRetry(peopleErrorCanRetry(loadError));
       setError(
         safePeopleError(
@@ -168,63 +201,61 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   }, [jobId]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    abortRef.current = controller;
     const unsubscribe = subscribeToPeople(jobId, setData);
     const loadTimer = loadOnMount
       ? window.setTimeout(() => void load(true), 0)
       : null;
     return () => {
       unsubscribe();
+      controller.abort();
       if (loadTimer !== null) window.clearTimeout(loadTimer);
     };
   }, [jobId, loadOnMount, load]);
 
-  const discover = useCallback(async () => {
+  const runDiscovery = useCallback(async (
+    call: (signal?: AbortSignal) => Promise<PeopleResponse>,
+    fallbackMessage: string
+  ) => {
     if (discoveryInFlight.current) return null;
     discoveryInFlight.current = true;
     setDiscovering(true);
     setError("");
+    setErrorValue(null);
     try {
-      const response = await discoverPeople(jobId);
+      const response = await call(abortRef.current?.signal);
       setData(response);
       return response;
     } catch (discoverError) {
+      if (isCancelled(discoverError)) return null;
+      setErrorValue(discoverError);
       setErrorCanRetry(peopleErrorCanRetry(discoverError));
-      setError(
-        safePeopleError(
-          discoverError,
-          "People discovery could not be completed. Please try again."
-        )
-      );
+      setError(safePeopleError(discoverError, fallbackMessage));
       return null;
     } finally {
       discoveryInFlight.current = false;
       setDiscovering(false);
     }
-  }, [jobId]);
+  }, []);
 
-  const broaden = useCallback(async () => {
-    if (discoveryInFlight.current) return null;
-    discoveryInFlight.current = true;
-    setDiscovering(true);
-    setError("");
-    try {
-      const response = await broadenPeople(jobId);
-      setData(response);
-      return response;
-    } catch (broadenError) {
-      setErrorCanRetry(peopleErrorCanRetry(broadenError));
-      setError(
-        safePeopleError(
-          broadenError,
-          "The controlled broader search could not be completed. Please try again."
-        )
-      );
-      return null;
-    } finally {
-      discoveryInFlight.current = false;
-      setDiscovering(false);
-    }
-  }, [jobId]);
+  const discover = useCallback(
+    () =>
+      runDiscovery(
+        (signal) => discoverPeople(jobId, signal),
+        "People discovery could not be completed. Please try again."
+      ),
+    [jobId, runDiscovery]
+  );
+
+  const broaden = useCallback(
+    () =>
+      runDiscovery(
+        (signal) => broadenPeople(jobId, signal),
+        "The controlled broader search could not be completed. Please try again."
+      ),
+    [jobId, runDiscovery]
+  );
 
   const personAction = useCallback(async (person: PeopleRecommendation, action: PersonAction) => {
     setActionId(person.recommendation_id);
@@ -328,6 +359,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   return {
     data,
     error,
+    errorValue,
     errorCanRetry,
     loading,
     discovering,
@@ -344,11 +376,45 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
   };
 }
 
+/** Every terminal failure status. Kept in one place so a new state cannot be
+ * missed by one of the checks below. */
+const PEOPLE_FAILURE_STATUSES: readonly string[] = [
+  "provider_unavailable",
+  "persistence_error",
+  "domain_unresolved",
+  "invalid_request",
+  "user_budget_exhausted",
+  "provider_budget_exhausted",
+  "provider_configuration_error"
+];
+
 export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
   const titleId = useId();
   const controller = usePeopleController(jobId, true);
   const { data, error, errorCanRetry, loading, discovering } = controller;
   const availableMessage = data ? availabilityMessage(data) : null;
+  const view = derivePeopleView({
+    data,
+    error: controller.errorValue,
+    loading: loading || discovering,
+    requested: Boolean(data && data.status !== "not_started")
+  });
+  // Reading the allowance never spends it, so it can be shown at any time.
+  const quota = data?.quota;
+  const resetLabel = formatResetTime(quota?.resets_at);
+  const hasSearched = Boolean(data && data.status !== "not_started");
+  const quotaLine = quota
+    ? hasSearched && quota.daily_remaining > 0 && resetLabel
+      ? `${quota.daily_remaining} searches remaining · Resets ${resetLabel}.`
+      : quotaSummary(quota)
+    : null;
+  const counts = hasResults(data)
+    ? [
+        countLabel(data.categories.likely_recruiters.length, "recruiter"),
+        countLabel(data.categories.potential_hiring_managers.length, "potential manager"),
+        countLabel(data.categories.potential_referrers.length, "referral candidate")
+      ].join(" · ")
+    : "";
   const canDiscover =
     data?.availability_reason !== "not_in_rollout" &&
     data?.status !== "disabled" &&
@@ -356,7 +422,7 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
       data?.status === "not_started" ||
       data?.status === "stale" ||
       (
-        ["provider_unavailable", "persistence_error"].includes(data?.status ?? "") &&
+        PEOPLE_FAILURE_STATUSES.includes(data?.status ?? "") &&
         data?.retry_eligible !== false
       )
     );
@@ -384,6 +450,10 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
             Evidence-based professional contacts to research. Roles are potential matches, not
             confirmed assignments. You choose whether and how to contact anyone.
           </p>
+          {counts ? (
+            <p className="mt-2 text-xs font-medium text-[var(--text-secondary)]">{counts}</p>
+          ) : null}
+          {quotaLine ? <p className="mt-2 text-xs text-[var(--text-muted)]">{quotaLine}</p> : null}
         </div>
         {canDiscover || canBroaden ? (
           <Button
@@ -396,7 +466,7 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
                 ? "Broaden search"
                 : data?.status === "stale"
                   ? "Refresh people"
-                  : ["provider_unavailable", "persistence_error"].includes(data?.status ?? "")
+                  : PEOPLE_FAILURE_STATUSES.includes(data?.status ?? "")
                     ? "Retry discovery"
                   : "Find people"}
           </Button>
@@ -421,7 +491,7 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
             ) : null}
           </div>
         ) : null}
-        {!["provider_unavailable", "persistence_error"].includes(data?.status ?? "") ? data?.warnings.map((warning) => (
+        {!PEOPLE_FAILURE_STATUSES.includes(data?.status ?? "") ? data?.warnings.map((warning) => (
           <p key={warning} className="mb-2 text-sm text-amber-800">{warning}</p>
         )) : null}
         {data?.status === "not_started" ? (
@@ -429,23 +499,34 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
             Find recruiters and referral candidates. Discovery runs only when you choose Find people.
           </p>
         ) : null}
+        {view.cached && view.state !== "loading" ? (
+          <p className="mb-2 text-xs text-[var(--text-muted)]">
+            Showing previously saved results while the people provider is unavailable.
+          </p>
+        ) : null}
+        {view.state === "partial" ? (
+          <p className="mb-2 text-xs text-[var(--text-muted)]">{view.message}</p>
+        ) : null}
         {data?.status === "no_reliable_matches" ? (
           <div>
+            {/* A truthful empty answer, led by the neutral summary and followed
+             * by what each category actually returned. */}
+            <p className="mb-2 text-sm text-[var(--text-muted)]">{PEOPLE_MESSAGES.empty}</p>
             <EmptyPeopleCategories />
             {canBroaden ? (
-              <p className="mt-3 text-xs text-[var(--text-muted)]">
-                Broaden search is optional and bounded. It may include broader titles or
-                evidence-backed related-company matches.
-              </p>
+              <>
+                <p className="mt-3 text-xs text-[var(--text-muted)]">
+                  Broaden search is optional and bounded. It may include broader titles or
+                  evidence-backed related-company matches.
+                </p>
+                <p className="mt-1 text-xs font-medium text-[var(--text-secondary)]">
+                  Broaden search uses {quota?.broadened_search_cost ?? 1} additional people search.
+                </p>
+              </>
             ) : null}
           </div>
         ) : null}
-        {data?.status === "provider_unavailable" ? (
-          <p className="text-sm text-[var(--text-muted)]">
-            {providerFailureMessage(data)}
-          </p>
-        ) : null}
-        {data?.status === "persistence_error" ? (
+        {data && PEOPLE_FAILURE_STATUSES.includes(data.status) ? (
           <p className="text-sm text-[var(--text-muted)]">
             {providerFailureMessage(data)}
           </p>
@@ -521,186 +602,6 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
   );
 }
 
-export function PeopleWhoCanHelpSummary({
-  jobId,
-  onViewAll
-}: {
-  jobId: JobId;
-  onViewAll: () => void;
-}) {
-  const titleId = useId();
-  const [expanded, setExpanded] = useState(false);
-  const controller = usePeopleController(jobId, false);
-  const { data, error, errorCanRetry, loading, discovering } = controller;
-  const resultsAvailable = hasResults(data);
-  const availableMessage = data ? availabilityMessage(data) : null;
-
-  async function loadOnly(force: boolean) {
-    setExpanded(true);
-    if (!data || force) await controller.load(force);
-  }
-
-  async function activate() {
-    if (expanded) {
-      setExpanded(false);
-      return;
-    }
-    await loadOnly(false);
-  }
-
-  const counts = data
-    ? [
-        countLabel(data.categories.likely_recruiters.length, "recruiter"),
-        countLabel(data.categories.potential_hiring_managers.length, "potential manager"),
-        countLabel(data.categories.potential_referrers.length, "referral candidate")
-      ].join(" · ")
-    : "";
-
-  const compactPeople = data
-    ? [
-        ...data.categories.likely_recruiters.slice(0, 2),
-        ...data.categories.potential_hiring_managers.slice(0, 2),
-        ...data.categories.potential_referrers.slice(0, 2)
-      ]
-    : [];
-
-  return (
-    <section aria-labelledby={titleId} className="mt-4 rounded-xl border border-line bg-panel/30 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Users className="h-4 w-4 text-pine" />
-            <h3 id={titleId} className="text-sm font-semibold">People Who Can Help</h3>
-            {data?.beta ? (
-              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-900">
-                Beta
-              </span>
-            ) : null}
-          </div>
-          <p className="mt-1 text-sm text-[var(--text-muted)]">
-            Find relevant recruiters, hiring-team members, and potential referrals.
-          </p>
-          {resultsAvailable ? (
-            <p className="mt-2 text-xs font-medium text-[var(--text-secondary)]">{counts}</p>
-          ) : null}
-        </div>
-        <Button
-          variant="secondary"
-          aria-expanded={expanded}
-          onClick={() => void activate()}
-          disabled={loading || discovering}
-        >
-          {loading || discovering
-            ? "Loading people…"
-            : expanded
-              ? "Hide people"
-              : "View people"}
-        </Button>
-      </div>
-
-      {expanded ? (
-        <div aria-live="polite" className="mt-4 border-t border-line/70 pt-4">
-          {availableMessage ? <p className="text-sm text-[var(--text-muted)]">{availableMessage}</p> : null}
-          {error ? (
-            <div>
-              <p role="alert" className="text-sm text-red-700">{error}</p>
-              {errorCanRetry ? (
-                <Button variant="secondary" className="mt-3" onClick={() => void loadOnly(true)}>
-                  Retry
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {data?.status === "provider_unavailable" && data.retry_eligible !== false ? (
-            <StateWithRetry
-              text={providerFailureMessage(data)}
-              onRetry={() => void controller.discover()}
-            />
-          ) : null}
-          {data?.status === "provider_unavailable" && data.retry_eligible === false ? (
-            <p className="text-sm text-[var(--text-muted)]">
-              {providerFailureMessage(data)}
-            </p>
-          ) : null}
-          {data?.status === "persistence_error" && data.retry_eligible !== false ? (
-            <StateWithRetry
-              text={providerFailureMessage(data)}
-              onRetry={() => void controller.discover()}
-              label="Retry discovery"
-            />
-          ) : null}
-          {data?.status === "persistence_error" && data.retry_eligible === false ? (
-            <p className="text-sm text-[var(--text-muted)]">
-              {providerFailureMessage(data)}
-            </p>
-          ) : null}
-          {data?.status === "stale" && !discovering ? (
-            <StateWithRetry
-              text={
-                data.warnings[0] ??
-                "Contact discovery has been upgraded. Refresh to check again."
-              }
-              onRetry={() => void controller.discover()}
-              label="Refresh people"
-            />
-          ) : null}
-          {loading && !data ? (
-            <p className="text-sm text-[var(--text-muted)]">Checking for saved results…</p>
-          ) : null}
-          {data?.status === "no_reliable_matches" ? (
-            <div>
-              <EmptyPeopleCategories />
-              {data.search_scope?.broaden_eligible ? (
-                <>
-                  <p className="mt-3 text-xs text-[var(--text-muted)]">
-                    A controlled broader search may include broader titles or
-                    evidence-backed related-company matches.
-                  </p>
-                  <Button
-                    variant="secondary"
-                    className="mt-3"
-                    onClick={() => void controller.broaden()}
-                    disabled={discovering}
-                  >
-                    Broaden search
-                  </Button>
-                </>
-              ) : null}
-            </div>
-          ) : null}
-          {data?.status === "not_started" && !discovering ? (
-            <StateWithRetry
-              text="Find recruiters and referral candidates for this job."
-              onRetry={() => void controller.discover()}
-              label="Find people"
-            />
-          ) : null}
-          {discovering || data?.status === "in_progress" ? (
-            <p className="text-sm text-[var(--text-muted)]">Finding reliable professional matches…</p>
-          ) : null}
-          {compactPeople.length ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {compactPeople.map((person) => (
-                <CompactPerson
-                  key={person.recommendation_id}
-                  person={person}
-                  busy={controller.actionId === person.recommendation_id}
-                  emailEnabled={Boolean(data?.controls.email_discovery)}
-                  onEmail={() => void controller.personAction(person, "email")}
-                />
-              ))}
-            </div>
-          ) : null}
-          {resultsAvailable ? (
-            <Button variant="secondary" className="mt-4" onClick={onViewAll}>
-              View all people
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
 
 function EmptyPeopleCategories() {
   return (
@@ -712,78 +613,6 @@ function EmptyPeopleCategories() {
   );
 }
 
-function StateWithRetry({
-  text,
-  onRetry,
-  label = "Retry discovery"
-}: {
-  text: string;
-  onRetry: () => void;
-  label?: string;
-}) {
-  return (
-    <div>
-      <p className="text-sm text-[var(--text-muted)]">{text}</p>
-      <Button variant="secondary" className="mt-3" onClick={onRetry}>{label}</Button>
-    </div>
-  );
-}
-
-function CompactPerson({
-  person,
-  busy,
-  emailEnabled,
-  onEmail
-}: {
-  person: PeopleRecommendation;
-  busy: boolean;
-  emailEnabled: boolean;
-  onEmail: () => void;
-}) {
-  const profileUrl = safeExternalUrl(person.professional_profile_url);
-  return (
-    <article className="rounded-lg border border-line bg-white p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-        {person.category_label}
-      </p>
-      <h4 className="mt-1 font-semibold">{person.full_name}</h4>
-      <p className="text-sm text-[var(--text-secondary)]">{person.current_title}</p>
-      <p className="mt-1 text-xs text-[var(--text-muted)]">
-        Current employment confidence: {Math.round(person.current_employment_confidence * 100)}%
-        {checkedDate(person.employment_last_verified_at)
-          ? ` · verified ${checkedDate(person.employment_last_verified_at)}`
-          : ""}
-      </p>
-      {person.employment_warning ? (
-        <p className="mt-2 text-sm text-amber-800">{person.employment_warning}</p>
-      ) : null}
-      <EmailState person={person} />
-      <div className="mt-3 flex flex-wrap gap-2">
-        {profileUrl ? (
-          <a
-            className="inline-flex items-center gap-1 rounded-md border border-line px-3 py-2 text-sm"
-            href={profileUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            LinkedIn profile <ExternalLink className="h-4 w-4" />
-          </a>
-        ) : null}
-        {emailEnabled && person.email_lookup_allowed &&
-        ["not_requested", "provider_error", "provider_unavailable"].includes(person.email_status) ? (
-          <button
-            className="rounded-md border border-line px-3 py-2 text-sm"
-            disabled={busy}
-            onClick={onEmail}
-          >
-            <Mail className="mr-1 inline h-4 w-4" />
-            {person.email_status === "provider_error" ? "Retry work email" : "Find work email"}
-          </button>
-        ) : null}
-      </div>
-    </article>
-  );
-}
 
 function PersonCard({
   person,
@@ -853,12 +682,12 @@ function PersonCard({
         ) : null}
         {outreachEnabled ? (
           <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person, "linkedin_message")}>
-            <MessageSquareText className="mr-1 inline h-4 w-4" /> Draft LinkedIn message
+            <MessageSquareText className="mr-1 inline h-4 w-4" /> Create LinkedIn draft
           </button>
         ) : null}
         {outreachEnabled ? (
           <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person, "email")}>
-            <Mail className="mr-1 inline h-4 w-4" /> Draft email
+            <Mail className="mr-1 inline h-4 w-4" /> Create email draft
           </button>
         ) : null}
         <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} aria-pressed={person.saved} onClick={() => void onAction(person, person.saved ? "unsave" : "save")}>
@@ -932,18 +761,54 @@ function OutreachDraft({
     guidance?: string
   ) => Promise<void>;
 }) {
+  const [copied, setCopied] = useState<"subject" | "body" | null>(null);
+
   if (!draft || !context) return null;
+
   const close = () => {
     setDraft(null);
     setContext(null);
+    setCopied(null);
   };
+
+  // Both handoff targets come from the backend's verified fields. Nothing here
+  // constructs a profile URL or an address from a name or a company domain.
+  const linkedInUrl = safeLinkedInUrl(
+    draft.linkedin_url ?? context.person.professional_profile_url
+  );
+  const emailAddress = safeEmailAddress(
+    draft.professional_email ?? context.person.professional_email
+  );
+  const isEmail = draft.message_type === "email";
+  const recipient = draft.recipient_name ?? context.person.full_name;
+  const channelLabel = isEmail
+    ? "Email"
+    : draft.message_type === "linkedin_connection_note"
+      ? "LinkedIn connection note"
+      : "LinkedIn message";
+
+  async function copy(kind: "subject" | "body", value: string) {
+    const ok = await copyText(value);
+    setCopied(ok ? kind : null);
+  }
+
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="outreach-draft-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-xl rounded-xl bg-[var(--surface)] p-5 shadow-xl">
+      <div className="max-h-full w-full max-w-xl overflow-y-auto rounded-xl bg-[var(--surface)] p-5 shadow-xl">
         <div className="flex items-center justify-between">
-          <h3 id="outreach-draft-title" className="text-lg font-semibold">Review outreach draft</h3>
+          <div>
+            <h3 id="outreach-draft-title" className="text-lg font-semibold">Review outreach draft</h3>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
+              {channelLabel} to {recipient}
+            </p>
+          </div>
           <button aria-label="Close outreach draft" onClick={close}><X /></button>
         </div>
+        {draft.generation_path === "deterministic_template" ? (
+          <p className="mt-2 text-xs text-[var(--text-muted)]">
+            Generated from a verified template.
+          </p>
+        ) : null}
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <label className="text-sm">
             Tone
@@ -973,15 +838,24 @@ function OutreachDraft({
           </label>
         </div>
         {draft.subject !== null ? (
-          <label className="mt-4 block text-sm">
-            Subject
-            <input
-              aria-label="Outreach subject"
-              className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] p-2"
-              value={draft.subject}
-              onChange={(event) => setDraft({ ...draft, subject: event.target.value })}
-            />
-          </label>
+          <div className="mt-4">
+            <label className="block text-sm">
+              Subject
+              <input
+                aria-label="Outreach subject"
+                className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--input-background)] p-2"
+                value={draft.subject}
+                onChange={(event) => setDraft({ ...draft, subject: event.target.value })}
+              />
+            </label>
+            <Button
+              variant="secondary"
+              className="mt-2"
+              onClick={() => void copy("subject", draft.subject ?? "")}
+            >
+              <Copy className="h-4 w-4" /> {copied === "subject" ? "Subject copied" : "Copy subject"}
+            </Button>
+          </div>
         ) : null}
         <textarea
           aria-label="Outreach draft"
@@ -993,8 +867,41 @@ function OutreachDraft({
             character_count: event.target.value.length
           })}
         />
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-          <span className="text-xs text-[var(--text-muted)]">{draft.character_count} characters</span>
+        <p className="mt-1 text-xs text-[var(--text-muted)]">{draft.character_count} characters</p>
+
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-[var(--border)] pt-4">
+          <Button variant="secondary" onClick={() => void copy("body", draft.body)}>
+            <Copy className="h-4 w-4" /> {copied === "body" ? "Message copied" : "Copy message"}
+          </Button>
+          {isEmail ? (
+            <Button
+              variant="secondary"
+              disabled={!emailAddress}
+              onClick={() => {
+                if (!emailAddress) return;
+                openMailClient(
+                  buildMailtoUrl({
+                    address: emailAddress,
+                    subject: draft.subject,
+                    body: draft.body
+                  })
+                );
+              }}
+            >
+              <Mail className="h-4 w-4" /> Open email app
+            </Button>
+          ) : (
+            <Button
+              variant="secondary"
+              disabled={!linkedInUrl}
+              onClick={() => {
+                if (!linkedInUrl) return;
+                openExternal(linkedInUrl);
+              }}
+            >
+              <ExternalLink className="h-4 w-4" /> Open LinkedIn
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={() => void regenerate(
@@ -1006,7 +913,19 @@ function OutreachDraft({
           >
             Regenerate draft
           </Button>
+          <Button variant="secondary" onClick={close}>Close</Button>
         </div>
+        {isEmail && !emailAddress ? (
+          <p className="mt-2 text-sm text-amber-800">
+            Verified email unavailable. You can still copy this message and send it yourself.
+          </p>
+        ) : null}
+        {!isEmail && !linkedInUrl ? (
+          <p className="mt-2 text-sm text-amber-800">
+            LinkedIn profile URL is unavailable for this contact. You can still copy this message.
+          </p>
+        ) : null}
+
         {draft.facts_used.length ? (
           <p className="mt-3 text-xs text-[var(--text-muted)]">
             Grounded in: {draft.facts_used.join("; ")}
