@@ -2,28 +2,33 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle,
   ArrowLeft,
+  ArrowRight,
   Banknote,
   Bookmark,
   BookmarkCheck,
   Briefcase,
   Building2,
   CalendarDays,
+  Check,
   ChevronLeft,
   ChevronRight,
+  CircleAlert,
+  Download,
   ExternalLink,
   FileText,
   Loader2,
   Mail,
   MapPin,
+  Sparkles,
   X
 } from "lucide-react";
 import type { GeneratedDocument, Job } from "@/lib/api";
 import { getScoreDisplay } from "@/lib/fitScore";
+import { buildFitInsights } from "@/lib/fitInsights";
 import { CompanyLogo } from "@/components/CompanyLogo";
 import { PeopleWhoCanHelp } from "@/components/PeopleWhoCanHelp";
-import { FitBadge, Meta, SourceBadge } from "@/components/jobs/badges";
+import { FitBadge, Meta, SalaryChip, SourceBadge } from "@/components/jobs/badges";
 import { AssistedApplyButton } from "@/components/jobs/ApplyButton";
 import {
   capitalize,
@@ -37,28 +42,28 @@ import {
 import type { DocType } from "@/components/jobs/documents";
 import type { TrackerStatus } from "@/components/TrackerClient";
 
+/**
+ * Four sections, not five: a tailored resume and its cover letter are one task
+ * ("get my application materials ready"), and splitting them produced two thin
+ * tabs that each held a single button.
+ */
 export const DETAIL_TABS = [
   { id: "overview", label: "Overview" },
   { id: "description", label: "Job description" },
-  { id: "resume", label: "Resume" },
-  { id: "cover_letter", label: "Cover letter" },
+  { id: "materials", label: "Application materials" },
   { id: "networking", label: "Networking" }
 ] as const;
 
 export type DetailTab = (typeof DETAIL_TABS)[number]["id"];
 
-export function isDetailTab(value: string | null | undefined): value is DetailTab {
-  return DETAIL_TABS.some((tab) => tab.id === value);
-}
-
 const TRACKER_LABELS: Record<TrackerStatus, string> = {
-  saved: "Saved to tracker",
+  saved: "Saved",
   ready_to_apply: "Ready to apply",
-  applying: "Application in progress",
+  applying: "Applying",
   applied: "Applied",
-  interview: "Interview stage",
+  interview: "Interview",
   offer: "Offer",
-  rejected: "Closed — rejected"
+  rejected: "Closed"
 };
 
 export function JobDetailPanel({
@@ -109,15 +114,15 @@ export function JobDetailPanel({
   if (!job) {
     return (
       <DetailShell onClose={onClose}>
-        <div className="rounded-xl border border-line bg-white p-6">
+        <div className="rounded-2xl border border-line bg-white p-8">
           <h2 className="text-lg font-semibold">This job is not available</h2>
-          <p className="mt-2 text-sm text-[var(--text-muted)]">
+          <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
             {error || "It may have been withdrawn by the employer, or it is outside your current filters."}
           </p>
           <button
             type="button"
             onClick={onClose}
-            className="focus-ring mt-4 inline-flex h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-medium"
+            className="focus-ring mt-5 inline-flex h-10 items-center gap-2 rounded-lg border border-line bg-white px-4 text-sm font-medium"
           >
             <ArrowLeft className="h-4 w-4" /> Back to jobs
           </button>
@@ -146,35 +151,30 @@ export function JobDetailPanel({
         onTabChange={onTabChange}
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <div className="mx-auto w-full max-w-[860px] px-5 pb-24 pt-6 sm:px-8 lg:pb-10">
+      {/* The single scroll region for the detail side. Sections inside it never
+        * introduce a scroller of their own, and horizontal overflow is clipped
+        * so a stray wide element cannot add a second bar. */}
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
+        <div className="mx-auto w-full max-w-[820px] px-6 pb-28 pt-7 sm:px-9 lg:pb-14">
           {error && (
-            <p role="alert" className="mb-6 rounded-lg border border-[var(--danger-border)] bg-[var(--danger-surface)] px-3 py-2 text-sm text-[var(--danger)]">
+            <p
+              role="alert"
+              className="mb-7 rounded-lg border border-[var(--danger-border)] bg-[var(--danger-surface)] px-3.5 py-2.5 text-sm text-[var(--danger)]"
+            >
               {error}
             </p>
           )}
           <TabPanel id="overview" tab={tab}>
-            <OverviewTab job={job} salary={salary} posted={posted} trackerStatus={trackerStatus} />
+            <OverviewTab job={job} trackerStatus={trackerStatus} onTabChange={onTabChange} />
           </TabPanel>
           <TabPanel id="description" tab={tab}>
             <DescriptionTab job={job} posted={posted} />
           </TabPanel>
-          <TabPanel id="resume" tab={tab}>
-            <DocumentTab
-              type="resume"
+          <TabPanel id="materials" tab={tab}>
+            <MaterialsTab
               job={job}
               generating={generating}
-              document={documents.resume}
-              onGenerate={onGenerate}
-              onPreview={onPreviewDocument}
-            />
-          </TabPanel>
-          <TabPanel id="cover_letter" tab={tab}>
-            <DocumentTab
-              type="cover_letter"
-              job={job}
-              generating={generating}
-              document={documents.cover_letter}
+              documents={documents}
               onGenerate={onGenerate}
               onPreview={onPreviewDocument}
             />
@@ -188,12 +188,12 @@ export function JobDetailPanel({
       </div>
 
       {/* Mobile keeps the primary action reachable without scrolling back up. */}
-      <div className="sticky bottom-0 z-10 flex items-center gap-2 border-t border-line bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
+      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-[var(--background)] px-4 py-3 lg:hidden">
         <AssistedApplyButton url={job.application_url} onApply={onApply} />
         <button
           type="button"
           onClick={onSave}
-          className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-medium"
+          className="focus-ring inline-flex h-10 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm font-medium"
         >
           {trackerStatus ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
           {trackerStatus ? "Saved" : "Save"}
@@ -206,17 +206,17 @@ export function JobDetailPanel({
 function DetailShell({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-2 border-b border-line px-5 py-3">
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-5 py-3">
         <button
           type="button"
           onClick={onClose}
           aria-label="Close job details"
-          className="focus-ring inline-flex h-9 items-center gap-2 rounded-md px-2 text-sm text-[var(--text-muted)] hover:bg-panel"
+          className="focus-ring inline-flex h-9 items-center gap-2 rounded-lg px-2 text-sm text-[var(--text-muted)] hover:bg-panel"
         >
           <ArrowLeft className="h-4 w-4" /> Back to jobs
         </button>
       </div>
-      <div className="mx-auto w-full max-w-[860px] px-5 py-8 sm:px-8">{children}</div>
+      <div className="mx-auto w-full max-w-[820px] px-6 py-10 sm:px-9">{children}</div>
     </div>
   );
 }
@@ -250,17 +250,19 @@ function DetailHeader({
 }) {
   return (
     <header className="shrink-0 border-b border-line bg-[var(--background)]">
-      <div className="mx-auto w-full max-w-[860px] px-5 pt-4 sm:px-8">
-        <div className="flex items-center justify-between gap-3">
+      <div className="mx-auto w-full max-w-[820px] px-6 pt-3 sm:px-9">
+        <div className="flex h-9 items-center justify-between gap-3">
           <button
             type="button"
             onClick={onClose}
-            className="focus-ring inline-flex h-9 items-center gap-2 rounded-md px-2 text-sm text-[var(--text-muted)] hover:bg-panel lg:hidden"
+            className="focus-ring -ml-2 inline-flex h-9 items-center gap-1.5 rounded-lg px-2 text-sm text-[var(--text-muted)] hover:bg-panel lg:hidden"
           >
             <ArrowLeft className="h-4 w-4" /> Back to jobs
           </button>
           <div className="hidden items-center gap-1 lg:flex">
-            {position && <span className="mr-2 text-xs text-[var(--text-muted)]">{position}</span>}
+            {position && (
+              <span className="mr-1.5 text-xs tabular-nums text-[var(--text-muted)]">{position}</span>
+            )}
             <IconButton label="Previous job" onClick={onPrevious}>
               <ChevronLeft className="h-4 w-4" />
             </IconButton>
@@ -273,28 +275,29 @@ function DetailHeader({
           </IconButton>
         </div>
 
-        <div className="mt-3 flex items-start gap-4">
+        <div className="mt-2 flex items-start gap-4">
           <CompanyLogo
             company={job.company}
             logoUrl={job.company_logo_url}
             proxyPath={job.company_logo_proxy_path}
             companyDomain={job.company_domain}
-            size={52}
+            size={48}
           />
           <div className="min-w-0 flex-1">
-            <h1 className="text-2xl font-semibold leading-tight tracking-tight text-ink sm:text-[1.75rem]">
+            <h1 className="text-[1.6rem] font-semibold leading-tight tracking-[-0.02em] text-ink sm:text-[1.75rem]">
               {job.title}
             </h1>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--text-secondary)]">
-              <span className="font-medium">{job.company}</span>
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
+              <span className="font-medium text-[var(--text-secondary)]">{job.company}</span>
               <SourceBadge source={job.source} />
               {trackerStatus && (
-                <span className="rounded-full bg-[var(--success-surface)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
+                <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-surface)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
+                  <Check className="h-3 w-3" aria-hidden />
                   {TRACKER_LABELS[trackerStatus]}
                 </span>
               )}
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[var(--text-muted)]">
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[var(--text-muted)]">
               {job.location && <Meta icon={<MapPin className="h-3.5 w-3.5" />}>{job.location}</Meta>}
               {showsWorkplaceType(job.workplace_type, job.location) && (
                 <Meta icon={<Building2 className="h-3.5 w-3.5" />}>{capitalize(job.workplace_type!)}</Meta>
@@ -303,10 +306,9 @@ function DetailHeader({
                 <Meta icon={<Briefcase className="h-3.5 w-3.5" />}>{formatEmployment(job.employment_type)}</Meta>
               )}
               {posted && <Meta icon={<CalendarDays className="h-3.5 w-3.5" />}>{posted}</Meta>}
-              {salary && <Meta icon={<Banknote className="h-3.5 w-3.5" />}>{salary}</Meta>}
             </div>
           </div>
-          <div className="hidden sm:block">
+          <div className="hidden shrink-0 sm:block">
             <FitBadge
               score={job.match?.fit_score ?? null}
               label={job.match?.fit_label ?? null}
@@ -315,16 +317,21 @@ function DetailHeader({
           </div>
         </div>
 
-        <div className="mt-4 hidden flex-wrap items-center gap-2 lg:flex">
-          <AssistedApplyButton url={job.application_url} onApply={onApply} size="lg" />
-          <button
-            type="button"
-            onClick={onSave}
-            className="focus-ring inline-flex h-11 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-medium text-[var(--text-secondary)] hover:bg-panel"
-          >
-            {trackerStatus ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
-            {trackerStatus ? "Saved" : "Save"}
-          </button>
+        <div className="mt-4 flex flex-wrap items-center gap-2.5">
+          <div className="hidden flex-wrap items-center gap-2.5 lg:flex">
+            <AssistedApplyButton url={job.application_url} onApply={onApply} size="lg" />
+            <button
+              type="button"
+              onClick={onSave}
+              className="focus-ring inline-flex h-11 items-center gap-2 rounded-lg border border-line bg-white px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-panel"
+            >
+              {trackerStatus ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+              {trackerStatus ? "Saved" : "Save"}
+            </button>
+          </div>
+          {/* Compensation is a decision factor, so it sits with the primary
+            * actions — and disappears entirely when the employer published none. */}
+          {salary && <SalaryChip value={salary} size="lg" />}
         </div>
 
         <DetailTabs tab={tab} onTabChange={onTabChange} />
@@ -349,7 +356,7 @@ function IconButton({
       title={label}
       disabled={!onClick}
       onClick={() => onClick?.()}
-      className="focus-ring inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--text-muted)] hover:bg-panel disabled:opacity-40"
+      className="focus-ring inline-flex h-9 w-9 items-center justify-center rounded-lg text-[var(--text-muted)] transition-colors hover:bg-panel hover:text-[var(--text-secondary)] disabled:pointer-events-none disabled:opacity-35"
     >
       {children}
     </button>
@@ -378,7 +385,7 @@ function DetailTabs({ tab, onTabChange }: { tab: DetailTab; onTabChange: (tab: D
       role="tablist"
       aria-label="Job sections"
       onKeyDown={onKeyDown}
-      className="-mx-5 mt-4 flex gap-1 overflow-x-auto px-5 sm:-mx-8 sm:px-8"
+      className="scroll-strip -mx-6 mt-5 flex gap-6 overflow-x-auto px-6 sm:-mx-9 sm:px-9"
     >
       {DETAIL_TABS.map((item) => {
         const active = item.id === tab;
@@ -395,7 +402,7 @@ function DetailTabs({ tab, onTabChange }: { tab: DetailTab; onTabChange: (tab: D
             aria-controls={`job-panel-${item.id}`}
             tabIndex={active ? 0 : -1}
             onClick={() => onTabChange(item.id)}
-            className={`focus-ring whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${
+            className={`focus-ring -mb-px whitespace-nowrap border-b-2 pb-2.5 pt-1 text-sm font-medium transition-colors ${
               active
                 ? "border-pine text-pine"
                 : "border-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
@@ -430,171 +437,204 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-8 first:mt-0">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">{title}</h2>
-      {description && <p className="mt-1 text-sm text-[var(--text-muted)]">{description}</p>}
-      <div className="mt-3">{children}</div>
+    <section className="mt-10 first:mt-0">
+      <h2 className="text-[13px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">{title}</h2>
+      {description && <p className="mt-1.5 text-sm leading-6 text-[var(--text-muted)]">{description}</p>}
+      <div className="mt-3.5">{children}</div>
     </section>
   );
 }
 
 function OverviewTab({
   job,
-  salary,
-  posted,
-  trackerStatus
+  trackerStatus,
+  onTabChange
 }: {
   job: Job;
-  salary: string | null;
-  posted: string | null;
   trackerStatus: TrackerStatus | null;
+  onTabChange: (tab: DetailTab) => void;
 }) {
   const match = job.match;
   const display = getScoreDisplay(match?.score_state ?? null, match?.fit_score ?? null);
-  const missing = match?.missing_skills ?? [];
-  const missingLower = new Set(missing.map((skill) => skill.toLowerCase()));
-  const matched = (job.required_skills ?? []).filter((skill) => !missingLower.has(skill.toLowerCase()));
+  const insights = useMemo(() => buildFitInsights(job), [job]);
+  const scored = display.kind === "score" && match?.fit_score != null;
 
   return (
     <>
       {match?.fit_summary && (
-        <p className="text-base leading-7 text-[var(--text-secondary)]">{match.fit_summary}</p>
+        <p className="text-[15px] leading-7 text-[var(--text-secondary)]">{match.fit_summary}</p>
       )}
 
-      <Section title="Fit score">
-        {display.kind !== "score" ? (
-          <p className="text-sm text-[var(--text-muted)]">{display.helper}</p>
+      <Section title="Your fit">
+        {!scored ? (
+          <p className="text-sm leading-6 text-[var(--text-muted)]">{display.helper}</p>
         ) : (
-          <div className="rounded-xl border border-line bg-white p-4">
-            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <span className="text-3xl font-semibold text-ink">{Math.round(match!.fit_score!)}</span>
-              <span className="text-sm text-[var(--text-muted)]">out of 100</span>
-              {match?.fit_label && <span className="text-sm font-medium text-pine">{match.fit_label}</span>}
+          <div className="rounded-2xl border border-line bg-white p-5">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div className="flex items-baseline gap-2.5">
+                <span className="text-4xl font-semibold leading-none tracking-[-0.03em] text-ink">
+                  {Math.round(match!.fit_score!)}
+                </span>
+                <span className="text-sm text-[var(--text-muted)]">/ 100</span>
+                {match?.fit_label && (
+                  <span className="ml-1 text-sm font-medium text-pine">{match.fit_label}</span>
+                )}
+              </div>
+              <dl className="flex flex-wrap gap-x-7 gap-y-2">
+                <ScoreFact
+                  label="Skills matched"
+                  value={`${insights.matchedSkills.length} of ${
+                    insights.matchedSkills.length + insights.missingSkills.length || insights.matchedSkills.length
+                  }`}
+                />
+                <ScoreFact label="Gaps" value={String(insights.missingSkills.length)} />
+                <ScoreFact
+                  label="Confidence"
+                  value={match?.confidence != null ? `${Math.round(match.confidence * 100)}%` : "—"}
+                />
+              </dl>
             </div>
-            <dl className="mt-4 grid gap-3 sm:grid-cols-3">
-              <ScoreFact
-                label="Required skills matched"
-                value={`${matched.length} of ${(job.required_skills ?? []).length || matched.length}`}
-              />
-              <ScoreFact label="Gaps found" value={String(missing.length)} />
-              <ScoreFact
-                label="Confidence"
-                value={match?.confidence != null ? `${Math.round(match.confidence * 100)}%` : "Not reported"}
-              />
-            </dl>
-            {/* The backend produces one overall score. Inventing per-category
-             * numbers would misrepresent how this role was assessed. */}
-            <p className="mt-4 text-xs leading-5 text-[var(--text-muted)]">
-              JobPilot produces a single overall score from your profile and this job’s requirements
-              {match?.explanation_source ? ` (${match.explanation_source} explanation)` : ""}. Category-level
-              sub-scores are not calculated, so only the signals above are shown.
+            {/* One overall number is what the backend produces. Presenting
+              * invented per-category scores would misdescribe the assessment. */}
+            <p className="mt-4 border-t border-line/70 pt-3.5 text-xs leading-5 text-[var(--text-muted)]">
+              This is a single overall score from your profile and this posting
+              {match?.explanation_source ? ` (${match.explanation_source} explanation)` : ""}. JobPilot does not
+              break it into per-category sub-scores, so the signals below are the whole picture.
             </p>
           </div>
         )}
       </Section>
 
-      <Section title="Why this matches">
-        {match && match.match_reasons.length > 0 ? (
-          <ul className="grid gap-2 text-sm leading-6 text-[var(--text-secondary)]">
-            {match.match_reasons.map((reason) => (
-              <li key={reason} className="flex gap-2">
-                <span aria-hidden className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-pine/70" />
-                <span>{reason}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-[var(--text-muted)]">
-            No written explanation was produced for this role. Add more profile detail for richer reasons.
-          </p>
-        )}
-      </Section>
+      {(insights.strengths.length > 0 || insights.matchedSkills.length > 0) && (
+        <Section title="What is working for you">
+          {insights.strengths.length > 0 && (
+            <ul className="grid gap-2.5">
+              {insights.strengths.map((reason) => (
+                <li key={reason} className="flex gap-2.5 text-sm leading-6 text-[var(--text-secondary)]">
+                  <Check className="mt-1 h-4 w-4 shrink-0 text-pine" aria-hidden />
+                  <span>{reason}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {insights.matchedSkills.length > 0 && (
+            <div className={insights.strengths.length > 0 ? "mt-4" : ""}>
+              <p className="text-xs text-[var(--text-muted)]">Required skills you already match</p>
+              <ul className="mt-2 flex flex-wrap gap-1.5">
+                {insights.matchedSkills.map((skill) => (
+                  <li
+                    key={skill}
+                    className="rounded-md border border-[var(--success-border)] bg-[var(--success-surface)] px-2.5 py-1 text-xs font-medium text-[var(--success)]"
+                  >
+                    {skill}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Section>
+      )}
 
-      {(matched.length > 0 || missing.length > 0) && (
+      {(insights.missingSkills.length > 0 || insights.risks.length > 0) && (
         <Section
-          title="Qualifications"
-          description="Derived from this job’s required skills and the gaps found against your profile."
+          title="What is holding it back"
+          description="The specific signals this posting flagged against your profile."
         >
-          <div className="grid gap-4 sm:grid-cols-2">
+          {insights.missingSkills.length > 0 && (
             <div>
-              <p className="text-sm font-medium text-[var(--text-secondary)]">Matched</p>
-              {matched.length > 0 ? (
-                <ul className="mt-2 flex flex-wrap gap-1.5">
-                  {matched.map((skill) => (
-                    <li
-                      key={skill}
-                      className="rounded-full border border-[var(--success-border)] bg-[var(--success-surface)] px-2.5 py-1 text-xs text-[var(--success)]"
-                    >
-                      {skill}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-[var(--text-muted)]">None identified.</p>
-              )}
+              <p className="text-xs text-[var(--text-muted)]">Required skills not evidenced yet</p>
+              <ul className="mt-2 flex flex-wrap gap-1.5">
+                {insights.missingSkills.map((skill) => (
+                  <li
+                    key={skill}
+                    className="rounded-md border border-line bg-panel/60 px-2.5 py-1 text-xs font-medium text-[var(--text-secondary)]"
+                  >
+                    {skill}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <div>
-              <p className="text-sm font-medium text-[var(--text-secondary)]">Missing</p>
-              {missing.length > 0 ? (
-                <ul className="mt-2 flex flex-wrap gap-1.5">
-                  {missing.map((skill) => (
-                    <li key={skill} className="rounded-full border border-line px-2.5 py-1 text-xs text-[var(--text-muted)]">
-                      {skill}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-[var(--text-muted)]">No gaps were flagged.</p>
-              )}
-            </div>
-          </div>
+          )}
+          {insights.risks.length > 0 && (
+            <ul className={`grid gap-2.5 ${insights.missingSkills.length > 0 ? "mt-4" : ""}`}>
+              {insights.risks.map((risk) => (
+                <li key={risk} className="flex gap-2.5 text-sm leading-6 text-[var(--text-secondary)]">
+                  <CircleAlert className="mt-1 h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                  <span>{risk}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </Section>
       )}
 
-      {match && match.risk_factors.length > 0 && (
-        <Section title="Things to check">
-          <ul className="grid gap-2 text-sm leading-6 text-[var(--danger)]">
-            {match.risk_factors.map((risk) => (
-              <li key={risk} className="flex gap-2">
-                <AlertTriangle className="mt-1 h-3.5 w-3.5 shrink-0" aria-hidden />
-                <span>{risk}</span>
+      {insights.suggestions.length > 0 && (
+        <Section
+          title="How to improve your odds"
+          description="Practical steps drawn from this posting and your match record. They are not predictions of a new score."
+        >
+          <ol className="grid gap-2.5">
+            {insights.suggestions.map((suggestion) => (
+              <li
+                key={suggestion.id}
+                className="rounded-xl border border-line bg-white p-4"
+              >
+                <p className="text-sm font-medium text-[var(--text-primary)]">{suggestion.title}</p>
+                <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">{suggestion.body}</p>
+                {suggestion.action === "materials" && (
+                  <button
+                    type="button"
+                    onClick={() => onTabChange("materials")}
+                    className="focus-ring mt-2.5 inline-flex items-center gap-1.5 rounded text-sm font-medium text-pine hover:underline"
+                  >
+                    Open application materials <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                )}
+                {suggestion.action === "description" && (
+                  <button
+                    type="button"
+                    onClick={() => onTabChange("description")}
+                    className="focus-ring mt-2.5 inline-flex items-center gap-1.5 rounded text-sm font-medium text-pine hover:underline"
+                  >
+                    Read the full description <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                )}
+                {suggestion.action === "profile" && (
+                  <a
+                    href="/profile"
+                    className="focus-ring mt-2.5 inline-flex items-center gap-1.5 rounded text-sm font-medium text-pine hover:underline"
+                  >
+                    Update your profile <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+                  </a>
+                )}
               </li>
             ))}
-          </ul>
+          </ol>
         </Section>
       )}
 
-      {job.responsibilities && job.responsibilities.length > 0 && (
-        <Section title="Key responsibilities">
-          <ul className="grid gap-2 text-sm leading-6 text-[var(--text-secondary)]">
-            {job.responsibilities.slice(0, 8).map((item) => (
-              <li key={item} className="flex gap-2">
-                <span aria-hidden className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-border-strong" />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
+      {!insights.hasSignals && !match?.fit_summary && (
+        <Section title="What is working for you">
+          <p className="text-sm leading-6 text-[var(--text-muted)]">
+            No match detail was produced for this role yet. Refresh your matches, or add target roles and skills
+            to your <a className="font-medium text-pine underline" href="/profile">profile</a> for a fuller
+            explanation.
+          </p>
         </Section>
       )}
 
-      <Section title="Role details">
-        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-          <Fact label="Company" value={job.company} />
-          <Fact label="Location" value={job.location} />
-          <Fact
-            label="Workplace"
-            value={job.workplace_type && job.workplace_type !== "unknown" ? capitalize(job.workplace_type) : null}
-          />
-          <Fact label="Employment" value={job.employment_type ? formatEmployment(job.employment_type) : null} />
+      <Section title="At a glance">
+        <dl className="grid gap-x-8 gap-y-3.5 sm:grid-cols-2">
           <Fact label="Seniority" value={job.seniority_level ? capitalize(job.seniority_level) : null} />
-          <Fact label="Posted" value={posted} />
-          {/* Only stated when the employer published a range. */}
-          {salary && <Fact label="Salary" value={salary} />}
-          <Fact label="Source" value={sourceLabel(job.source)} />
           <Fact
             label="Application status"
             value={trackerStatus ? TRACKER_LABELS[trackerStatus] : "Not saved yet"}
           />
+          <Fact
+            label="Listed requirements"
+            value={job.required_skills.length > 0 ? `${job.required_skills.length} named skills` : null}
+          />
+          <Fact label="Source" value={sourceLabel(job.source)} />
         </dl>
       </Section>
     </>
@@ -605,7 +645,7 @@ function ScoreFact({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <dt className="text-xs text-[var(--text-muted)]">{label}</dt>
-      <dd className="mt-0.5 text-sm font-medium text-[var(--text-secondary)]">{value}</dd>
+      <dd className="mt-0.5 text-sm font-medium tabular-nums text-[var(--text-secondary)]">{value}</dd>
     </div>
   );
 }
@@ -622,7 +662,7 @@ function Fact({ label, value }: { label: string; value: string | null | undefine
   );
 }
 
-const DESCRIPTION_PREVIEW_BLOCKS = 8;
+const DESCRIPTION_PREVIEW_BLOCKS = 10;
 
 function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
   const [expanded, setExpanded] = useState(false);
@@ -638,7 +678,10 @@ function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
         <Section title="Requirements">
           <ul className="flex flex-wrap gap-1.5">
             {job.required_skills.map((skill) => (
-              <li key={skill} className="rounded-full border border-line px-2.5 py-1 text-xs text-[var(--text-secondary)]">
+              <li
+                key={skill}
+                className="rounded-md border border-line bg-white px-2.5 py-1 text-xs font-medium text-[var(--text-secondary)]"
+              >
                 {skill}
               </li>
             ))}
@@ -650,8 +693,21 @@ function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
         <Section title="Nice to have">
           <ul className="flex flex-wrap gap-1.5">
             {job.preferred_skills.map((skill) => (
-              <li key={skill} className="rounded-full border border-line px-2.5 py-1 text-xs text-[var(--text-muted)]">
+              <li key={skill} className="rounded-md border border-line px-2.5 py-1 text-xs text-[var(--text-muted)]">
                 {skill}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {job.responsibilities && job.responsibilities.length > 0 && (
+        <Section title="Responsibilities">
+          <ul className="grid gap-2.5">
+            {job.responsibilities.map((item) => (
+              <li key={item} className="flex gap-2.5 text-[15px] leading-[1.65] text-[var(--text-secondary)]">
+                <span aria-hidden className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-border-strong" />
+                <span>{item}</span>
               </li>
             ))}
           </ul>
@@ -660,19 +716,20 @@ function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
 
       <Section title="Full description">
         {blocks.length === 0 ? (
-          <p className="text-sm text-[var(--text-muted)]">
-            The employer did not publish a description through this source. Open the official posting for the full text.
+          <p className="text-sm leading-6 text-[var(--text-muted)]">
+            The employer did not publish a description through this source. Open the official posting for the full
+            text.
           </p>
         ) : (
-          <div className="grid gap-4 text-[15px] leading-[1.65] text-[var(--text-secondary)]">
+          <div className="grid gap-4 text-[15px] leading-[1.7] text-[var(--text-secondary)]">
             {visible.map((block, index) =>
               block.kind === "paragraph" ? (
                 <p key={index}>{block.text}</p>
               ) : (
-                <ul key={index} className="grid gap-2 pl-1">
+                <ul key={index} className="grid gap-2.5">
                   {block.items.map((item, itemIndex) => (
-                    <li key={itemIndex} className="flex gap-2">
-                      <span aria-hidden className="mt-2.5 h-1.5 w-1.5 shrink-0 rounded-full bg-border-strong" />
+                    <li key={itemIndex} className="flex gap-2.5">
+                      <span aria-hidden className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-border-strong" />
                       <span>{item}</span>
                     </li>
                   ))}
@@ -686,7 +743,7 @@ function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
             type="button"
             onClick={() => setExpanded((current) => !current)}
             aria-expanded={expanded}
-            className="focus-ring mt-4 inline-flex h-10 items-center rounded-md border border-line bg-white px-3 text-sm font-medium"
+            className="focus-ring mt-5 inline-flex h-10 items-center rounded-lg border border-line bg-white px-3.5 text-sm font-medium"
           >
             {expanded ? "Show less" : "Show full description"}
           </button>
@@ -699,12 +756,12 @@ function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
           {posted && <span>{posted}</span>}
           {job.source_url && (
             <a
-              className="focus-ring inline-flex items-center gap-1 rounded font-medium text-pine underline"
+              className="focus-ring inline-flex items-center gap-1.5 rounded font-medium text-pine hover:underline"
               href={job.source_url}
               target="_blank"
               rel="noopener noreferrer"
             >
-              Open original posting <ExternalLink className="h-3.5 w-3.5" />
+              Open original posting <ExternalLink className="h-3.5 w-3.5" aria-hidden />
             </a>
           )}
         </div>
@@ -713,90 +770,162 @@ function DescriptionTab({ job, posted }: { job: Job; posted: string | null }) {
   );
 }
 
-const DOC_COPY: Record<DocType, { title: string; blurb: string; cta: string; icon: React.ReactNode }> = {
-  resume: {
+const MATERIALS: { type: DocType; title: string; blurb: string; icon: typeof FileText }[] = [
+  {
+    type: "resume",
     title: "Tailored resume",
-    blurb:
-      "Built only from facts in your saved profile, re-ordered and re-worded for this role. Nothing you have not claimed is added.",
-    cta: "Generate tailored resume",
-    icon: <FileText className="h-4 w-4" />
+    blurb: "Your saved experience, re-ordered and re-worded for this posting.",
+    icon: FileText
   },
-  cover_letter: {
+  {
+    type: "cover_letter",
     title: "Cover letter",
-    blurb:
-      "A focused first draft grounded in your profile and this job description. Review and edit before sending.",
-    cta: "Generate cover letter",
-    icon: <Mail className="h-4 w-4" />
+    blurb: "A focused draft grounded in your profile and this job description.",
+    icon: Mail
   }
-};
+];
 
-function DocumentTab({
-  type,
+function MaterialsTab({
   job,
   generating,
-  document,
+  documents,
   onGenerate,
   onPreview
 }: {
-  type: DocType;
   job: Job;
   generating: DocType | null;
-  document: GeneratedDocument | undefined;
+  documents: Partial<Record<DocType, GeneratedDocument>>;
   onGenerate: (type: DocType) => void;
   onPreview: (doc: GeneratedDocument) => void;
 }) {
-  const copy = DOC_COPY[type];
-  const busy = generating === type;
   return (
     <>
-      <Section title={copy.title}>
-        <p className="text-sm leading-6 text-[var(--text-secondary)]">{copy.blurb}</p>
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            // A second request while one is in flight would bill twice for the
-            // same document.
-            disabled={generating !== null}
-            onClick={() => onGenerate(type)}
-            className="focus-ring inline-flex h-11 items-center gap-2 rounded-md bg-pine px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : copy.icon}
-            {busy ? "Generating…" : document ? `Regenerate ${type === "resume" ? "resume" : "cover letter"}` : copy.cta}
-          </button>
-          {document && (
-            <button
-              type="button"
-              onClick={() => onPreview(document)}
-              className="focus-ring inline-flex h-11 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-medium"
-            >
-              Preview and download
-            </button>
-          )}
+      <Section
+        title="Application materials"
+        description="Generated only from facts in your saved profile and this job description. Nothing you have not claimed is added."
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          {MATERIALS.map((material) => (
+            <MaterialCard
+              key={material.type}
+              material={material}
+              document={documents[material.type]}
+              busy={generating === material.type}
+              // One request at a time: a second generation while one is in
+              // flight would bill twice for the same document.
+              disabled={generating !== null}
+              onGenerate={() => onGenerate(material.type)}
+              onPreview={onPreview}
+            />
+          ))}
         </div>
-        <p aria-live="polite" className="mt-3 text-sm text-[var(--text-muted)]">
-          {busy
-            ? "Generating from your profile and this job description…"
-            : document
-              ? `Ready: ${document.title}`
-              : "Not generated for this job yet."}
-        </p>
       </Section>
 
-      {type === "resume" && job.match?.recommended_resume_angle && (
+      {job.match?.recommended_resume_angle && (
         <Section title="Tailoring angle">
-          <p className="text-sm leading-6 text-[var(--text-secondary)]">{job.match.recommended_resume_angle}</p>
+          <div className="flex gap-3 rounded-xl border border-[var(--success-border)] bg-[var(--success-surface)] p-4">
+            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-[var(--success)]" aria-hidden />
+            <p className="text-sm leading-6 text-[var(--text-secondary)]">
+              {job.match.recommended_resume_angle}
+            </p>
+          </div>
         </Section>
       )}
 
-      {type === "resume" && (job.match?.missing_skills.length ?? 0) > 0 && (
-        <Section title="Kept out of the resume">
+      {(job.match?.missing_skills.length ?? 0) > 0 && (
+        <Section title="Kept out of your resume">
           <p className="text-sm leading-6 text-[var(--text-muted)]">
-            {job.match!.missing_skills.join(", ")} — these are required by the job but not evidenced in your profile, so
+            {job.match!.missing_skills.join(", ")} — required by this job but not evidenced in your profile, so
             they are never claimed on your behalf.
           </p>
         </Section>
       )}
     </>
+  );
+}
+
+function MaterialCard({
+  material,
+  document,
+  busy,
+  disabled,
+  onGenerate,
+  onPreview
+}: {
+  material: (typeof MATERIALS)[number];
+  document: GeneratedDocument | undefined;
+  busy: boolean;
+  disabled: boolean;
+  onGenerate: () => void;
+  onPreview: (doc: GeneratedDocument) => void;
+}) {
+  const Icon = material.icon;
+  const ready = Boolean(document) && !busy;
+  return (
+    <article className="flex flex-col rounded-2xl border border-line bg-white p-5">
+      <div className="flex items-start gap-3">
+        <span
+          aria-hidden
+          className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
+            ready ? "bg-[var(--success-surface)] text-[var(--success)]" : "bg-panel text-[var(--text-muted)]"
+          }`}
+        >
+          <Icon className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-[15px] font-semibold text-[var(--text-primary)]">{material.title}</h3>
+          <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">{material.blurb}</p>
+        </div>
+      </div>
+
+      <p aria-live="polite" className="mt-4 flex items-center gap-2 text-sm">
+        {busy ? (
+          <>
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-pine" aria-hidden />
+            <span className="text-[var(--text-secondary)]">Generating…</span>
+          </>
+        ) : ready ? (
+          <>
+            <Check className="h-3.5 w-3.5 text-[var(--success)]" aria-hidden />
+            <span className="truncate text-[var(--text-secondary)]">Ready · {document!.title}</span>
+          </>
+        ) : (
+          <span className="text-[var(--text-muted)]">Not generated yet</span>
+        )}
+      </p>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {ready ? (
+          <>
+            <button
+              type="button"
+              onClick={() => onPreview(document!)}
+              className="focus-ring inline-flex h-10 items-center gap-2 rounded-lg bg-pine px-3.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
+            >
+              <Download className="h-4 w-4" aria-hidden /> Preview and download
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={onGenerate}
+              className="focus-ring inline-flex h-10 items-center rounded-lg border border-line bg-white px-3.5 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Regenerate
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onGenerate}
+            className="focus-ring inline-flex h-10 items-center gap-2 rounded-lg bg-pine px-3.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Sparkles className="h-4 w-4" aria-hidden />}
+            {material.type === "resume" ? "Generate tailored resume" : "Generate cover letter"}
+          </button>
+        )}
+      </div>
+    </article>
   );
 }
 

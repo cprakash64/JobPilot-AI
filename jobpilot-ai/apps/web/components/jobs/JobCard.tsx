@@ -20,7 +20,7 @@ import { getScoreDisplay } from "@/lib/fitScore";
 import { peopleActionSummary } from "@/lib/peopleState";
 import { getCachedPeople, subscribeToPeople } from "@/lib/peopleClient";
 import { CompanyLogo } from "@/components/CompanyLogo";
-import { FitBadge, FitPill, Meta, SourceBadge } from "@/components/jobs/badges";
+import { FitBadge, FitPill, Meta, SalaryChip, SourceBadge } from "@/components/jobs/badges";
 import { AssistedApplyButton } from "@/components/jobs/ApplyButton";
 import {
   capitalize,
@@ -93,7 +93,7 @@ export const JobCard = memo(function JobCard({
       onClick={(event) => {
         if (cardClickOpens(event)) actions.onSelect(job.id);
       }}
-      className="group relative cursor-pointer rounded-2xl border border-line bg-white p-5 shadow-sm transition-[border-color,box-shadow] duration-150 hover:border-border-strong hover:shadow-md has-[:focus-visible]:border-pine sm:p-6"
+      className="group relative cursor-pointer rounded-2xl border border-line bg-white p-5 transition-[border-color,background-color] duration-150 hover:border-border-strong hover:bg-[var(--surface-raised)] has-[:focus-visible]:border-pine sm:p-6"
     >
       {/* Two columns so the score card never pushes the title down: identity and
         * context stay one continuous block on the left. */}
@@ -105,56 +105,59 @@ export const JobCard = memo(function JobCard({
               logoUrl={job.company_logo_url}
               proxyPath={job.company_logo_proxy_path}
               companyDomain={job.company_domain}
+              size={40}
             />
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-[var(--text-secondary)]">{job.company}</p>
-              <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
-                <SourceBadge source={job.source} />
-                <TrackerPill status={trackerStatus} />
-              </div>
+              <p className="truncate text-[13px] font-medium text-[var(--text-muted)]">{job.company}</p>
+              <h2
+                id={titleId}
+                className="mt-0.5 text-[1.15rem] font-semibold leading-snug tracking-[-0.01em] text-ink"
+              >
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    actions.onSelect(job.id);
+                  }}
+                  // The focus ring is drawn around the whole card instead, so the
+                  // card itself reads as the focused element.
+                  className="rounded text-left focus-visible:outline-none"
+                >
+                  {job.title}
+                </button>
+              </h2>
             </div>
           </div>
 
-          <h2 id={titleId} className="mt-3 text-xl font-semibold leading-snug tracking-tight text-ink sm:text-[1.35rem]">
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                actions.onSelect(job.id);
-              }}
-              // The focus ring is drawn around the whole card instead, so the
-              // card itself reads as the focused element.
-              className="rounded text-left focus-visible:outline-none"
-            >
-              {job.title}
-            </button>
-          </h2>
-
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-[var(--text-muted)]">
+          <div className="mt-3 flex flex-wrap items-center gap-x-3.5 gap-y-2 text-[13px] text-[var(--text-muted)]">
             {job.location && (
               <Meta icon={<MapPin className="h-3.5 w-3.5" />}>{job.location_display || job.location}</Meta>
             )}
             {showsWorkplaceType(job.workplace_type, job.location_display || job.location) && (
               <Meta icon={<Building2 className="h-3.5 w-3.5" />}>{capitalize(job.workplace_type!)}</Meta>
             )}
-            {salary && <Meta icon={<Banknote className="h-3.5 w-3.5" />}>{salary}</Meta>}
             {job.employment_type && (
               <Meta icon={<Briefcase className="h-3.5 w-3.5" />}>{formatEmployment(job.employment_type)}</Meta>
             )}
             {posted && <Meta icon={<CalendarDays className="h-3.5 w-3.5" />}>{posted}</Meta>}
+            <SourceBadge source={job.source} />
+            <TrackerPill status={trackerStatus} />
+            {/* Compensation earns its own weight rather than blending into the
+              * metadata — and is simply absent when the employer published none. */}
+            {salary && <SalaryChip value={salary} />}
           </div>
 
           {reasons.length > 0 ? (
-            <ul className="mt-3 grid gap-1 text-sm leading-6 text-[var(--text-secondary)]">
+            <ul className="mt-3.5 grid gap-1.5 text-sm leading-6 text-[var(--text-secondary)]">
               {reasons.map((reason) => (
-                <li key={reason} className="flex gap-2">
-                  <span aria-hidden className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-pine/70" />
-                  <span>{reason}</span>
+                <li key={reason} className="flex gap-2.5">
+                  <span aria-hidden className="mt-2 h-1 w-1 shrink-0 rounded-full bg-pine" />
+                  <span className="line-clamp-2">{reason}</span>
                 </li>
               ))}
             </ul>
           ) : scoreDisplay.kind !== "score" ? (
-            <p className="mt-3 flex items-center gap-2 text-sm text-[var(--text-muted)]">
+            <p className="mt-3.5 flex items-center gap-2 text-sm text-[var(--text-muted)]">
               {scoreDisplay.kind === "calculating" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               <span>{scoreDisplay.helper}</span>
               {scoreDisplay.kind === "profile_incomplete" && (
@@ -169,7 +172,7 @@ export const JobCard = memo(function JobCard({
         <FitBadge score={fit} label={job.match?.fit_label ?? null} scoreState={job.match?.score_state ?? null} />
       </div>
 
-      <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-line/70 pt-4">
+      <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-line/60 pt-4">
         <AssistedApplyButton url={job.application_url} onApply={() => actions.onApply(job.id)} />
         <CardAction
           label={trackerStatus ? "Saved" : "Save"}
@@ -296,6 +299,7 @@ export const CompactJobCard = memo(function CompactJobCard({
   onSelect: (jobId: number) => void;
 }) {
   const posted = shortPostedLabel(job.posted_at);
+  const salary = formatSalary(job.salary_min, job.salary_max, job.salary_currency);
   const place =
     job.location_display ||
     job.location ||
@@ -342,6 +346,15 @@ export const CompactJobCard = memo(function CompactJobCard({
               {place && <span className="truncate">{place}</span>}
               {place && posted && <span aria-hidden>·</span>}
               {posted && <span>{posted}</span>}
+              {salary && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className="font-medium text-[var(--text-secondary)]">
+                    <span className="sr-only">Salary range </span>
+                    {salary}
+                  </span>
+                </>
+              )}
             </p>
             {trackerStatus && (
               <p className="mt-1.5">

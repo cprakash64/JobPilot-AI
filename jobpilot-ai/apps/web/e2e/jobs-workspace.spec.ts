@@ -251,8 +251,13 @@ test("the whole card opens a master-detail workspace with manual networking", as
   await expect(page.getByText("Northwind").first()).toBeVisible();
   await expect(page.getByText("88").first()).toBeVisible();
   await expect(page.getByText("Strong overlap with your production Python work.")).toBeVisible();
-  // This job has no published range, so no salary is shown at all.
-  await expect(page.getByText(/\$\d+k/)).toHaveCount(0);
+  // This job has no published range, so its header shows no salary at all —
+  // while other jobs in the list keep theirs.
+  const detailHeader = page
+    .locator("header")
+    .filter({ has: page.getByRole("heading", { level: 1, name: "Data Platform Engineer" }) });
+  await expect(detailHeader.getByText(/\$\d+k/)).toHaveCount(0);
+  await expect(page.getByTestId("compact-job-card").first().getByText(/\$\d+k/)).toBeVisible();
 
   // 4. Job description.
   await page.getByRole("tab", { name: "Job description" }).click();
@@ -273,21 +278,29 @@ test("the whole card opens a master-detail workspace with manual networking", as
   await expect(page.getByText("Morgan Manager")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Likely Recruiters" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Potential Hiring Managers" })).toBeVisible();
-  await expect(page.getByText(/never sends|not confirmed|has not been confirmed/i).first()).toBeVisible();
+  await expect(page.getByText(/not confirmed|has not been confirmed/i).first()).toBeVisible();
+  // Bookkeeping actions are gone; the two channels are what remain.
+  await expect(page.getByRole("button", { name: /Save contact/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Mark contacted/ })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /LinkedIn/ }).first()).toBeVisible();
   expect(peopleRequests.filter((entry) => entry.startsWith("POST"))).toEqual([
     "POST /jobs/2/people/discover"
   ]);
 
-  // 6. Documents from the detail tabs.
-  await page.getByRole("tab", { name: "Resume" }).click();
+  // 6. Both documents from one Application materials section.
+  await page.getByRole("tab", { name: "Application materials" }).click();
+  await expect(page.getByRole("heading", { name: "Tailored resume" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cover letter" })).toBeVisible();
+  await expect(page.getByText("Not generated yet")).toHaveCount(2);
+
   await page.getByRole("button", { name: "Generate tailored resume" }).click();
   // The generated document opens in its own preview dialog.
   await expect(page.getByRole("button", { name: "Close document" })).toBeVisible();
   await expect(page.getByText("Backend engineer with production Python experience.")).toBeVisible();
   await page.getByRole("button", { name: "Close document" }).click();
-  await expect(page.getByText("Ready: Tailored Resume - Acme")).toBeVisible();
+  await expect(page.getByText("Ready · Tailored Resume - Acme")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Preview and download/ })).toBeVisible();
 
-  await page.getByRole("tab", { name: "Cover letter" }).click();
   await page.getByRole("button", { name: "Generate cover letter" }).click();
   await expect(page.getByRole("button", { name: "Close document" })).toBeVisible();
   await expect(page.getByText("I am excited to apply.")).toBeVisible();
@@ -298,6 +311,22 @@ test("the whole card opens a master-detail workspace with manual networking", as
   await expect(page).toHaveURL(/\?job=4$/);
   await expect(page.getByRole("heading", { level: 1, name: "Research Engineer" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 1, name: "Data Platform Engineer" })).toHaveCount(0);
+  // Exactly two scroll regions on desktop: the list and the detail panel.
+  const scrollers = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("*")).filter((node) => {
+      const style = getComputedStyle(node);
+      return (
+        (style.overflowY === "auto" || style.overflowY === "scroll") &&
+        node.scrollHeight > node.clientHeight
+      );
+    }).length
+  );
+  expect(scrollers).toBeLessThanOrEqual(2);
+  // …and the page behind them shows no scrollbar of its own.
+  const pageScrollbar = await page.evaluate(
+    () => window.innerWidth - document.documentElement.clientWidth
+  );
+  expect(pageScrollbar).toBe(0);
   // The new job starts on Overview, with no people request of its own.
   await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
   expect(peopleRequests.filter((entry) => entry.includes("/jobs/4/"))).toEqual([]);

@@ -121,7 +121,7 @@ function stubClipboard() {
   return writeText;
 }
 
-async function openDraft(label = "Create LinkedIn draft") {
+async function openDraft(label = "Draft message") {
   render(<PeopleWhoCanHelp jobId={JOB_ID} />);
   const buttons = await screen.findAllByRole("button", { name: label });
   fireEvent.click(buttons[0]);
@@ -194,13 +194,29 @@ describe("LinkedIn draft workflow", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders managers with a Create LinkedIn draft action", async () => {
+  it("offers one draft action per contact and no bookkeeping buttons", async () => {
     installTransport();
     render(<PeopleWhoCanHelp jobId={JOB_ID} />);
     expect(await screen.findByText("Morgan Manager")).toBeInTheDocument();
-    expect(
-      screen.getAllByRole("button", { name: "Create LinkedIn draft" }).length
-    ).toBe(2);
+    expect(screen.getAllByRole("button", { name: "Draft message" }).length).toBe(2);
+    // Save contact / Mark contacted were removed from the card.
+    expect(screen.queryByRole("button", { name: /Save contact/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Mark contacted/ })).not.toBeInTheDocument();
+  });
+
+  it("links straight to a verified LinkedIn profile from the card", async () => {
+    installTransport();
+    render(<PeopleWhoCanHelp jobId={JOB_ID} />);
+    await screen.findByText("Morgan Manager");
+
+    const link = screen.getByRole("link", { name: /LinkedIn/ });
+    expect(link).toHaveAttribute("href", LINKEDIN_URL);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    // The contact without a verified URL gets an honest disabled affordance
+    // instead of a guessed link.
+    expect(screen.getAllByRole("link", { name: /LinkedIn/ })).toHaveLength(1);
+    expect(screen.getByTitle(/never guesses a profile URL/)).toBeInTheDocument();
   });
 
   it("opens an editable preview instead of showing a red failure", async () => {
@@ -241,21 +257,31 @@ describe("LinkedIn draft workflow", () => {
     expect(await within(dialog).findByRole("button", { name: /Message copied/ })).toBeInTheDocument();
   });
 
-  it("opens exactly the validated contact URL in a new tab", async () => {
+  it("copies the draft and opens exactly the validated profile URL", async () => {
+    // LinkedIn accepts no prefilled message in a profile URL, so the honest
+    // handoff copies the text and opens the real profile in a new tab.
     installTransport();
-    const open = vi.fn();
-    vi.stubGlobal("open", open);
+    const writeText = stubClipboard();
     const dialog = await openDraft();
 
-    fireEvent.click(within(dialog).getByRole("button", { name: /Open LinkedIn/ }));
-    expect(open).toHaveBeenCalledWith(LINKEDIN_URL, "_blank", "noopener,noreferrer");
+    const link = within(dialog).getByRole("link", { name: /Copy and open LinkedIn/ });
+    expect(link).toHaveAttribute("href", LINKEDIN_URL);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(
+      within(dialog).getByText(/LinkedIn does not accept a prefilled message/)
+    ).toBeInTheDocument();
+
+    fireEvent.click(link);
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+    expect(writeText.mock.calls[0][0]).toContain("Hi Morgan");
   });
 
   it("disables Open LinkedIn and explains why when no URL exists", async () => {
     installTransport(draftResponse({ linkedin_url: null, linkedin_available: false }));
     render(<PeopleWhoCanHelp jobId={JOB_ID} />);
     // The second manager has no profile URL at all.
-    const buttons = await screen.findAllByRole("button", { name: "Create LinkedIn draft" });
+    const buttons = await screen.findAllByRole("button", { name: "Draft message" });
     fireEvent.click(buttons[1]);
     const dialog = await screen.findByRole("dialog");
 
@@ -267,17 +293,14 @@ describe("LinkedIn draft workflow", () => {
     expect(within(dialog).getByRole("button", { name: /Copy message/ })).toBeEnabled();
   });
 
-  it("never opens a window when the URL is missing", async () => {
+  it("offers no link at all when the URL is missing", async () => {
     installTransport(draftResponse({ linkedin_url: null, linkedin_available: false }));
-    const open = vi.fn();
-    vi.stubGlobal("open", open);
     render(<PeopleWhoCanHelp jobId={JOB_ID} />);
-    const buttons = await screen.findAllByRole("button", { name: "Create LinkedIn draft" });
+    const buttons = await screen.findAllByRole("button", { name: "Draft message" });
     fireEvent.click(buttons[1]);
     const dialog = await screen.findByRole("dialog");
 
-    fireEvent.click(within(dialog).getByRole("button", { name: /Open LinkedIn/ }));
-    expect(open).not.toHaveBeenCalled();
+    expect(within(dialog).queryByRole("link", { name: /LinkedIn/ })).not.toBeInTheDocument();
   });
 
   it("closes without sending anything", async () => {
@@ -306,7 +329,7 @@ describe("LinkedIn draft workflow", () => {
   });
 });
 
-describe("Email draft workflow", () => {
+describe("Email handoff from the contact card", () => {
   afterEach(() => {
     cleanup();
     clearPeopleCache();
@@ -314,54 +337,51 @@ describe("Email draft workflow", () => {
     vi.unstubAllGlobals();
   });
 
+  const verifiedManager = {
+    ...manager,
+    email_status: "verified",
+    professional_email: "morgan@l3harris.example",
+    email_verified_at: "2026-07-26T12:00:00Z"
+  };
+
   const emailDraft = draftResponse({
     message_type: "email",
     subject: "Question about Software Engineer at L3Harris Technologies",
     body: "Hi Morgan,\n\nI’m reaching out about the Software Engineer role.\n\nThanks\nSam",
     professional_email: "morgan@l3harris.example",
     email_available: true,
-    linkedin_url: LINKEDIN_URL,
-    linkedin_available: true,
     character_count: 74
   });
 
-  it("shows an editable subject and body", async () => {
-    installTransport(emailDraft);
-    const dialog = await openDraft("Create email draft");
+  function installVerified(draft: Record<string, unknown> = emailDraft) {
+    const payload = peopleResponse({
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [verifiedManager, secondManager],
+        potential_referrers: []
+      }
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const body = String(input).includes("/outreach-draft") ? draft : payload;
+      return Promise.resolve({
+        ok: true,
+        json: async () => body,
+        text: async () => JSON.stringify(body)
+      } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
 
-    const subject = within(dialog).getByLabelText("Outreach subject") as HTMLInputElement;
-    const body = within(dialog).getByLabelText("Outreach draft") as HTMLTextAreaElement;
-    expect(subject.value).toBe("Question about Software Engineer at L3Harris Technologies");
-    expect(body.value).toContain("I’m reaching out");
-    expect(subject.value).not.toBe(body.value);
-
-    fireEvent.change(subject, { target: { value: "Revised subject" } });
-    expect((within(dialog).getByLabelText("Outreach subject") as HTMLInputElement).value).toBe(
-      "Revised subject"
-    );
-  });
-
-  it("copies the subject separately from the message", async () => {
-    installTransport(emailDraft);
-    const writeText = stubClipboard();
-    const dialog = await openDraft("Create email draft");
-
-    fireEvent.click(within(dialog).getByRole("button", { name: /Copy subject/ }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
-    expect(writeText.mock.calls[0][0]).toBe(
-      "Question about Software Engineer at L3Harris Technologies"
-    );
-  });
-
-  it("opens a correctly encoded mailto URL", async () => {
-    installTransport(emailDraft);
-    const dialog = await openDraft("Create email draft");
+  it("hands a grounded draft to the mail client with subject and body prefilled", async () => {
+    const fetchMock = installVerified();
     const location = { href: "" } as Location;
     vi.stubGlobal("location", location);
+    render(<PeopleWhoCanHelp jobId={JOB_ID} />);
 
-    fireEvent.click(within(dialog).getByRole("button", { name: /Open email app/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Email" }));
 
-    expect(location.href.startsWith("mailto:morgan@l3harris.example?")).toBe(true);
+    await waitFor(() => expect(location.href.startsWith("mailto:morgan@l3harris.example?")).toBe(true));
     const params = new URLSearchParams(new URL(location.href).search);
     expect(params.get("subject")).toBe(
       "Question about Software Engineer at L3Harris Technologies"
@@ -369,22 +389,80 @@ describe("Email draft workflow", () => {
     expect(params.get("body")).toContain("I’m reaching out about the Software Engineer role.");
     // Newlines survive as encoded characters rather than breaking the URL.
     expect(location.href).toContain("%0A");
+    // Exactly one draft request per click, and the address came from the
+    // backend's verified field rather than a guess.
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).includes("/outreach-draft"))
+    ).toHaveLength(1);
+    expect(await screen.findByText(/Review it before sending/)).toBeInTheDocument();
   });
 
-  it("disables Open email app and explains why without a verified address", async () => {
-    installTransport(
-      draftResponse({
-        message_type: "email",
-        subject: "Question about Software Engineer",
-        professional_email: null,
-        email_available: false
-      })
-    );
-    const dialog = await openDraft("Create email draft");
+  it("shows the verified address and never invents one", async () => {
+    installVerified();
+    render(<PeopleWhoCanHelp jobId={JOB_ID} />);
 
-    expect(within(dialog).getByRole("button", { name: /Open email app/ })).toBeDisabled();
-    expect(within(dialog).getByText(/Verified email unavailable/)).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: /Copy message/ })).toBeEnabled();
+    expect(await screen.findByText(/Verified work email: morgan@l3harris.example/)).toBeInTheDocument();
+    // The second contact has no verified address, so it gets a lookup action
+    // rather than a mailto built from a name and a domain.
+    expect(screen.getAllByRole("button", { name: "Email" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /Find work email/ })).toHaveLength(1);
+  });
+
+  it("degrades to a disabled affordance when no address can be looked up", async () => {
+    const payload = peopleResponse({
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [
+          { ...manager, email_lookup_allowed: false, email_status: "not_found" }
+        ],
+        potential_referrers: []
+      }
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: async () => payload,
+          text: async () => JSON.stringify(payload)
+        } as Response)
+      )
+    );
+    render(<PeopleWhoCanHelp jobId={JOB_ID} />);
+    await screen.findByText("Morgan Manager");
+
+    expect(screen.queryByRole("button", { name: "Email" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Find work email/ })).not.toBeInTheDocument();
+    expect(screen.getByTitle("No work email was found.")).toBeInTheDocument();
+  });
+
+  it("still opens the mail client when drafting is switched off", async () => {
+    const payload = peopleResponse({
+      controls: { email_discovery: true, outreach_drafting: false },
+      categories: {
+        likely_recruiters: [],
+        potential_hiring_managers: [verifiedManager],
+        potential_referrers: []
+      }
+    });
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        json: async () => payload,
+        text: async () => JSON.stringify(payload)
+      } as Response)
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const location = { href: "" } as Location;
+    vi.stubGlobal("location", location);
+    render(<PeopleWhoCanHelp jobId={JOB_ID} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Email" }));
+
+    await waitFor(() => expect(location.href).toBe("mailto:morgan@l3harris.example"));
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).includes("/outreach-draft"))
+    ).toHaveLength(0);
   });
 });
 
@@ -424,7 +502,7 @@ describe("Outreach failure states", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<PeopleWhoCanHelp jobId={JOB_ID} />);
-    const buttons = await screen.findAllByRole("button", { name: "Create LinkedIn draft" });
+    const buttons = await screen.findAllByRole("button", { name: "Draft message" });
     fireEvent.click(buttons[0]);
 
     expect(
@@ -433,23 +511,17 @@ describe("Outreach failure states", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("keeps Save contact and Mark contacted working", async () => {
+  it("no longer exposes contact bookkeeping actions", async () => {
     const fetchMock = installTransport();
     render(<PeopleWhoCanHelp jobId={JOB_ID} />);
     await screen.findByText("Morgan Manager");
 
-    fireEvent.click(screen.getAllByRole("button", { name: /Save contact/ })[0]);
-    await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/save"))
-      ).toBe(true);
-    });
-
-    fireEvent.click(screen.getAllByRole("button", { name: /Mark contacted/ })[0]);
-    await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/contacted"))
-      ).toBe(true);
-    });
+    // The card is for reaching people, not for tracking them. Neither endpoint
+    // is reachable from this surface any more.
+    expect(screen.queryByRole("button", { name: /Save contact/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Mark contacted/ })).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) => /\/(save|contacted)$/.test(String(input)))
+    ).toBe(false);
   });
 });

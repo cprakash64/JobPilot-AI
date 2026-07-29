@@ -1,7 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Copy, ExternalLink, Mail, MessageSquareText, Star, UserCheck, X } from "lucide-react";
+import {
+  CircleAlert,
+  Copy,
+  ExternalLink,
+  Linkedin,
+  Loader2,
+  Mail,
+  MessageSquareText,
+  X
+} from "lucide-react";
 import { api, ApiError, type PeopleRecommendation, type PeopleResponse } from "@/lib/api";
 import {
   broadenPeople,
@@ -20,14 +29,19 @@ import {
 import {
   buildMailtoUrl,
   copyText,
-  openExternal,
   openMailClient,
   safeEmailAddress,
   safeLinkedInUrl
 } from "@/lib/outreachHandoff";
 
 type JobId = string | number;
-type PersonAction = "email" | "save" | "unsave" | "contacted" | "incorrect";
+/**
+ * Only two per-contact mutations remain. "Save contact" and "Mark contacted"
+ * were removed from the UI: they were bookkeeping the user did not ask for, and
+ * they crowded out the two things this panel exists to do — reach the person on
+ * LinkedIn, or by email. The endpoints still exist server-side.
+ */
+type PersonAction = "email" | "incorrect";
 type MessageType = "email" | "linkedin_connection_note" | "linkedin_message";
 type DraftTone = "concise" | "warm" | "direct";
 type OutreachDraftData = {
@@ -269,7 +283,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
             employment_current_rating: "stale"
           })
         });
-      } else if (action === "email") {
+      } else {
         const response = await api<{
           status: PeopleRecommendation["email_status"];
           professional_email?: string | null;
@@ -294,11 +308,6 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
           ) as PeopleResponse["categories"]
         } : current);
         return;
-      } else {
-        const suffix = action === "unsave" ? "save" : action;
-        await api(`/jobs/${jobId}/people/${person.recommendation_id}/${suffix}`, {
-          method: action === "unsave" ? "DELETE" : "POST"
-        });
       }
       await load(true);
     } catch (actionError) {
@@ -315,12 +324,18 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
     }
   }, [jobId, load]);
 
+  /**
+   * Produces a grounded draft. `open` decides whether it lands in the review
+   * dialog (the LinkedIn path, where the user copies it themselves) or is only
+   * returned to the caller (the email path, which hands it to the mail client).
+   */
   const draftOutreach = useCallback(async (
     person: PeopleRecommendation,
     messageType: MessageType,
     tone: DraftTone = "concise",
-    guidance = ""
-  ) => {
+    guidance = "",
+    open = true
+  ): Promise<OutreachDraftData | null> => {
     setActionId(person.recommendation_id);
     setError("");
     try {
@@ -342,8 +357,11 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
           })
         }
       );
-      setDraft(response);
-      setDraftContext({ person, messageType, tone, guidance });
+      if (open) {
+        setDraft(response);
+        setDraftContext({ person, messageType, tone, guidance });
+      }
+      return response;
     } catch (draftError) {
       setError(
         safePeopleError(
@@ -351,6 +369,7 @@ function usePeopleController(jobId: JobId, loadOnMount: boolean) {
           "A grounded outreach draft could not be generated. Please try again."
         )
       );
+      return null;
     } finally {
       setActionId(null);
     }
@@ -432,28 +451,27 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
   );
 
   return (
-    <section
-      aria-labelledby={titleId}
-      className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5"
-    >
+    <section aria-labelledby={titleId} className="mt-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <h2 id={titleId} className="text-xl font-semibold">People Who Can Help</h2>
+            <h2 id={titleId} className="text-[13px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              People Who Can Help
+            </h2>
             {data?.beta ? (
-              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900">
+              <span className="rounded-full border border-line px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--text-muted)]">
                 Beta
               </span>
             ) : null}
           </div>
-          <p className="mt-1 max-w-2xl text-sm text-[var(--text-muted)]">
-            Evidence-based professional contacts to research. Roles are potential matches, not
-            confirmed assignments. You choose whether and how to contact anyone.
+          <p className="mt-1.5 max-w-xl text-sm leading-6 text-[var(--text-muted)]">
+            Contacts to research, with the evidence behind each one. Roles are potential matches, not confirmed
+            assignments.
           </p>
           {counts ? (
             <p className="mt-2 text-xs font-medium text-[var(--text-secondary)]">{counts}</p>
           ) : null}
-          {quotaLine ? <p className="mt-2 text-xs text-[var(--text-muted)]">{quotaLine}</p> : null}
+          {quotaLine ? <p className="mt-1 text-xs text-[var(--text-muted)]">{quotaLine}</p> : null}
         </div>
         {canDiscover || canBroaden ? (
           <Button
@@ -533,8 +551,14 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
         ) : null}
       </div>
 
+      {/* Full transparency about how the search was run, one click away instead
+        * of six lines of small print above the results. */}
       {data?.search_scope && data.status !== "disabled" ? (
-        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--text-muted)]">
+        <details className="mt-4 text-xs text-[var(--text-muted)]">
+          <summary className="focus-ring w-fit cursor-pointer rounded list-none font-medium marker:content-[''] hover:text-[var(--text-secondary)]">
+            Search details
+          </summary>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
           <span>Scope: {data.search_scope.company_scope}</span>
           <span>Location used as a {data.search_scope.location_filter} signal</span>
           {checkedDate(data.generated_at) ? <span>Last checked: {checkedDate(data.generated_at)}</span> : null}
@@ -550,20 +574,26 @@ export function PeopleWhoCanHelp({ jobId }: { jobId: JobId }) {
             <span>Controlled broader search completed</span>
           ) : null}
           <span>{data.search_scope.refresh_eligible ? "Refresh available" : "Using current cached search"}</span>
-        </div>
+          </div>
+        </details>
       ) : null}
 
       {hasResults(data) ? (
-        <div className="mt-5 space-y-6">
+        <div className="mt-6 space-y-7">
           {CATEGORY_HEADINGS.map(([key, heading]) => {
             const people = data.categories[key];
             return (
               <section key={key} aria-labelledby={`${titleId}-${key}`}>
-                <h3 id={`${titleId}-${key}`} className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                <h3
+                  id={`${titleId}-${key}`}
+                  className="text-xs font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]"
+                >
                   {heading}
                 </h3>
+                {/* One column: categories usually hold one to three people, and
+                  * a two-column grid left ragged half-empty rows. */}
                 {people.length ? (
-                  <div className="mt-2 grid gap-3 lg:grid-cols-2">
+                  <div className="mt-3 grid gap-3">
                     {people.map((person) => (
                       <PersonCard
                         key={person.recommendation_id}
@@ -614,6 +644,12 @@ function EmptyPeopleCategories() {
 }
 
 
+/**
+ * One contact, at a glance: who they are, why they are here, and the two ways
+ * to reach them. Everything else that used to live on this card — bookkeeping
+ * buttons, a stack of amber caveats, three evidence bullets — either moved into
+ * one quiet line or left.
+ */
 function PersonCard({
   person,
   busy,
@@ -629,118 +665,244 @@ function PersonCard({
   onAction: (person: PeopleRecommendation, action: PersonAction) => Promise<void>;
   onDraft: (
     person: PeopleRecommendation,
-    messageType: MessageType
-  ) => Promise<void>;
+    messageType: MessageType,
+    tone?: DraftTone,
+    guidance?: string,
+    open?: boolean
+  ) => Promise<OutreachDraftData | null>;
 }) {
+  const [status, setStatus] = useState("");
   const profileUrl = safeExternalUrl(person.professional_profile_url);
+  const verifiedEmail = safeEmailAddress(
+    person.email_status === "verified" ? person.professional_email : null
+  );
+  const canLookUpEmail =
+    emailEnabled &&
+    person.email_lookup_allowed &&
+    ["not_requested", "provider_error", "provider_unavailable"].includes(person.email_status);
+  const emailNote = emailStateNote(person);
+
+  /**
+   * Hands the draft to the user's own mail client. The address is only ever the
+   * backend-verified one, and the mail client is where the user reads, edits,
+   * and sends — JobPilot never sends anything itself.
+   */
+  async function openEmail() {
+    if (!verifiedEmail) return;
+    setStatus("");
+    const draft = outreachEnabled
+      ? await onDraft(person, "email", "concise", "", false)
+      : null;
+    openMailClient(
+      buildMailtoUrl({
+        address: verifiedEmail,
+        subject: draft?.subject ?? null,
+        body: draft?.body ?? null
+      })
+    );
+    setStatus(
+      draft
+        ? "Opened your email app with a draft. Review it before sending."
+        : "Opened your email app. Nothing is sent until you send it."
+    );
+  }
+
   return (
-    <article className="rounded-lg border border-[var(--border)] bg-[var(--surface-raised)] p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h4 className="font-semibold">{person.full_name}</h4>
-          <p className="text-sm">{person.current_title} · {person.current_company}</p>
+    <article className="rounded-2xl border border-line bg-white p-4 transition-colors hover:border-border-strong sm:p-5">
+      <div className="flex items-start gap-3.5">
+        <PersonAvatar name={person.full_name} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h4 className="truncate text-[15px] font-semibold leading-tight text-[var(--text-primary)]">
+                {person.full_name}
+              </h4>
+              <p className="mt-1 truncate text-sm text-[var(--text-secondary)]">{person.current_title}</p>
+              <p className="truncate text-sm text-[var(--text-muted)]">{person.current_company}</p>
+            </div>
+            <CategoryBadge person={person} />
+          </div>
         </div>
-        <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-xs">{person.category_label}</span>
       </div>
-      <p className="mt-2 text-xs font-medium text-[var(--text-muted)]">{confidenceText(person.confidence)}</p>
-      <p className="mt-1 text-xs font-medium text-[var(--text-muted)]">
-        Current employment confidence: {Math.round(person.current_employment_confidence * 100)}%
-      </p>
-      <p className="mt-1 text-xs text-[var(--text-muted)]">
-        Employment last verified {checkedDate(person.employment_last_verified_at) ?? "date unavailable"}
-      </p>
-      {person.employment_warning ? (
-        <p className="mt-2 text-sm text-amber-800">{person.employment_warning}</p>
-      ) : null}
-      <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">
-        {person.reasons.slice(0, 3).map((reason) => <li key={reason}>{reason}</li>)}
-      </ul>
-      {person.limitations[0] ? (
-        <p className="mt-3 text-sm text-amber-800"><span className="font-medium">Limitation:</span> {person.limitations[0]}</p>
-      ) : null}
-      <p className="mt-3 text-xs text-[var(--text-muted)]">
-        Last checked {new Date(person.last_checked_at).toLocaleDateString()}
-      </p>
-      <EmailState person={person} />
-      <div className="mt-4 flex flex-wrap gap-2">
+
+      {/* Confidence and freshness in one line instead of four. */}
+      <p className="mt-3.5 text-xs leading-5 text-[var(--text-muted)]">{evidenceLine(person)}</p>
+      {/* The caveats stay — quietly. A grey line is still read; four amber
+        * paragraphs per card were skipped. */}
+      {[person.employment_warning, person.limitations[0]].filter(Boolean).map((note) => (
+        <p key={note} className="mt-1.5 flex gap-1.5 text-xs leading-5 text-[var(--text-muted)]">
+          <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span>{note}</span>
+        </p>
+      ))}
+
+      <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line/70 pt-3.5">
         {profileUrl ? (
           <a
-            className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-3 py-2 text-sm"
+            className="focus-ring inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-panel"
             href={profileUrl}
             target="_blank"
             rel="noopener noreferrer"
           >
-            LinkedIn profile <ExternalLink className="h-4 w-4" />
+            <Linkedin className="h-4 w-4" aria-hidden /> LinkedIn
+            <ExternalLink className="h-3 w-3 opacity-60" aria-hidden />
           </a>
-        ) : null}
-        {emailEnabled && person.email_lookup_allowed &&
-        ["not_requested", "provider_error", "provider_unavailable"].includes(person.email_status) ? (
-          <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onAction(person, "email")}>
-            <Mail className="mr-1 inline h-4 w-4" />
+        ) : (
+          <span
+            className="inline-flex h-9 cursor-not-allowed items-center gap-2 rounded-lg border border-line/70 px-3 text-sm text-[var(--text-muted)] opacity-70"
+            title="JobPilot never guesses a profile URL. None was verified for this contact."
+          >
+            <Linkedin className="h-4 w-4" aria-hidden /> No LinkedIn
+          </span>
+        )}
+
+        {verifiedEmail ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void openEmail()}
+            className="focus-ring inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-panel disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Mail className="h-4 w-4" aria-hidden />}
+            Email
+          </button>
+        ) : canLookUpEmail ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onAction(person, "email")}
+            className="focus-ring inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-panel disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Mail className="h-4 w-4" aria-hidden />}
             {person.email_status === "provider_error" ? "Retry work email" : "Find work email"}
           </button>
-        ) : null}
+        ) : (
+          <span
+            className="inline-flex h-9 cursor-not-allowed items-center gap-2 rounded-lg border border-line/70 px-3 text-sm text-[var(--text-muted)] opacity-70"
+            title={emailNote ?? "No verified work email is available for this contact."}
+          >
+            <Mail className="h-4 w-4" aria-hidden /> No email
+          </span>
+        )}
+
         {outreachEnabled ? (
-          <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person, "linkedin_message")}>
-            <MessageSquareText className="mr-1 inline h-4 w-4" /> Create LinkedIn draft
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onDraft(person, "linkedin_message")}
+            className="focus-ring inline-flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm font-medium text-pine transition-colors hover:bg-[var(--success-surface)] disabled:opacity-50"
+          >
+            <MessageSquareText className="h-4 w-4" aria-hidden /> Draft message
           </button>
         ) : null}
-        {outreachEnabled ? (
-          <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} onClick={() => void onDraft(person, "email")}>
-            <Mail className="mr-1 inline h-4 w-4" /> Create email draft
-          </button>
-        ) : null}
-        <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy} aria-pressed={person.saved} onClick={() => void onAction(person, person.saved ? "unsave" : "save")}>
-          <Star className="mr-1 inline h-4 w-4" /> {person.saved ? "Saved" : "Save contact"}
-        </button>
-        <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm" disabled={busy || person.contacted} onClick={() => void onAction(person, "contacted")}>
-          <UserCheck className="mr-1 inline h-4 w-4" /> {person.contacted ? "Contacted" : "Mark contacted"}
-        </button>
-        <button className="px-2 py-2 text-sm text-red-700" disabled={busy} onClick={() => void onAction(person, "incorrect")}>
-          Report incorrect information
-        </button>
       </div>
+
+      {/* A disabled control needs a reason the user can actually read — a title
+        * attribute alone is invisible to keyboard and touch. */}
+      {emailNote && !verifiedEmail ? (
+        <p className="mt-2.5 text-xs text-[var(--text-muted)]">{emailNote}</p>
+      ) : null}
+      {verifiedEmail ? (
+        <p className="mt-2.5 truncate text-xs text-[var(--text-muted)]">Verified work email: {verifiedEmail}</p>
+      ) : null}
+      {status ? (
+        <p aria-live="polite" className="mt-2 text-xs text-[var(--text-muted)]">
+          {status}
+        </p>
+      ) : null}
+
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void onAction(person, "incorrect")}
+        className="focus-ring mt-3 rounded text-xs text-[var(--text-muted)] underline-offset-2 hover:underline disabled:opacity-50"
+      >
+        Report incorrect information
+      </button>
     </article>
   );
 }
 
-function EmailState({ person }: { person: PeopleRecommendation }) {
-  if (person.email_status === "verified" && person.professional_email) {
-    return (
-      <p className="mt-2 text-sm">
-        <Mail className="mr-1 inline h-4 w-4" />
-        Verified work email: {person.professional_email}
-      </p>
-    );
+/**
+ * The provider exposes no profile photograph, so this is a deterministic
+ * initials mark rather than an avatar that pretends to be one.
+ */
+function PersonAvatar({ name }: { name: string }) {
+  const initials = name
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0]?.toUpperCase() ?? "")
+    .join("");
+  return (
+    <span
+      aria-hidden
+      className="grid h-11 w-11 shrink-0 place-items-center rounded-full border border-line bg-panel text-sm font-semibold text-[var(--text-secondary)]"
+    >
+      {initials || "?"}
+    </span>
+  );
+}
+
+/** Short badge; the section heading above it carries the "potential" framing. */
+function CategoryBadge({ person }: { person: PeopleRecommendation }) {
+  const label =
+    person.category === "likely_recruiter"
+      ? "Recruiter"
+      : person.category === "potential_hiring_manager"
+        ? "Hiring manager"
+        : "Referral";
+  const recruiter = person.category === "likely_recruiter";
+  return (
+    <span
+      title={person.category_label}
+      className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${
+        recruiter
+          ? "bg-[var(--success-surface)] text-[var(--success)]"
+          : "border border-line text-[var(--text-muted)]"
+      }`}
+    >
+      {label}
+    </span>
+  );
+}
+
+/** Confidence, verification date, and the top piece of evidence in one line. */
+function evidenceLine(person: PeopleRecommendation): string {
+  const parts = [confidenceText(person.confidence)];
+  const verified = checkedDate(person.employment_last_verified_at);
+  parts.push(verified ? `employment verified ${verified}` : "employment not independently verified");
+  const reason = person.reasons[0];
+  return reason ? `${parts.join(" · ")} · ${reason}` : parts.join(" · ");
+}
+
+/** One sentence per email state, or nothing when there is nothing to say. */
+function emailStateNote(person: PeopleRecommendation): string | null {
+  switch (person.email_status) {
+    case "searching":
+      return "Searching for a verified work email…";
+    case "accept_all":
+    case "risky":
+    case "unknown":
+      return "A work email could not be verified, so none is shown.";
+    case "not_found":
+      return "No work email was found.";
+    case "provider_error":
+    case "provider_unavailable":
+      return "The work-email provider is temporarily unavailable.";
+    case "rate_limited":
+      return "The work-email provider rate limit has been reached.";
+    case "budget_exceeded":
+      return "Work-email lookup is unavailable because its daily limit was reached.";
+    case "employment_conflict":
+      return "Work email is unavailable until current employment is revalidated.";
+    case "identity_uncertain":
+      return "Work email is unavailable because the professional identity is uncertain.";
+    default:
+      return null;
   }
-  if (person.email_status === "searching") {
-    return <p className="mt-2 text-sm text-[var(--text-muted)]">Searching for a verified work email…</p>;
-  }
-  if (["accept_all", "risky", "unknown"].includes(person.email_status)) {
-    return <p className="mt-2 text-sm text-amber-800">A work email was not verified and is not displayed.</p>;
-  }
-  if (person.email_status === "not_found") {
-    return <p className="mt-2 text-sm text-[var(--text-muted)]">Work email not found.</p>;
-  }
-  if (person.email_status === "provider_error") {
-    return <p className="mt-2 text-sm text-amber-800">Work-email provider temporarily unavailable.</p>;
-  }
-  if (person.email_status === "provider_unavailable") {
-    return <p className="mt-2 text-sm text-amber-800">Work-email provider temporarily unavailable.</p>;
-  }
-  if (person.email_status === "rate_limited") {
-    return <p className="mt-2 text-sm text-amber-800">The work-email provider rate limit has been reached.</p>;
-  }
-  if (person.email_status === "budget_exceeded") {
-    return <p className="mt-2 text-sm text-[var(--text-muted)]">Work-email lookup is unavailable because its daily limit was reached.</p>;
-  }
-  if (person.email_status === "employment_conflict") {
-    return <p className="mt-2 text-sm text-amber-800">Work email is unavailable until current employment is revalidated.</p>;
-  }
-  if (person.email_status === "identity_uncertain") {
-    return <p className="mt-2 text-sm text-amber-800">Work email is unavailable because the professional identity is uncertain.</p>;
-  }
-  return null;
 }
 
 function OutreachDraft({
@@ -758,8 +920,9 @@ function OutreachDraft({
     person: PeopleRecommendation,
     messageType: MessageType,
     tone?: DraftTone,
-    guidance?: string
-  ) => Promise<void>;
+    guidance?: string,
+    open?: boolean
+  ) => Promise<OutreachDraftData | null>;
 }) {
   const [copied, setCopied] = useState<"subject" | "body" | null>(null);
 
@@ -890,15 +1053,21 @@ function OutreachDraft({
             >
               <Mail className="h-4 w-4" /> Open email app
             </Button>
-          ) : (
-            <Button
-              variant="secondary"
-              disabled={!linkedInUrl}
-              onClick={() => {
-                if (!linkedInUrl) return;
-                openExternal(linkedInUrl);
-              }}
+          ) : linkedInUrl ? (
+            // LinkedIn accepts no prefilled message in a profile URL, so the
+            // honest handoff is: copy the text, open the profile, paste. A real
+            // anchor keeps the navigation immune to the async copy.
+            <a
+              href={linkedInUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => void copy("body", draft.body)}
+              className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-medium text-ink transition hover:bg-panel"
             >
+              <ExternalLink className="h-4 w-4" /> Copy and open LinkedIn
+            </a>
+          ) : (
+            <Button variant="secondary" disabled>
               <ExternalLink className="h-4 w-4" /> Open LinkedIn
             </Button>
           )}
@@ -916,13 +1085,19 @@ function OutreachDraft({
           <Button variant="secondary" onClick={close}>Close</Button>
         </div>
         {isEmail && !emailAddress ? (
-          <p className="mt-2 text-sm text-amber-800">
+          <p className="mt-2 text-sm text-[var(--text-secondary)]">
             Verified email unavailable. You can still copy this message and send it yourself.
           </p>
         ) : null}
         {!isEmail && !linkedInUrl ? (
-          <p className="mt-2 text-sm text-amber-800">
+          <p className="mt-2 text-sm text-[var(--text-secondary)]">
             LinkedIn profile URL is unavailable for this contact. You can still copy this message.
+          </p>
+        ) : null}
+        {!isEmail && linkedInUrl ? (
+          <p className="mt-2 text-sm text-[var(--text-muted)]">
+            LinkedIn does not accept a prefilled message in a profile link, so the draft is copied to your
+            clipboard for you to paste.
           </p>
         ) : null}
 

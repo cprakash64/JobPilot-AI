@@ -20,14 +20,14 @@ export function JobsFilterBar({
 }) {
   const hasFilters = Boolean(query.q || query.workplace || query.minFit > 0);
   return (
-    <div className="flex flex-wrap items-end gap-2 rounded-xl border border-line bg-white p-3">
-      <label className="min-w-[200px] flex-1">
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-white p-2">
+      <label className="min-w-[220px] flex-1">
         <span className="sr-only">Role or skill</span>
         <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-[var(--text-muted)]" />
+          <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-[var(--text-muted)]" />
           <input
             aria-label="Role or skill"
-            className="h-10 w-full rounded-lg border border-line bg-panel/20 pl-9 pr-3 text-sm"
+            className="h-10 w-full rounded-lg border border-transparent bg-panel/50 pl-9 pr-3 text-sm transition-colors focus:border-line"
             placeholder="Search role or skill"
             value={query.q}
             onChange={(event) => onChange({ q: event.target.value })}
@@ -73,7 +73,7 @@ export function JobsFilterBar({
         {dateRefreshing && (
           <Loader2
             aria-label="Refreshing date range"
-            className="absolute right-7 top-3 h-4 w-4 animate-spin text-pine"
+            className="pointer-events-none absolute right-7 top-3 h-4 w-4 animate-spin text-pine"
           />
         )}
       </div>
@@ -92,7 +92,7 @@ export function JobsFilterBar({
         <button
           type="button"
           onClick={() => onChange({ q: "", workplace: "", minFit: 0 })}
-          className="focus-ring h-10 rounded-lg px-3 text-xs font-medium text-[var(--text-muted)] hover:bg-panel"
+          className="focus-ring h-10 rounded-lg px-3 text-[13px] font-medium text-[var(--text-muted)] transition-colors hover:bg-panel hover:text-[var(--text-secondary)]"
         >
           Clear filters
         </button>
@@ -117,7 +117,7 @@ function FilterSelect({
       <span className="sr-only">{ariaLabel}</span>
       <select
         aria-label={ariaLabel}
-        className="h-10 rounded-lg border border-line bg-white px-3 text-sm font-medium text-[var(--text-secondary)]"
+        className="h-10 rounded-lg border border-line bg-white px-2.5 text-[13px] font-medium text-[var(--text-secondary)] transition-colors hover:border-border-strong"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >

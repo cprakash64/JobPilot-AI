@@ -235,7 +235,7 @@ test("people discovery is explicit, persisted-ID scoped, and cached across the w
   ]);
   expect(peopleRequests.some((request) => request.includes("/jobs/732/people"))).toBe(false);
 
-  const profile = page.getByRole("link", { name: "LinkedIn profile" }).first();
+  const profile = page.getByRole("link", { name: /LinkedIn/ }).first();
   await expect(profile).toHaveAttribute("href", "https://www.linkedin.com/in/rita-recruiter");
   await expect(profile).toHaveAttribute("target", "_blank");
   await expect(profile).toHaveAttribute("rel", "noopener noreferrer");
@@ -373,21 +373,27 @@ test("complete people workflow remains manual, grounded, cached, and user-scoped
   await page.getByRole("button", { name: /Find work email/ }).click();
   await expect(page.getByText(/Verified work email: rita@acme.example/)).toBeVisible();
 
-  await page.getByRole("button", { name: /Create LinkedIn draft/ }).click();
+  await page.getByRole("button", { name: "Draft message" }).click();
   const dialog = page.getByRole("dialog", { name: "Review outreach draft" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(/never sends this message automatically/i)).toBeVisible();
+  // LinkedIn cannot accept a prefilled message, so the honest handoff is copy +
+  // open the real profile.
+  await expect(dialog.getByText(/does not accept a prefilled message/i)).toBeVisible();
+  await expect(dialog.getByRole("link", { name: /Copy and open LinkedIn/ })).toHaveAttribute(
+    "href",
+    "https://www.linkedin.com/in/rita-recruiter"
+  );
   await dialog.getByRole("button", { name: "Close outreach draft" }).click();
 
-  await page.getByRole("button", { name: /Save contact/ }).click();
-  await expect(page.getByRole("button", { name: "Saved" })).toBeVisible();
-  await page.getByRole("button", { name: /Mark contacted/ }).click();
-  await expect(page.getByRole("button", { name: "Contacted" })).toBeDisabled();
+  // Bookkeeping actions are gone from the card.
+  await expect(page.getByRole("button", { name: /Save contact/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Mark contacted/ })).toHaveCount(0);
 
-  // A reload restores the same job and its saved contact state.
+  // A reload restores the same job and its stored contact.
   await page.reload();
   await page.getByRole("tab", { name: "Networking" }).click();
-  await expect(page.getByRole("button", { name: "Saved" })).toBeVisible();
+  await expect(page.getByText("Rita Recruiter")).toBeVisible();
   expect(getCount).toBeGreaterThanOrEqual(2);
 
   await page.getByRole("button", { name: "Report incorrect information" }).click();

@@ -1,4 +1,4 @@
-import { Loader2, MapPin } from "lucide-react";
+import { Banknote, Loader2, MapPin } from "lucide-react";
 import type { ScoreState } from "@/lib/api";
 import { getFitScoreTone, getScoreDisplay } from "@/lib/fitScore";
 import { postedLabel, sourceLabel } from "@/components/jobs/format";
@@ -37,6 +37,28 @@ export function PostedBadge({ postedAt }: { postedAt: string | null }) {
     return null;
   }
   return <span className="rounded-full bg-panel px-2 py-0.5 text-xs text-[var(--text-muted)]">{label}</span>;
+}
+
+/**
+ * Compensation, carried at the same weight on the card and in the detail
+ * header. Callers render it only when the employer actually published a range —
+ * there is deliberately no "not listed" state to render.
+ */
+export function SalaryChip({ value, size = "md" }: { value: string; size?: "md" | "lg" }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-raised)] font-semibold text-[var(--text-primary)] ${
+        size === "lg" ? "h-11 px-3.5 text-[15px]" : "h-7 px-2.5 text-[13px]"
+      }`}
+    >
+      <Banknote
+        className={`${size === "lg" ? "h-4 w-4" : "h-3.5 w-3.5"} text-[var(--text-muted)]`}
+        aria-hidden
+      />
+      <span className="sr-only">Salary range </span>
+      {value}
+    </span>
+  );
 }
 
 /**

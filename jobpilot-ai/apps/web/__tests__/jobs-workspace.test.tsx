@@ -409,20 +409,25 @@ describe("Jobs workspace", () => {
     expect(screen.getAllByText("92").length).toBeGreaterThan(0);
     expect(screen.getByText("Title aligns with your target role")).toBeInTheDocument();
     expect(screen.getByText("2 of 3")).toBeInTheDocument(); // required skills matched
-    expect(screen.getByText(/Category-level\s+sub-scores are not calculated/)).toBeInTheDocument();
+    expect(screen.getByText(/does not break it into per-category sub-scores/)).toBeInTheDocument();
     expect(screen.getAllByText("$150k–190k").length).toBeGreaterThan(0);
-    // The matched/missing split is labelled as derived, never presented as a
-    // deeper scoring model.
-    expect(screen.getByText(/Derived from this job’s required skills/)).toBeInTheDocument();
+    // Strengths, gaps and coaching are all derived from real match fields.
+    expect(screen.getByText("Required skills you already match")).toBeInTheDocument();
+    expect(screen.getByText("Required skills not evidenced yet")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "How to improve your odds" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/They are not predictions of a new score/)
+    ).toBeInTheDocument();
   });
 
   it("omits salary entirely when the employer published none", async () => {
     mockApi();
     renderWorkspace("?job=2");
 
-    await screen.findByRole("heading", { level: 1, name: "Data Platform Engineer" });
-    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Salary/)).not.toBeInTheDocument();
+    const heading = await screen.findByRole("heading", { level: 1, name: "Data Platform Engineer" });
+    // No salary chip, and no placeholder standing in for one.
+    expect(heading.closest("header")).not.toHaveTextContent(/\$\d/);
+    expect(heading.closest("header")).not.toHaveTextContent(/Salary/);
   });
 
   it("renders the description as text, never as markup, with a source link", async () => {
@@ -448,18 +453,21 @@ describe("Jobs workspace", () => {
     renderWorkspace("?job=1");
 
     await screen.findByRole("heading", { level: 1, name: "Machine Learning Engineer" });
-    await userEvent.click(screen.getByRole("tab", { name: "Resume" }));
-    expect(screen.getByText("Not generated for this job yet.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Application materials" }));
+    // Both documents, their state, and the tailoring angle in one place.
+    expect(screen.getByRole("heading", { name: "Tailored resume" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Cover letter" })).toBeInTheDocument();
+    expect(screen.getAllByText("Not generated yet")).toHaveLength(2);
     expect(screen.getByText("Lead with Python, PyTorch.")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Generate tailored resume" }));
     expect(await screen.findByRole("heading", { name: "Tailored Resume" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Close document" }));
-    expect(await screen.findByText("Ready: Tailored Resume - Acme")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Preview and download" })).toBeInTheDocument();
+    expect(await screen.findByText("Ready · Tailored Resume - Acme")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Preview and download/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument();
     expect(api.calls.filter((call) => call.endsWith("/generate-resume"))).toHaveLength(1);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Cover letter" }));
     await userEvent.click(screen.getByRole("button", { name: "Generate cover letter" }));
     expect(await screen.findByRole("heading", { name: "Cover Letter" })).toBeInTheDocument();
     expect(api.calls.filter((call) => call.endsWith("/generate-cover-letter"))).toHaveLength(1);
@@ -563,6 +571,68 @@ describe("Jobs workspace", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Data Platform Engineer" })).toBeInTheDocument();
   });
 
+  it("keeps exactly two scroll regions in detail mode", async () => {
+    mockApi();
+    renderWorkspace("?job=1");
+
+    await screen.findByRole("heading", { level: 1, name: "Machine Learning Engineer" });
+    // The list column and the detail panel scroll; the page behind them does
+    // not, so a third scrollbar can never appear on desktop.
+    const scrollers = Array.from(document.querySelectorAll<HTMLElement>("[class]")).filter((node) =>
+      /(^|\s)overflow-y-auto(\s|$)/.test(node.className)
+    );
+    expect(scrollers).toHaveLength(2);
+    expect(document.querySelector(".min-h-\\[100dvh\\]")?.className).toContain("overflow-hidden");
+  });
+
+  it("surfaces salary on the list card, the compact card, and the detail header", async () => {
+    mockApi();
+    renderWorkspace();
+
+    await screen.findByText("Machine Learning Engineer");
+    // List card: prominent, and absent for the job without a published range.
+    expect(within(cardOf("Machine Learning Engineer")).getByText("$150k–190k")).toBeInTheDocument();
+    expect(within(cardOf("Data Platform Engineer")).queryByText(/\$\d/)).not.toBeInTheDocument();
+
+    await userEvent.click(cardOf("Machine Learning Engineer"));
+    const compact = await screen.findAllByTestId("compact-job-card");
+    expect(within(compact[0]).getByText("$150k–190k")).toBeInTheDocument();
+    expect(within(compact[1]).queryByText(/\$\d/)).not.toBeInTheDocument();
+    // And in the detail header, next to the primary actions.
+    expect(screen.getAllByText("$150k–190k").length).toBeGreaterThan(1);
+  });
+
+  it("renders networking contacts as clean cards without bookkeeping actions", async () => {
+    mockApi({
+      people: {
+        1: {
+          ...NOT_STARTED_PEOPLE,
+          status: "complete",
+          categories: {
+            likely_recruiters: [RECRUITER],
+            potential_hiring_managers: [],
+            potential_referrers: []
+          }
+        }
+      }
+    });
+    renderWorkspace("?job=1");
+
+    await screen.findByRole("heading", { level: 1, name: "Machine Learning Engineer" });
+    await userEvent.click(screen.getByRole("tab", { name: "Networking" }));
+
+    expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
+    expect(screen.getByText("Senior Technical Recruiter")).toBeInTheDocument();
+    expect(screen.getByText("Recruiter")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /LinkedIn/ })).toHaveAttribute(
+      "href",
+      "https://www.linkedin.com/in/rita-recruiter"
+    );
+    expect(screen.getByRole("button", { name: /Find work email/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Save contact/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Mark contacted/ })).not.toBeInTheDocument();
+  });
+
   it("saves and applies from the detail header", async () => {
     const api = mockApi();
     renderWorkspace("?job=1");
@@ -571,7 +641,7 @@ describe("Jobs workspace", () => {
     await userEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
 
     await waitFor(() => expect(api.calls).toContain("POST /jobs/1/save"));
-    expect((await screen.findAllByText("Saved to tracker")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Saved")).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: /Apply on official site/ }).length).toBeGreaterThan(0);
   });
 });

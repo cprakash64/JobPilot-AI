@@ -257,6 +257,29 @@ input[type="radio"] {
   background: var(--text-muted);
 }
 
+/* Immersive workspace (the Jobs detail view): the layout owns its scrolling —
+ * one region for the job list, one for the detail panel. The document itself is
+ * pinned, because a full-height layout still leaves the page a few pixels of
+ * scroll range in Chromium, and those pixels render a third scrollbar. */
+.workspace-locked,
+.workspace-locked body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* A strip that scrolls sideways without advertising it — used by the job tab
+ * bar on narrow screens, where a full scrollbar under four tabs is louder than
+ * the tabs themselves. The strip stays keyboard- and swipe-scrollable. */
+.scroll-strip {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scroll-strip::-webkit-scrollbar {
+  display: none;
+}
+
 /* Screen-reader-only helper — used for "(required)" and error prefixes so
  * meaning never depends on colour alone. */
 .sr-only {

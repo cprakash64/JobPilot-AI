@@ -423,12 +423,11 @@ describe("PeopleWhoCanHelp", () => {
     expect(screen.getByText("Location used as a soft signal")).toBeInTheDocument();
     expect(screen.getByText("Related-company matches were not included")).toBeInTheDocument();
     expect(screen.getByText("Using current cached search")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /LinkedIn profile/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /LinkedIn/ })).toHaveAttribute(
       "rel", "noopener noreferrer"
     );
     expect(screen.getByRole("button", { name: /Find work email/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Create LinkedIn draft/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Create email draft/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Draft message" })).toBeInTheDocument();
   });
 
   it("does not render a profile action for a non-allowlisted URL", async () => {
@@ -449,7 +448,9 @@ describe("PeopleWhoCanHelp", () => {
     }));
     render(<PeopleWhoCanHelp jobId={7} />);
     await screen.findByText("Rita Recruiter");
-    expect(screen.queryByRole("link", { name: "LinkedIn profile" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /LinkedIn/ })).not.toBeInTheDocument();
+    // An honest disabled affordance replaces the link — never a guessed URL.
+    expect(screen.getByTitle(/never guesses a profile URL/)).toBeInTheDocument();
   });
 
   it("shows employment verification and blocks email lookup when employment conflicts", async () => {
@@ -476,7 +477,7 @@ describe("PeopleWhoCanHelp", () => {
     render(<PeopleWhoCanHelp jobId={7} />);
 
     expect(await screen.findByText("Current employment needs revalidation.")).toBeInTheDocument();
-    expect(screen.getByText("Current employment confidence: 10%")).toBeInTheDocument();
+    expect(screen.getByText(/High confidence · employment verified/)).toBeInTheDocument();
     expect(screen.getByText(/Work email is unavailable until current employment is revalidated/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Find work email/ })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -544,7 +545,7 @@ describe("PeopleWhoCanHelp", () => {
       });
     vi.stubGlobal("fetch", fetchMock);
     render(<PeopleWhoCanHelp jobId="7" />);
-    fireEvent.click(await screen.findByRole("button", { name: /Create LinkedIn draft/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Draft message" }));
     expect(await screen.findByRole("dialog", { name: "Review outreach draft" })).toBeInTheDocument();
     expect(screen.getByText(/never sends this message automatically/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Outreach draft")).toHaveValue(
@@ -652,7 +653,7 @@ describe("PeopleWhoCanHelp in the job workspace", () => {
     expect(await screen.findByText("Rita Recruiter")).toBeInTheDocument();
     expect(screen.getByText("Pat Referrer")).toBeInTheDocument();
     expect(screen.getByText("1 recruiter · 0 potential managers · 1 referral candidate")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "LinkedIn profile" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /LinkedIn/ })).toHaveAttribute(
       "href",
       "https://www.linkedin.com/in/rita-recruiter"
     );

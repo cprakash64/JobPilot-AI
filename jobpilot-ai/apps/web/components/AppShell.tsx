@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -56,6 +56,9 @@ export function AppShell({
     override: null
   });
   const collapsed = state.override ?? state.requested;
+  // The page's own request — not the user's sidebar preference — is what says
+  // "this screen fills the viewport and manages its own scrolling".
+  const immersive = workspace && state.requested;
 
   const requestCollapsed = useCallback((value: boolean) => {
     setState((current) =>
@@ -67,17 +70,38 @@ export function AppShell({
     setState((current) => ({ ...current, override: !(current.override ?? current.requested) }));
   }, []);
 
+  // Pinning the document is the only reliable way to guarantee the page itself
+  // never contributes a scrollbar behind a viewport-height layout.
+  useEffect(() => {
+    if (!immersive) {
+      return;
+    }
+    const root = document.documentElement;
+    root.classList.add("workspace-locked");
+    return () => root.classList.remove("workspace-locked");
+  }, [immersive]);
+
   const api = useMemo<AppShellApi>(() => ({ collapsed, requestCollapsed }), [collapsed, requestCollapsed]);
 
   return (
     <AppShellContext.Provider value={api}>
-      {/* A workspace page sizes itself to the *dynamic* viewport, matching the
-        * detail panel's own 100dvh. min-h-screen (100vh) would be taller than
-        * the visible area wherever browser chrome collapses, leaving the whole
-        * page scrollable behind a full-height layout. */}
-      <div className={`bg-[var(--background)] ${workspace ? "min-h-[100dvh]" : "min-h-screen"}`}>
+      {/*
+        * A workspace page sizes itself to the *dynamic* viewport, matching the
+        * detail layout's own 100dvh: min-h-screen (100vh) is taller than the
+        * visible area wherever browser chrome collapses, which left the whole
+        * page scrollable behind a full-height layout.
+        *
+        * While a page is in immersive mode (the Jobs detail workspace), the
+        * document itself is pinned so the only scrollbars on screen are the two
+        * the layout owns — the job list and the detail panel.
+        */}
+      <div
+        className={`bg-[var(--background)] ${
+          workspace ? "min-h-[100dvh]" : "min-h-screen"
+        } ${immersive ? "h-[100dvh] overflow-hidden" : ""}`}
+      >
         <SideBar collapsed={collapsed} onToggle={toggle} />
-        <main className={collapsed ? "lg:pl-14" : "lg:pl-64"}>
+        <main className={`${collapsed ? "lg:pl-14" : "lg:pl-64"} ${immersive ? "h-full" : ""}`}>
           {workspace ? children : <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</div>}
         </main>
       </div>

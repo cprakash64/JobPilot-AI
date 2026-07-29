@@ -252,7 +252,7 @@ describe("JobDiscovery", () => {
     await userEvent.click(await screen.findByText("Persisted-ID Engineer"));
 
     expect(await screen.findByRole("heading", { name: "Persisted-ID Engineer" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Why this matches" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What is working for you" })).toBeInTheDocument();
     // Overview alone must not reach the people API.
     expect(
       vi.mocked(fetch).mock.calls.filter(([input]) => /\/jobs\/\d+\/people/.test(String(input)))
@@ -392,7 +392,7 @@ describe("JobDiscovery", () => {
     render(React.createElement(JobDiscovery));
     await userEvent.click(await screen.findByRole("button", { name: /Find fresh jobs/ }));
     expect(
-      await screen.findByText("We found only a few strict matches. Add more target roles or locations to broaden results.")
+      await screen.findByText("Only a few strict matches — add target roles or locations to broaden results.")
     ).toBeInTheDocument();
   });
 

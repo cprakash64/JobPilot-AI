@@ -59,8 +59,14 @@ export function JobDiscovery() {
   const [generating, setGenerating] = useState<{ jobId: number; type: DocType } | null>(null);
   const [tracker, setTracker] = useState<Record<number, TrackerStatus>>({});
 
-  const [tab, setTab] = useState<DetailTab>("overview");
-  const requestedTab = useRef<DetailTab | null>(null);
+  // The active tab is stored against the job it belongs to, so switching jobs
+  // resolves to Overview during the *first* render of the new job rather than
+  // in an effect afterwards. That ordering matters: a Networking tab left
+  // mounted for even one commit would read the new job's people.
+  const [tabState, setTabState] = useState<{ jobId: number | null; tab: DetailTab }>({
+    jobId: null,
+    tab: "overview"
+  });
   const listScroll = useRef(0);
   const generatingRef = useRef(false);
 
@@ -232,12 +238,11 @@ export function JobDiscovery() {
   const detailLoading = selectedId !== null && !selectedJob && (!listLoaded || needsDetailFetch);
   const detailError = detailAttempt?.jobId === selectedId ? detailAttempt.error : "";
 
-  // Opening a job always starts on Overview, unless the user pressed a control
-  // that names a section (the People action on a card).
-  useEffect(() => {
-    setTab(requestedTab.current ?? "overview");
-    requestedTab.current = null;
-  }, [selectedId]);
+  const tab: DetailTab = tabState.jobId === selectedId ? tabState.tab : "overview";
+  const setTab = useCallback(
+    (next: DetailTab) => setTabState({ jobId: selectedId, tab: next }),
+    [selectedId]
+  );
 
   const selectedIndex = useMemo(
     () => (selectedId === null ? -1 : filtered.findIndex((job) => job.id === selectedId)),
@@ -249,10 +254,9 @@ export function JobDiscovery() {
       if (typeof window !== "undefined") {
         listScroll.current = window.scrollY;
       }
-      if (targetTab) {
-        requestedTab.current = targetTab;
-        setTab(targetTab);
-      }
+      // Claiming the tab for the job being opened means the panel's first
+      // render already shows the right section.
+      setTabState({ jobId, tab: targetTab ?? "overview" });
       selectJob(jobId);
     },
     [selectJob]
@@ -413,22 +417,25 @@ export function JobDiscovery() {
 
   if (detailOpen) {
     return (
-      <div className="flex h-[100dvh] min-h-0 flex-col">
+      // Exactly two scroll regions live below: the compact list and the detail
+      // panel. This container is pinned to the viewport and never scrolls, and
+      // AppShell pins the document behind it.
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <p role="status" aria-live="polite" className="sr-only">
           {selectedJob ? `Showing ${selectedJob.title} at ${selectedJob.company}` : "Loading job details"}
         </p>
         <div className="flex min-h-0 flex-1">
           <aside
             aria-label="Job results"
-            className="hidden w-[300px] shrink-0 flex-col border-r border-line bg-[var(--background)] md:flex lg:w-[340px]"
+            className="hidden w-[304px] shrink-0 flex-col border-r border-line bg-[var(--background)] md:flex lg:w-[340px]"
           >
-            <div className="shrink-0 border-b border-line px-3 py-3">
+            <div className="shrink-0 px-3 pb-2.5 pt-3">
               <div className="flex items-center gap-2">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-[var(--text-muted)]" />
                   <input
                     aria-label="Role or skill"
-                    className="h-9 w-full rounded-lg border border-line bg-panel/20 pl-9 pr-3 text-sm"
+                    className="h-9 w-full rounded-lg border border-line bg-panel/40 pl-9 pr-3 text-sm"
                     placeholder="Search role or skill"
                     value={query.q}
                     onChange={(event) => onFilterChange({ q: event.target.value })}
@@ -439,12 +446,12 @@ export function JobDiscovery() {
                   onClick={closeJob}
                   aria-label="Show all jobs"
                   title="Show all jobs"
-                  className="focus-ring inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--text-muted)] hover:bg-panel"
+                  className="focus-ring inline-flex h-9 w-9 items-center justify-center rounded-lg text-[var(--text-muted)] transition-colors hover:bg-panel hover:text-[var(--text-secondary)]"
                 >
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <p className="mt-2 text-xs text-[var(--text-muted)]">{resultSummary}</p>
+              <p className="mt-2.5 px-0.5 text-xs text-[var(--text-muted)]">{resultSummary}</p>
             </div>
             <CompactJobList
               jobs={filtered}
@@ -490,29 +497,35 @@ export function JobDiscovery() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      <header className="mb-5">
-        <h1 className="text-3xl font-semibold tracking-tight">Jobs</h1>
-        <p className="mt-1.5 text-[var(--text-muted)]">
-          Fresh roles matched to your profile, from official application sources.
-        </p>
+    <div className="mx-auto w-full max-w-[1080px] px-5 pb-16 pt-8 sm:px-8">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-[1.75rem] font-semibold tracking-[-0.02em]">Jobs</h1>
+          <p className="mt-1.5 text-[15px] text-[var(--text-muted)]">
+            Fresh roles matched to your profile, from official application sources.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" onClick={findFreshJobs} disabled={busy}>
+            {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} Find fresh jobs
+          </Button>
+          <Button variant="secondary" type="button" onClick={refreshMatches} disabled={busy}>
+            {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh matches
+          </Button>
+        </div>
       </header>
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <Button type="button" onClick={findFreshJobs} disabled={busy}>
-          {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} Find fresh jobs
-        </Button>
-        <Button variant="secondary" type="button" onClick={refreshMatches} disabled={busy}>
-          {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh matches
-        </Button>
-        {message && <p className="self-center text-sm text-[var(--text-muted)]">{message}</p>}
-        {error && <p className="self-center text-sm text-[var(--danger)]">{error}</p>}
-      </div>
+      {(message || error) && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          {message && <p className="text-sm text-[var(--text-muted)]">{message}</p>}
+          {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
+        </div>
+      )}
 
       {!profileComplete && (
-        <div className="mb-4 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-sm text-[var(--warning)]">
+        <div className="mt-5 rounded-xl border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4 text-sm text-[var(--warning)]">
           <p className="font-semibold">Complete your profile to discover better jobs.</p>
-          <p className="mt-1">
+          <p className="mt-1 leading-6">
             Add target roles and skills on your <a className="font-medium text-pine underline" href="/profile">profile</a> so we can
             match jobs to you. You can still run a basic search with what you have.
           </p>
@@ -520,12 +533,12 @@ export function JobDiscovery() {
       )}
 
       {warnings.length > 0 && (
-        <div className="mb-4 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4">
+        <div className="mt-5 rounded-xl border border-[var(--warning-border)] bg-[var(--warning-surface)] p-4">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--warning)]" />
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--warning)]" />
             <div className="text-sm text-[var(--warning)]">
               <p className="font-semibold">A small number of sources are temporarily unavailable</p>
-              <ul className="mt-1 list-disc pl-5">
+              <ul className="mt-1 list-disc pl-5 leading-6">
                 {warnings.map((warning) => (
                   <li key={warning}>{warning}</li>
                 ))}
@@ -535,22 +548,23 @@ export function JobDiscovery() {
         </div>
       )}
 
-      <JobsFilterBar query={query} onChange={onFilterChange} dateRefreshing={dateRefreshing} />
+      <div className="mt-6">
+        <JobsFilterBar query={query} onChange={onFilterChange} dateRefreshing={dateRefreshing} />
+      </div>
 
-      <div className="mb-3 mt-3 text-sm text-[var(--text-muted)]">
+      <div className="mt-5 flex flex-wrap items-baseline justify-between gap-2 text-sm text-[var(--text-muted)]">
         <p>
           <span className="font-medium text-[var(--text-secondary)]">{resultSummary}</span>
           {` · Posted in the last ${query.postedWithin === 1 ? "24 hours" : `${query.postedWithin} days`}`}
         </p>
+        {hasDiscovered && filtered.length > 0 && filtered.length < 10 && (
+          <p className="text-[var(--text-muted)]">
+            Only a few strict matches — add target roles or locations to broaden results.
+          </p>
+        )}
       </div>
 
-      {hasDiscovered && filtered.length > 0 && filtered.length < 10 && (
-        <p className="mb-3 rounded-md border border-[var(--warning-border)] bg-[var(--warning-surface)] px-3 py-2 text-sm text-[var(--warning)]">
-          We found only a few strict matches. Add more target roles or locations to broaden results.
-        </p>
-      )}
-
-      <div className="grid gap-4">
+      <div className="mt-3.5 grid gap-3">
         {filtered.map((job) => (
           <JobCard
             key={job.id}
@@ -561,12 +575,14 @@ export function JobDiscovery() {
           />
         ))}
         {filtered.length === 0 && (
-          <div className="rounded-lg border border-line bg-white p-8 text-center text-[var(--text-muted)]">
-            {!profileComplete
-              ? "Complete your profile to discover better jobs."
-              : hasDiscovered
-                ? "No fresh jobs matched your selected roles, level, and locations. Try broadening your target roles or locations."
-                : "Click “Find fresh jobs” to pull recent postings matched to your profile."}
+          <div className="rounded-2xl border border-line bg-white px-6 py-14 text-center">
+            <p className="mx-auto max-w-sm text-sm leading-6 text-[var(--text-muted)]">
+              {!profileComplete
+                ? "Complete your profile to discover better jobs."
+                : hasDiscovered
+                  ? "No fresh jobs matched your selected roles, level, and locations. Try broadening your target roles or locations."
+                  : "Click “Find fresh jobs” to pull recent postings matched to your profile."}
+            </p>
           </div>
         )}
       </div>
@@ -598,7 +614,10 @@ function CompactJobList({
   }, [selectedId]);
 
   return (
-    <ul ref={container} className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain p-2">
+    <ul
+      ref={container}
+      className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pb-3"
+    >
       {jobs.map((job) => (
         <CompactJobCard
           key={job.id}
