@@ -29,6 +29,7 @@ from urllib.parse import urljoin, urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.jobs.ats_hosts import is_ats_or_aggregator_host
 from app.jobs.safe_fetch import (
     FetchFailedError,
     UnsafeUrlError,
@@ -494,33 +495,12 @@ def _clean_domain(domain: str | None) -> str:
 clean_company_domain = _clean_domain
 
 
-_SHARED_JOB_HOSTS = (
-    # Documentation/test placeholders are never evidence of an employer-owned
-    # application host. Treating them as a real company domain made a synthetic
-    # fixture look like successfully resolved production branding.
-    "example.com",
-    "example.org",
-    "example.net",
-    "myworkdayjobs.com",
-    "workday.com",
-    "greenhouse.io",
-    "lever.co",
-    "ashbyhq.com",
-    "smartrecruiters.com",
-    "workable.com",
-    "breezy.hr",
-    "recruitee.com",
-    "teamtailor.com",
-    "applytojob.com",
-    "simplify.jobs",
-)
-
-
 def _employer_domain_from_application_url(application_url: str | None) -> str:
     """Return a domain only when the application is hosted by the employer.
 
     This is intentionally conservative. It improves branding for direct links
-    such as ``jobs.boeing.com`` while refusing shared ATS/aggregator domains.
+    such as ``jobs.boeing.com`` while refusing shared ATS/aggregator domains,
+    which are enumerated once in :mod:`app.jobs.ats_hosts`.
     """
     if not application_url:
         return ""
@@ -530,7 +510,7 @@ def _employer_domain_from_application_url(application_url: str | None) -> str:
         return ""
     if not host or not _DOMAIN_RE.match(host):
         return ""
-    if any(host == shared or host.endswith(f".{shared}") for shared in _SHARED_JOB_HOSTS):
+    if is_ats_or_aggregator_host(host):
         return ""
     parts = host.split(".")
     if len(parts) > 2 and parts[-2:] not in (["co", "uk"], ["com", "au"]):

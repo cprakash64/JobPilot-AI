@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 # ruff: noqa: E501
+import asyncio
 import hashlib
 import logging
 import re
 import time
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Protocol
 from urllib.parse import quote, urlsplit
 
 import httpx
 
 from app.core.config import settings
+from app.people import circuit, pdl_company, pdl_query, pdl_status
 from app.people.bulk_capability import (
     bulk_capability_state,
     record_bulk_request_level_422,
@@ -25,6 +28,15 @@ from app.people.complete_person_cache import (
     get_complete_person,
 )
 from app.people.employment_validation import EMPLOYMENT_EVIDENCE_VERSION
+from app.people.errors import (
+    PeopleErrorCode,
+    code_for_http_status,
+    code_for_reason,
+    is_request_scoped,
+    reason_for_code,
+)
+from app.people.observability import metric
+from app.people.pdl_status import PdlEndpoint
 from app.people.provider_usage import (
     ProviderUsageContext,
     ProviderUsageRecorder,
@@ -34,6 +46,7 @@ from app.people.provider_usage import (
 )
 from app.people.schemas import (
     EmailVerificationResult,
+    PeopleCategory,
     PeopleSearchQuery,
     PersonEnrichmentRequest,
     ProviderPerson,
@@ -69,6 +82,8 @@ class ProviderUnavailable(RuntimeError):
         http_status: int | None = None,
         duration_ms: float | None = None,
         safe_metadata: dict[str, object] | None = None,
+        code: PeopleErrorCode | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
@@ -76,11 +91,47 @@ class ProviderUnavailable(RuntimeError):
         self.http_status = http_status
         self.duration_ms = duration_ms
         self.safe_metadata = safe_metadata or {}
+        # The typed code is authoritative for circuit and fallback decisions.
+        # ``reason`` stays as the persisted/wire representation.
+        self.code = code or code_for_reason(reason)
+        self.retry_after_seconds = retry_after_seconds
+
+    @property
+    def request_scoped(self) -> bool:
+        return is_request_scoped(self.code)
 
 
-_CIRCUITS: dict[str, tuple[int, datetime | None]] = {}
-_CIRCUIT_FAILURE_THRESHOLD = 3
-_CIRCUIT_RESET_SECONDS = 60
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    """Honour Retry-After when the provider sends one, in either RFC format."""
+
+    raw = (response.headers.get("Retry-After") or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return max(1, min(3600, int(raw)))
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(1, min(3600, int((when - datetime.now(UTC)).total_seconds() + 0.999)))
+
+
+def account_fingerprint(api_key: str | None) -> str:
+    """Non-reversible identity for a provider account.
+
+    Circuit state must be keyed per credential so rotating a key starts from a
+    clean state and two accounts cannot poison each other. The raw key is never
+    stored, logged, or used as part of any key.
+    """
+
+    digest = hashlib.sha256(
+        f"people-account:{api_key or 'unconfigured'}".encode()
+    ).hexdigest()
+    return digest[:16]
 
 
 class PeopleDiscoveryProvider(Protocol):
@@ -95,12 +146,15 @@ class WorkEmailProvider(Protocol):
 
 
 class _HttpProvider:
-    def __init__(self, provider_name: str) -> None:
+    def __init__(self, provider_name: str, api_key: str | None = None) -> None:
         self.provider_name = provider_name
         self.requests = 0
         self.credits = 0
         self.last_http_status: int | None = None
         self.last_duration_ms: float | None = None
+        # Circuit state is scoped to this credential, never to the raw key.
+        self.account_fingerprint = account_fingerprint(api_key)
+        self.last_pdl_outcome: pdl_status.PdlOutcome | None = None
         self._usage_recorder: ProviderUsageRecorder | None = None
         self._usage_context: ProviderUsageContext | None = None
         self._usage_ordinals: dict[str, int] = defaultdict(int)
@@ -195,15 +249,53 @@ class _HttpProvider:
             estimate_when_unknown=estimate_when_unknown,
         )
 
-    def _failure(self) -> None:
-        failures, _ = _CIRCUITS.get(self.provider_name, (0, None))
-        failures += 1
-        opened = (
-            datetime.now(UTC) + timedelta(seconds=_CIRCUIT_RESET_SECONDS)
-            if failures >= _CIRCUIT_FAILURE_THRESHOLD
-            else None
+    def _failure(
+        self,
+        code: PeopleErrorCode,
+        *,
+        operation_type: str = "unspecified",
+    ) -> None:
+        """Record a failure against only the circuit its type is allowed to move.
+
+        Request-scoped codes — bad input, an ordinary 4xx, an unresolved domain,
+        a cancellation — return without touching any circuit, which is what keeps
+        one malformed company from pausing every other company's search.
+        """
+
+        circuit.record_failure(
+            provider=self.provider_name,
+            account_fingerprint=self.account_fingerprint,
+            operation=operation_type,
+            code=code,
         )
-        _CIRCUITS[self.provider_name] = (failures, opened)
+
+    def _success(self, operation_type: str) -> None:
+        """A healthy response, including a successful empty one, closes circuits."""
+
+        circuit.record_success(
+            provider=self.provider_name,
+            account_fingerprint=self.account_fingerprint,
+            operation=operation_type,
+        )
+
+    def _circuit_gate(self, operation_type: str) -> None:
+        decision = circuit.allow(
+            provider=self.provider_name,
+            account_fingerprint=self.account_fingerprint,
+            operation=operation_type,
+        )
+        if decision.allowed:
+            return
+        reason = {
+            "configuration": "provider_configuration_circuit_open",
+            "budget": "provider_budget_exceeded",
+        }.get(decision.kind or "", "provider_circuit_open")
+        raise ProviderUnavailable(
+            reason,
+            provider=self.provider_name,
+            duration_ms=0,
+            retry_after_seconds=decision.retry_after_seconds,
+        )
 
     async def _request(
         self,
@@ -213,16 +305,17 @@ class _HttpProvider:
         operation_type: str,
         status_reason_overrides: dict[int, str] | None = None,
         malformed_response_reason: str = "provider_schema_error",
+        pdl_endpoint: PdlEndpoint | None = None,
         **kwargs,
     ) -> dict:
-        _, opened = _CIRCUITS.get(self.provider_name, (0, None))
-        if opened and opened > datetime.now(UTC):
-            raise ProviderUnavailable(
-                "provider_circuit_open", provider=self.provider_name, duration_ms=0
-            )
-        if opened:
-            # Allow one clean half-open attempt after the reset interval.
-            _CIRCUITS[self.provider_name] = (0, None)
+        """Issue one provider request.
+
+        ``pdl_endpoint`` opts into endpoint-aware classification. PDL answers a
+        query that matched nothing with HTTP 404, so without it a company with
+        no profiles is indistinguishable from a malformed request.
+        """
+
+        self._circuit_gate(operation_type)
         usage_key = self._start_usage(operation_type)
         self.requests += 1
         timeout = httpx.Timeout(settings.people_provider_timeout_seconds)
@@ -236,11 +329,14 @@ class _HttpProvider:
                 http_outcome="provider_timeout",
                 operation_type=operation_type,
             )
-            self._failure()
+            self._failure(
+                PeopleErrorCode.PROVIDER_TIMEOUT, operation_type=operation_type
+            )
             raise ProviderUnavailable(
                 "provider_timeout",
                 provider=self.provider_name,
                 duration_ms=(time.monotonic() - started) * 1000,
+                code=PeopleErrorCode.PROVIDER_TIMEOUT,
             ) from exc
         except httpx.NetworkError as exc:
             self._finish_usage(
@@ -248,12 +344,25 @@ class _HttpProvider:
                 http_outcome="provider_network_error",
                 operation_type=operation_type,
             )
-            self._failure()
+            self._failure(
+                PeopleErrorCode.NETWORK_ERROR, operation_type=operation_type
+            )
             raise ProviderUnavailable(
                 "provider_network_error",
                 provider=self.provider_name,
                 duration_ms=(time.monotonic() - started) * 1000,
+                code=PeopleErrorCode.NETWORK_ERROR,
             ) from exc
+        except asyncio.CancelledError:
+            # A cancelled request — the client disconnected, or the caller gave
+            # up — says nothing about provider health, so no failure counter
+            # moves and the cancellation propagates untouched.
+            self._finish_usage(
+                usage_key,
+                http_outcome="provider_request_cancelled",
+                operation_type=operation_type,
+            )
+            raise
         duration_ms = (time.monotonic() - started) * 1000
         self.last_http_status = response.status_code
         self.last_duration_ms = duration_ms
@@ -274,6 +383,17 @@ class _HttpProvider:
             http_status=response.status_code,
             response_was_malformed=parsed_payload is None,
         )
+        retry_after = _retry_after_seconds(response)
+        if pdl_endpoint is not None:
+            return self._resolve_pdl_response(
+                endpoint=pdl_endpoint,
+                response=response,
+                payload=parsed_payload,
+                operation_type=operation_type,
+                duration_ms=duration_ms,
+                retry_after=retry_after,
+                malformed_response_reason=malformed_response_reason,
+            )
         reason = (status_reason_overrides or {}).get(response.status_code) or {
             401: "provider_unauthorized",
             403: "provider_forbidden",
@@ -281,16 +401,18 @@ class _HttpProvider:
             422: "provider_schema_error",
         }.get(response.status_code)
         if reason:
-            # Only transient failures contribute to the circuit. Permanent
-            # credentials/access/schema failures must keep their precise reason
-            # instead of being masked by provider_circuit_open on later calls.
-            if response.status_code == 429:
-                self._failure()
+            # The typed code decides which circuit, if any, may move. A 422 or
+            # other request-shaped rejection keeps its precise reason and stays
+            # scoped to this request instead of pausing the provider.
+            code = code_for_reason(reason)
+            self._failure(code, operation_type=operation_type)
             raise ProviderUnavailable(
                 reason,
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
+                code=code,
+                retry_after_seconds=retry_after,
                 safe_metadata=(
                     (
                         {"error_types": ["validation_response_too_large"]}
@@ -303,53 +425,126 @@ class _HttpProvider:
                 ),
             )
         if len(response.content) > settings.people_provider_response_max_bytes:
-            self._failure()
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type=operation_type
+            )
             raise ProviderUnavailable(
                 "provider_schema_error",
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
             )
         if response.status_code >= 500:
-            self._failure()
+            self._failure(
+                PeopleErrorCode.PROVIDER_SERVER_ERROR,
+                operation_type=operation_type,
+            )
             raise ProviderUnavailable(
                 "provider_unavailable",
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
-            )
-        if parsed_payload is None:
-            self._failure()
-            raise ProviderUnavailable(
-                malformed_response_reason,
-                provider=self.provider_name,
-                http_status=response.status_code,
-                duration_ms=duration_ms,
+                code=PeopleErrorCode.PROVIDER_SERVER_ERROR,
+                retry_after_seconds=retry_after,
             )
         if response.status_code >= 400:
-            self._failure()
+            # An ordinary 400/404 describes this request, not provider health.
+            code = code_for_http_status(response.status_code)
+            self._failure(code, operation_type=operation_type)
             raise ProviderUnavailable(
-                "provider_unavailable",
+                reason_for_code(code),
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
+                code=code,
+                retry_after_seconds=retry_after,
             )
-        if not isinstance(parsed_payload, dict):
-            self._failure()
+        if parsed_payload is None or not isinstance(parsed_payload, dict):
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type=operation_type
+            )
             raise ProviderUnavailable(
                 malformed_response_reason,
                 provider=self.provider_name,
                 http_status=response.status_code,
                 duration_ms=duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
             )
-        _CIRCUITS[self.provider_name] = (0, None)
+        self._success(operation_type)
         return parsed_payload
+
+    def _resolve_pdl_response(
+        self,
+        *,
+        endpoint: PdlEndpoint,
+        response: httpx.Response,
+        payload: object,
+        operation_type: str,
+        duration_ms: float,
+        retry_after: int | None,
+        malformed_response_reason: str,
+    ) -> dict:
+        """Apply PDL's documented, endpoint-specific status semantics.
+
+        A no-match is a *successful* answer: it closes circuits like any other
+        healthy response and returns an empty result set, so the orchestration
+        layer sees "nobody matched" rather than "the request was rejected".
+        """
+
+        if len(response.content) > settings.people_provider_response_max_bytes:
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type=operation_type
+            )
+            raise ProviderUnavailable(
+                "provider_schema_error",
+                provider=self.provider_name,
+                http_status=response.status_code,
+                duration_ms=duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
+                safe_metadata={"provider_endpoint": endpoint},
+            )
+        outcome = pdl_status.classify(
+            endpoint=endpoint,
+            status_code=response.status_code,
+            payload=payload,
+        )
+        self.last_pdl_outcome = outcome
+        if outcome.no_match:
+            self._success(operation_type)
+            return {"data": [], "total": 0, "pdl_no_match": True}
+        if not outcome.ok:
+            assert outcome.code is not None and outcome.reason is not None
+            self._failure(outcome.code, operation_type=operation_type)
+            raise ProviderUnavailable(
+                outcome.reason,
+                provider=self.provider_name,
+                http_status=response.status_code,
+                duration_ms=duration_ms,
+                code=outcome.code,
+                retry_after_seconds=retry_after,
+                safe_metadata=outcome.safe_metadata,
+            )
+        if payload is None or not isinstance(payload, dict):
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type=operation_type
+            )
+            raise ProviderUnavailable(
+                malformed_response_reason,
+                provider=self.provider_name,
+                http_status=response.status_code,
+                duration_ms=duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
+                safe_metadata={"provider_endpoint": endpoint},
+            )
+        self._success(operation_type)
+        return payload
 
 
 class ApolloPeopleProvider(_HttpProvider):
     def __init__(self, api_key: str | None = None) -> None:
-        super().__init__("apollo")
         self.api_key = api_key or settings.apollo_api_key
+        super().__init__("apollo", self.api_key)
         self._bulk_account_scope = hashlib.sha256(
             (self.api_key or "").encode()
         ).hexdigest()
@@ -402,12 +597,17 @@ class ApolloPeopleProvider(_HttpProvider):
         )
         rows = data.get("people")
         if not isinstance(rows, list):
-            self._failure()
+            # An unexpected 200 body is an adapter/request-shape problem, not
+            # evidence that the provider is down.
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type="people_search"
+            )
             raise ProviderUnavailable(
                 "provider_schema_error",
                 provider=self.provider_name,
                 http_status=self.last_http_status,
                 duration_ms=self.last_duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
             )
         self.search_identifier_safe_metrics = _search_identifier_safe_metrics(rows)
         logger.info(
@@ -436,12 +636,17 @@ class ApolloPeopleProvider(_HttpProvider):
             )
         ]
         if rows and not normalized:
-            self._failure()
+            # An unexpected 200 body is an adapter/request-shape problem, not
+            # evidence that the provider is down.
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type="people_search"
+            )
             raise ProviderUnavailable(
                 "provider_schema_error",
                 provider=self.provider_name,
                 http_status=self.last_http_status,
                 duration_ms=self.last_duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
             )
         return normalized
 
@@ -849,21 +1054,307 @@ class ApolloPeopleProvider(_HttpProvider):
 
 class PDLPeopleProvider(_HttpProvider):
     def __init__(self, api_key: str | None = None) -> None:
-        super().__init__("pdl")
         self.api_key = api_key or settings.pdl_api_key
+        super().__init__("pdl", self.api_key)
         self._search_profiles: dict[str, ProviderPerson] = {}
         self.last_search_raw_count = 0
         self.last_search_normalized_count = 0
+        # Bounded across every category and ladder rung of one discovery, so
+        # relaxation can never multiply provider spend without a ceiling.
+        self.search_calls = 0
+        self.strategy_calls: list[dict[str, object]] = []
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "X-Api-Key": self.api_key or "",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    @property
+    def call_budget_remaining(self) -> int:
+        return max(
+            0,
+            settings.people_pdl_max_provider_calls_per_discovery - self.search_calls,
+        )
+
+    async def resolve_company(
+        self,
+        *,
+        raw_name: str,
+        normalized_name: str,
+        aliases: tuple[str, ...] = (),
+        verified_domain: str | None = None,
+    ) -> pdl_company.PdlCompanyIdentity:
+        """Resolve the hiring company to a verified PDL company id.
+
+        Cached both ways: a resolved identity avoids re-spending an enrichment
+        call, and an unresolved one avoids re-spending it to learn the same
+        thing. Never guesses — an answer PDL is unsure about, or one that names
+        a different organization, is rejected.
+        """
+
+        cached = pdl_company.identity_from_cache(
+            raw_name=raw_name,
+            normalized_name=normalized_name,
+            domain=verified_domain,
+        )
+        if cached is not None:
+            return cached
+
+        unresolved = pdl_company.PdlCompanyIdentity(
+            raw_name=raw_name,
+            normalized_name=normalized_name,
+            aliases=aliases,
+            verified_domain=verified_domain,
+        )
+        if not self.api_key:
+            raise ProviderUnavailable(
+                "provider_not_configured",
+                provider=self.provider_name,
+                code=PeopleErrorCode.AUTHENTICATION_FAILED,
+            )
+        if not settings.people_pdl_company_resolution_enabled:
+            return unresolved
+
+        # Strongest evidence first: the verified domain, then the canonical
+        # name, then a known alias.
+        attempts: list[tuple[str, dict[str, str], str]] = []
+        if verified_domain:
+            attempts.append(
+                (
+                    "pdl_company_enrich_domain",
+                    {"website": verified_domain},
+                    raw_name,
+                )
+            )
+        attempts.append(
+            ("pdl_company_enrich_name", {"name": raw_name}, raw_name)
+        )
+        for alias in aliases:
+            if alias and alias != raw_name:
+                attempts.append(
+                    ("pdl_company_enrich_alias", {"name": alias}, alias)
+                )
+
+        identity = unresolved
+        for source, params, asked_name in attempts[:3]:
+            if self.call_budget_remaining <= 0:
+                break
+            try:
+                company = await self._company_enrich(params)
+            except ProviderUnavailable as exc:
+                if exc.code in {
+                    PeopleErrorCode.AUTHENTICATION_FAILED,
+                    PeopleErrorCode.AUTHORIZATION_FAILED,
+                    PeopleErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+                }:
+                    raise
+                # A transient or request-scoped company-lookup failure leaves
+                # the company unresolved; it never fails the whole search.
+                logger.info(
+                    "pdl_company_resolution_failed source=%s reason=%s",
+                    source,
+                    exc.reason,
+                )
+                continue
+            if company is None:
+                continue
+            identity = pdl_company.build_identity(
+                raw_name=raw_name,
+                normalized_name=normalized_name,
+                aliases=aliases,
+                verified_domain=verified_domain,
+                company=company,
+                source=source,
+                asked_name=asked_name,
+            )
+            if identity.resolved:
+                break
+        pdl_company.cache_identity(identity, domain=verified_domain)
+        metric(
+            "people_company_resolution_total",
+            provider="pdl",
+            result="resolved" if identity.resolved else "unresolved",
+            source=identity.source,
+        )
+        logger.info(
+            "pdl_company_resolution company=%r normalized=%r domain=%s "
+            "pdl_company_id=%s source=%s confidence=%.2f rejected=%s",
+            raw_name,
+            normalized_name,
+            verified_domain or "none",
+            identity.pdl_company_id or "none",
+            identity.source,
+            identity.confidence,
+            identity.rejection_reason or "none",
+        )
+        return identity
+
+    async def _company_enrich(self, params: dict[str, str]) -> dict | None:
+        """One Company Enrichment call. Returns ``None`` for a clean no-match."""
+
+        self.search_calls += 1
+        payload = await self._request(
+            "GET",
+            "https://api.peopledatalabs.com/v5/company/enrich",
+            operation_type="company_enrichment",
+            pdl_endpoint="company_enrichment",
+            headers=self._headers(),
+            params={
+                **params,
+                "min_likelihood": str(
+                    max(1, settings.people_pdl_company_min_likelihood)
+                ),
+            },
+        )
+        if payload.get("pdl_no_match"):
+            return None
+        return payload
+
+    async def search_current_company_people(
+        self,
+        *,
+        company: pdl_company.PdlCompanyIdentity,
+        category: PeopleCategory,
+        role_family: str | None,
+        job_location: str | None,
+        limit: int,
+    ) -> list[ProviderPerson]:
+        """Find current employees of one company in one category.
+
+        Walks the bounded relaxation ladder and stops at the first rung that
+        returns anyone. Only title precision relaxes; every rung stays pinned
+        to a verified company identity.
+        """
+
+        if not self.api_key:
+            raise ProviderUnavailable(
+                "provider_not_configured",
+                provider=self.provider_name,
+                code=PeopleErrorCode.AUTHENTICATION_FAILED,
+            )
+        self.last_search_raw_count = 0
+        self.last_search_normalized_count = 0
+        if not company.searchable:
+            # No verified company evidence at all: refusing to search is the
+            # only safe answer, because an unpinned query returns strangers.
+            raise ProviderUnavailable(
+                "company_domain_unresolved",
+                provider=self.provider_name,
+                code=PeopleErrorCode.COMPANY_DOMAIN_UNRESOLVED,
+            )
+        region, country = _split_location(job_location)
+        inputs = pdl_query.LadderInputs(
+            pdl_company_id=company.pdl_company_id,
+            verified_domain=company.verified_domain,
+            pdl_company_name=company.pdl_company_name,
+            raw_company_name=company.raw_name,
+            aliases=company.aliases,
+            role_family=role_family,
+            location_region=region,
+            location_country=country,
+            size=min(limit, settings.people_pdl_search_result_limit, 100),
+            location_required=settings.people_pdl_location_required,
+        )
+        max_strategies = (
+            max(1, settings.people_pdl_max_query_strategies)
+            if settings.people_pdl_progressive_search_enabled
+            else 1
+        )
+        ladder = pdl_query.build_ladder(
+            category, inputs, max_strategies=max_strategies
+        )
+        collected: dict[str, ProviderPerson] = {}
+        for strategy in ladder:
+            if self.call_budget_remaining <= 0:
+                logger.info(
+                    "pdl_search_call_budget_exhausted category=%s calls=%s",
+                    category,
+                    self.search_calls,
+                )
+                break
+            rows = await self._run_search_strategy(strategy, category)
+            for person in rows:
+                collected.setdefault(person.provider_person_id, person)
+            if collected:
+                # The ladder exists to find *someone*; once a rung does, a
+                # broader rung would only add lower-precision matches.
+                break
+        normalized = list(collected.values())
+        self.last_search_normalized_count = len(normalized)
+        for person in normalized:
+            self._search_profiles[person.provider_person_id] = person
+        return normalized
+
+    async def _run_search_strategy(
+        self, strategy: pdl_query.PdlSearchStrategy, category: PeopleCategory
+    ) -> list[ProviderPerson]:
+        self.search_calls += 1
+        started = time.monotonic()
+        data = await self._request(
+            "POST",
+            "https://api.peopledatalabs.com/v5/person/search",
+            operation_type="people_search",
+            pdl_endpoint="person_search",
+            headers=self._headers(),
+            json={"sql": strategy.sql, "size": strategy.size},
+        )
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type="people_search"
+            )
+            raise ProviderUnavailable(
+                "provider_schema_error",
+                provider=self.provider_name,
+                http_status=self.last_http_status,
+                duration_ms=self.last_duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
+            )
+        normalized = [
+            person for row in rows[: strategy.size] if (person := _normalize_pdl(row))
+        ]
+        self.last_search_raw_count += len(rows)
+        self.credits += len(rows)
+        for person in normalized:
+            person.discovery_strategy = strategy.name
+        self.strategy_calls.append(
+            {
+                "strategy": strategy.name,
+                "category": category,
+                "company_binding": strategy.company_binding,
+                "http_status": self.last_http_status,
+                "raw_count": len(rows),
+                "normalized_count": len(normalized),
+                "latency_ms": round((time.monotonic() - started) * 1000, 1),
+                "no_match": bool(data.get("pdl_no_match")),
+            }
+        )
+        logger.info(
+            "pdl_search_strategy category=%s strategy=%s binding=%s status=%s "
+            "raw=%s normalized=%s calls=%s",
+            category,
+            strategy.name,
+            strategy.company_binding,
+            self.last_http_status,
+            len(rows),
+            len(normalized),
+            self.search_calls,
+        )
+        return normalized
 
     async def search_people(self, query: PeopleSearchQuery) -> list[ProviderPerson]:
         self.last_search_raw_count = 0
         self.last_search_normalized_count = 0
         if not self.api_key:
-            raise ProviderUnavailable("provider_not_configured", provider=self.provider_name)
-        if not query.company_domain:
-            return []
+            raise ProviderUnavailable(
+                "provider_not_configured",
+                provider=self.provider_name,
+                code=PeopleErrorCode.AUTHENTICATION_FAILED,
+            )
         safe_domain = _pdl_sql_value(
-            _provider_company_domain(query.company_domain)
+            _provider_company_domain(query.company_domain or "")
         )
         safe_company = _pdl_sql_value(query.company_name)
         safe_titles = [
@@ -871,8 +1362,21 @@ class PDLPeopleProvider(_HttpProvider):
             for title in query.titles[:20]
             if _pdl_sql_value(title)
         ]
-        if not safe_domain or not safe_titles:
-            return []
+        if not safe_domain:
+            # An unresolved hiring-company domain is a fact about this job, not
+            # a provider failure, and it must be distinguishable from a genuine
+            # empty result. No provider call is made and no credit is spent.
+            raise ProviderUnavailable(
+                "company_domain_unresolved",
+                provider=self.provider_name,
+                code=PeopleErrorCode.COMPANY_DOMAIN_UNRESOLVED,
+            )
+        if not safe_titles:
+            raise ProviderUnavailable(
+                "provider_request_invalid",
+                provider=self.provider_name,
+                code=PeopleErrorCode.INVALID_INPUT,
+            )
         company_clause = f"job_company_website='{safe_domain}'"
         if safe_company:
             company_clause = (
@@ -904,6 +1408,10 @@ class PDLPeopleProvider(_HttpProvider):
         data = await self._request(
             "POST", "https://api.peopledatalabs.com/v5/person/search",
             operation_type="people_search",
+            # The broadened path reaches this adapter too, and PDL answers a
+            # query that matched nothing with 404 here exactly as it does for
+            # the ladder. Without this it reads as a rejected request.
+            pdl_endpoint="person_search",
             headers={
                 "X-Api-Key": self.api_key,
                 "Content-Type": "application/json",
@@ -916,12 +1424,17 @@ class PDLPeopleProvider(_HttpProvider):
         )
         rows = data.get("data")
         if not isinstance(rows, list):
-            self._failure()
+            # An unexpected 200 body is an adapter/request-shape problem, not
+            # evidence that the provider is down.
+            self._failure(
+                PeopleErrorCode.INVALID_INPUT, operation_type="people_search"
+            )
             raise ProviderUnavailable(
                 "provider_schema_error",
                 provider=self.provider_name,
                 http_status=self.last_http_status,
                 duration_ms=self.last_duration_ms,
+                code=PeopleErrorCode.INVALID_INPUT,
             )
         normalized = [
             person
@@ -991,8 +1504,8 @@ class PDLPeopleProvider(_HttpProvider):
 
 class HunterEmailProvider(_HttpProvider):
     def __init__(self, api_key: str | None = None) -> None:
-        super().__init__("hunter")
         self.api_key = api_key or settings.hunter_api_key
+        super().__init__("hunter", self.api_key)
 
     async def find_work_email(self, request: WorkEmailRequest) -> WorkEmailResult:
         if not self.api_key:
@@ -1477,6 +1990,14 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
         ),
         education=[str(v.get("school", {}).get("name")) for v in row.get("education", []) if isinstance(v, dict) and isinstance(v.get("school"), dict) and v["school"].get("name")],
         previous_employers=list(dict.fromkeys(previous_employers)),
+        job_title_role=str(row.get("job_title_role") or "") or None,
+        job_title_sub_role=str(row.get("job_title_sub_role") or "") or None,
+        job_title_levels=[
+            str(level).strip().lower()
+            for level in (row.get("job_title_levels") or [])
+            if str(level).strip()
+        ][:6],
+        provider_company_id=str(row.get("job_company_id") or "") or None,
         evidence={
             "employment_source": "provider_current_employment",
             "current_company_name": company,
@@ -1496,6 +2017,24 @@ def _normalize_pdl(row: object) -> ProviderPerson | None:
         },
         field_provenance={"name": "pdl", "title": "pdl", "company": "pdl"},
     )
+
+
+def _split_location(value: str | None) -> tuple[str | None, str | None]:
+    """Split a job location into a coarse region and country.
+
+    Only used when location filtering is explicitly enabled. City-level
+    filtering is deliberately not offered: a PDL person record carries the
+    person's own location, which for a distributed employer routinely differs
+    from the job's city, and filtering on it removes the very people the search
+    exists to find.
+    """
+
+    parts = [part.strip() for part in str(value or "").split(",") if part.strip()]
+    if not parts:
+        return None, None
+    if len(parts) == 1:
+        return None, parts[0]
+    return parts[-2], parts[-1]
 
 
 def _pdl_sql_value(value: object) -> str:

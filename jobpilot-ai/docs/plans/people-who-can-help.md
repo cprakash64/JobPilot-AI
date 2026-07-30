@@ -1021,3 +1021,323 @@ diagnostics, recommendations, or durable provider-usage rows.
 - [ ] One controlled live validation remains gated on separate approval: one
   job, one explicit exact-company refresh, up to three PDL searches, and no
   Apollo, Hunter/email, broadening, network matching, or retry.
+
+## v4 — Provider-failure isolation (2026-07-28)
+
+### Incident
+
+On the Jobs page only L3Harris Technologies returned people. Cisco and
+Huntington Ingalls Industries showed "People search is temporarily paused after
+repeated provider failures."
+
+### Confirmed root cause
+
+`app/people/providers.py` held a single process-global breaker,
+`_CIRCUITS: dict[provider_name, (failures, opened_at)]`, with a threshold of 3
+and no decay window. Two defects combined:
+
+1. **Every 4xx counted as a provider failure.** The `response.status_code >= 400`
+   branch called `_failure()` and raised the generic `provider_unavailable`, so
+   an ordinary request-scoped 404 for one company was indistinguishable from an
+   outage.
+2. **The breaker was keyed only by provider name.** Discovery issues one search
+   per category, so a single company that a provider rejects contributes three
+   failures in one request — exactly the threshold. The breaker then opened for
+   *every* company on that API process.
+
+Reproduced against the pre-fix tree in a detached worktree at `88a5cec`, with a
+fake transport: Cisco's three 404s opened the breaker, after which Huntington
+Ingalls and L3Harris each made **zero** provider calls and returned
+`provider_circuit_open`. With the fix, the same script makes three calls per
+company, keeps the circuit closed, and L3Harris returns its recruiter.
+
+### Design
+
+- `app/people/errors.py` — typed `PeopleErrorCode` taxonomy plus the rules that
+  decide circuit scope, fallback eligibility, and user retryability. Legacy
+  reason strings remain the persisted/wire form and map onto the taxonomy.
+- `app/people/circuit.py` — three independent circuits (`transient`,
+  `configuration`, `budget`) keyed by
+  `provider + non-reversible account fingerprint + operation`, under the
+  versioned namespace `people:circuit:v2:`. Rolling failure window, bounded
+  exponential backoff with jitter, single half-open probe, Redis-backed with a
+  process-local fallback.
+- `app/people/coalescing.py` — single-flight keyed by canonical search identity
+  plus a bounded per-instance semaphore, wrapping the provider call itself.
+- `app/jobs/ats_hosts.py` — one ATS/aggregator registry, now shared by company
+  branding and people domain resolution.
+
+### Behaviour changes
+
+- Request-scoped failures (bad input, ordinary 400/404, unresolved domain,
+  empty results, cancellations, per-user budget) never move any circuit.
+- Authentication/authorization failures open a *configuration* circuit and
+  return a status that names the credential problem.
+- Provider-account budget exhaustion has its own status and cooldown.
+- 429 honours `Retry-After` and only counts toward the transient circuit once
+  sustained.
+- A successful empty response counts as provider health and closes circuits.
+- While a circuit is open, stored results are still served, and results inside
+  `PEOPLE_STALE_RESULT_WINDOW_DAYS` past expiry are served and labelled
+  `result_freshness: "stale"`.
+- The job-list panel is collapsed with a `Find people` call to action and issues
+  exactly one cache-aware request per explicit click.
+
+### Migration
+
+Circuit state moved from an in-process dict to Redis under
+`people:circuit:v2:`. **Restarting the API no longer clears it.** The obsolete
+implementation kept no Redis keys, so nothing needs deleting to adopt v2; the
+namespace version exists so a future change cannot inherit stale state.
+
+To clear only People circuit state:
+
+    docker compose exec api python -m scripts.clear_people_circuit_state --dry-run
+    docker compose exec api python -m scripts.clear_people_circuit_state
+
+`--provider pdl` narrows it further. The script SCANs only the
+`people:circuit:v2:` prefix and never issues `FLUSHALL`.
+
+### Validation checklist
+
+- [x] Reproduction test written before the fix, failing then passing.
+- [x] Pre-fix behaviour measured in a detached worktree; post-fix measured with
+  the same script.
+- [x] Focused People backend: 84 passed. New resilience/identity/isolation
+  suites: 47 passed. Complete API: 732 passed.
+- [x] Complete web: 15 files / 219 tests passed, including the three-company
+  mocked-provider scenario.
+- [x] Web lint, typecheck, and production build passed.
+- [x] Extension typecheck and 30 files / 284 tests passed.
+- [x] `docker compose config`, changed-code Ruff, and startup configuration
+  validation for the new circuit/concurrency/confidence settings.
+- [ ] One controlled live validation remains gated on separate approval.
+
+## v5 — PDL response semantics and query recall (2026-07-29)
+
+### Incident
+
+After the v4 circuit fix, Cisco, Huntington Ingalls, and BlackEdge Capital
+returned people while Toshiba Global Commerce and Vanderbilt Health showed
+"The people provider could not accept the profile request." Logs recorded
+`reason=provider_request_invalid error_code=INVALID_INPUT http_status=404`,
+with all three category requests 404ing for one run and one 404 for another.
+Requests stayed isolated and the circuit stayed closed, so this was not a
+breaker problem.
+
+### Confirmed root cause
+
+Two independent defects, both in the PDL adapter.
+
+**1. A 404 was misclassified as a rejected request.** The adapter calls
+`POST https://api.peopledatalabs.com/v5/person/search` — Person Search, the
+correct endpoint. PDL's own error reference states that 404
+"simply means there were no profiles found matching your request" and returns
+`{"status":404,"error":{"type":"not_found","message":"..."}}`
+(https://docs.peopledatalabs.com/docs/errors). The v4 generic mapper sent every
+non-401/403/429/422 4xx to `INVALID_INPUT`, so a company with no matching
+profiles was reported as a malformed request.
+
+**2. The query required exact job-title strings.** The generated SQL was
+
+    SELECT * FROM person
+    WHERE (job_company_website='…' OR job_company_name='…')
+      AND job_title IN ('Recruiter','Technical Recruiter', … 14 literals)
+
+`job_title IN (...)` is exact string equality against a free-text field. A
+company large enough that someone holds one of those exact strings matched;
+everyone else returned zero rows, hence the 404. Location was not part of the
+query at all, and no PDL `job_company_id` was ever used.
+
+### Design
+
+- `app/people/pdl_status.py` — endpoint-aware classification. A documented
+  `not_found` 404 is a *successful empty answer*; a 404 without that envelope,
+  or a 405, is reported as `provider_route_invalid` so a wrong path cannot hide
+  behind a plausible empty state. Safe provider `error.type`/`message` are
+  preserved; nothing else from the body is.
+- `app/people/pdl_company.py` — cached PDL company identity via Company
+  Enrichment, keyed by verified domain then canonical name then alias. Rejects
+  anything below the configured `likelihood` or whose name disagrees, so
+  "Vanderbilt Health" never becomes "Vanderbilt University".
+- `app/people/pdl_query.py` — bounded relaxation ladder built on PDL's canonical
+  taxonomy (`job_title_role`, `job_title_sub_role`, `job_title_levels`) instead
+  of exact titles. Only title precision relaxes; every rung stays pinned to a
+  verified company id or verified domain, and a bare display name is never a
+  sole company constraint.
+- `scripts/diagnose_people_provider.py` — dry run by default; `--live` requires
+  an explicit `--max-calls`.
+
+### Statuses
+
+`no_reliable_matches` (provider answered, nobody matched), `partial` (some
+categories matched), `domain_unresolved`, `invalid_request`, plus the existing
+budget/configuration/outage states. The frontend copy for each names the real
+cause; "could not accept the profile request" is gone.
+
+### Job-ingestion overflow
+
+`job_postings.title/company/location/company_logo_url/application_url/
+source_url/degree_requirement` become `TEXT` in migration
+`0025_job_posting_unbounded_text`, with a derived `location_display` for cards.
+Each posting now persists inside its own SAVEPOINT, so one malformed record is
+skipped and reported instead of aborting the batch.
+
+### Validation checklist
+
+- [x] PDL semantics/company/ladder suite: 35 passed.
+- [x] Job-location overflow suite: 8 passed.
+- [x] Complete API: 775 passed.
+- [x] Complete web: 15 files / 226 passed; extension 30 files / 284 passed.
+- [x] Migration `0025` upgraded and downgraded on a scratch Postgres database,
+  with a 319-character location persisting intact and truncating only on the
+  explicit downgrade.
+- [x] Mocked smoke test across success, partial, no-match, invalid request,
+  unresolved company, rate limit, and a 277-character multi-city location.
+- [x] Web lint/typecheck/build, changed-code Ruff, `docker compose config`,
+  `docker compose build api`, evaluation thresholds, `git diff --check`.
+- [ ] Live diagnostic against Cisco / HII / Toshiba / Vanderbilt / BlackEdge
+  remains gated on explicit approval.
+
+## v6 — Cache compatibility and outreach handoff (2026-07-29)
+
+### Three defects
+
+**1. Legacy discovery results were served as current.** `query_fingerprint`
+mixed in `PDL_DISCOVERY_STRATEGY_VERSION`, which was never bumped when PDL's
+404 was reinterpreted from "rejected request" to "no profiles matched". A run
+recorded on Jul 28 therefore produced the same fingerprint as one recorded
+today, so job 7605 (Toshiba Global Commerce) kept replaying
+`provider_request_invalid` — and because that code is non-retryable,
+`_provider_error_blocks_discovery` refused to let a new search replace it. A
+second Toshiba job with no stored run showed the corrected no-match copy, hence
+the contradiction.
+
+**2. Outreach drafting rejected every person the UI displayed.**
+`recommendations_payload` and `find_email` both accept the two
+`DISPLAYABLE_EMPLOYMENT_STATUSES`; `outreach_draft` accepted only
+`confirmed_exact_company_verified`. PDL never supplies an independent freshness
+verification, so `_normalize_pdl` sets `employment_verified_at=None` and every
+PDL-discovered person lands on `exact_company_current_but_unverified_freshness`.
+Every rendered draft button answered 409. Verified on live data: all 87 stored
+candidates carry that status.
+
+**3. There was no channel handoff at all.** The draft modal had a textarea and
+a Regenerate button. No Copy, no Open LinkedIn, no mailto — so "LinkedIn does
+not open" and "no email composer" were accurate descriptions of code that was
+never written.
+
+### Design
+
+- `PEOPLE_SEARCH_CONTRACT_VERSION` composes the provider contract, query
+  ladder, company resolution, scoring, and result schema into one identifier.
+  It is mixed into the fingerprint *and* stored on every run under
+  `search_contract_version`. `run_is_compatible()` gates every reuse path;
+  rows without it are legacy by definition.
+- `scripts/invalidate_people_discovery_cache.py` marks non-current rows
+  superseded rather than deleting them, and is idempotent.
+- `lib/outreachHandoff.ts` validates a LinkedIn URL (HTTPS, LinkedIn host,
+  `/in/` path, no credentials) and builds a percent-encoded mailto URL.
+- The draft modal gained recipient/channel headers, character count, Copy
+  subject/message, Open LinkedIn, Open email app, Regenerate, and Close. Both
+  Open actions are disabled with an explanation when the evidence is absent.
+
+Drafting is deterministic and always was — it composes verified fields with a
+template and makes no model call. There is no model path to fail and therefore
+no fallback to build; `generation_path` is reported as
+`deterministic_template` so the distinction is visible if a model path is ever
+added.
+
+### LinkedIn coverage (measured on the dev database)
+
+87 stored candidates, 19 with a LinkedIn URL, **19 of 19 passing validation**.
+Nothing is being wrongly rejected — PDL simply omits `linkedin_url` for most
+records. Open LinkedIn works for those 19 and is disabled with an explanation
+for the rest. No URL is ever guessed.
+
+### Validation checklist
+
+- [x] Reproduction test written before the fix, failing then passing.
+- [x] Cache-compatibility suite: 14 passed. Outreach suite: 16 passed.
+  Live-scenario suite: 4 passed.
+- [x] Complete API: 809 passed. Complete web: 16 files / 255 passed.
+  Extension: 284 passed.
+- [x] Verified against the live dev database (read-only): job 7605 now reports
+  `stale` with `refresh_eligible=true` instead of the invalid-request message,
+  and every displayable candidate is admitted by the outreach gate.
+- [x] Dry-run invalidation reported 17 legacy runs, 4 with reinterpreted
+  failure codes, and wrote nothing.
+- [x] Web lint/typecheck/build, changed-code Ruff, `docker compose config`,
+  `docker compose build api`, Alembic head `0025`, evaluation thresholds,
+  `git diff --check`.
+- [ ] Applying the invalidation command is left to the operator; versioning
+  alone already prevents legacy rows from being served.
+
+## v7 — Quota accounting (2026-07-29)
+
+### Incident
+
+"You have reached today's people-search limit" after a small number of company
+searches, on a Jobs page of 142 jobs.
+
+### Confirmed root cause, measured
+
+The user-visible limit was `PEOPLE_PDL_PER_USER_DAILY_LIMIT`, compared in
+`_budget_check` against `SUM(PeopleProviderOperationUsage.budget_units)` — the
+**provider credit ledger**. For a PDL person search, `budget_units` is
+`credits_estimated = len(payload["data"])`: one unit **per record returned**.
+
+Live database, user 3, same day:
+
+| | |
+|---|---|
+| user discovery actions | 14 |
+| provider calls | 38 (7 company enrichment + 31 person search) |
+| provider credit units | **85 of 100** |
+
+So ~6 units per deliberate action, and the limit tripped after roughly 16
+searches' worth of records — reported to the user as their own search limit.
+
+### Design
+
+Three independent controls, no longer conflated:
+
+- **User discovery quota** — `app/people/quota.py` plus
+  `people_user_discovery_quota` (migration `0026`). One unit per explicit
+  `/discover` or `/broaden`, reserved once inside the job lock *after* every
+  cache and coalescing opportunity, never inside a category loop, ladder rung,
+  or provider adapter. `SELECT ... FOR UPDATE` on the day's row makes
+  concurrent reservations serialize.
+- **Provider credit budget** — unchanged ledger and limits, but exhaustion now
+  answers `PEOPLE_PROVIDER_BUDGET_EXCEEDED` with provider-budget wording.
+- **Burst rate limit** — checked before the reservation, so a burst rejection
+  costs nothing.
+
+Refunds cover unresolved company identity, authentication/authorization
+failures, provider-budget stops, cancellations, invalid input, and any internal
+failure before a provider search ran. A truthful no-match is a completed search
+and stays charged.
+
+### Also fixed
+
+The broadened search path still called PDL without endpoint-aware
+classification, so a 404 there read as `provider_request_invalid` rather than
+"no profiles matched". It now passes `pdl_endpoint="person_search"` like the
+ladder.
+
+### Validation checklist
+
+- [x] Failing proof written first; one discovery with **8 provider calls
+  consumes exactly 1 user unit**, and 142 rendered cards consume 0.
+- [x] Quota suite: 19 passed, including the full-session scenario.
+- [x] Complete API: 828 passed. Complete web: 17 files / 268 passed.
+  Extension: 284 passed.
+- [x] Migration `0026` applied to the dev database; API healthy at head.
+- [x] Live read-only inspection: user 3 shows `daily_used 0 / limit 100`
+  alongside 38 provider calls and 85 credit units — the two are now separate.
+- [x] Web lint/typecheck/build, changed-code Ruff, `docker compose config`,
+  `docker compose build api`, evaluation thresholds, `git diff --check`.
+- [ ] `PEOPLE_PDL_PER_USER_DAILY_LIMIT=100` in the operator's `.env` is a
+  *credit* budget and is now the binding constraint at ~6 units per search.
+  Raise it (see `.env.example` sizing note) or the provider-budget stop will
+  appear after a few more searches.

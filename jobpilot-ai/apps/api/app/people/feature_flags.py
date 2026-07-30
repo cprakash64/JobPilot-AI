@@ -39,6 +39,19 @@ def is_beta(user: User, config: Settings = settings) -> bool:
     return config.people_rollout_mode.lower() in {"internal", "beta", "percentage"}
 
 
+def is_internal(user: User, config: Settings = settings) -> bool:
+    """Allowlisted internal account.
+
+    Independent of the rollout mode: an internal tester keeps their higher
+    discovery allowance even after the feature opens to everyone.
+    """
+
+    email = (user.email or "").strip().lower()
+    return bool(email) and email in {
+        value.strip().lower() for value in config.people_internal_emails if value
+    }
+
+
 def configuration_summary(config: Settings = settings) -> dict[str, bool | str]:
     provider = config.people_primary_provider.lower()
     provider_configured = (

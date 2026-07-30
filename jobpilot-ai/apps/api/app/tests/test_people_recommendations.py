@@ -35,7 +35,7 @@ from app.models.entities import (
     UserJobPeopleRecommendation,
     UserProfile,
 )
-from app.people import providers
+from app.people import circuit, providers
 from app.people.bulk_capability import (
     bulk_capability_state,
     clear_local_bulk_capabilities,
@@ -83,6 +83,16 @@ from app.people.service import (
     recommendations_payload,
 )
 from app.people.title_ontology import normalize_title, title_similarity
+
+
+def _apollo_circuit(
+    provider: ApolloPeopleProvider, operation: str = "people_search"
+) -> circuit.CircuitSnapshot:
+    return circuit.circuit_state(
+        provider="apollo",
+        account_fingerprint=provider.account_fingerprint,
+        operation=operation,
+    )
 
 
 @pytest.fixture
@@ -470,7 +480,10 @@ def test_secondary_verification_flag_invalidates_only_unresolved_no_match_cache(
         status="complete",
         provider="apollo",
         query_fingerprint=fingerprint,
-        company_context={"secondary_employment_verification_enabled": False},
+        company_context={
+            "secondary_employment_verification_enabled": False,
+            service.CONTRACT_VERSION_KEY: service.PEOPLE_SEARCH_CONTRACT_VERSION,
+        },
         completed_at=datetime.now(UTC),
     )
     db.add(run)
@@ -486,7 +499,10 @@ def test_secondary_verification_flag_invalidates_only_unresolved_no_match_cache(
     assert service._fresh_no_match_run(
         db, job_id=job.id, user_id=user.id, fingerprint=fingerprint
     ) is None
-    run.company_context = {"secondary_employment_verification_enabled": True}
+    run.company_context = {
+        "secondary_employment_verification_enabled": True,
+        service.CONTRACT_VERSION_KEY: service.PEOPLE_SEARCH_CONTRACT_VERSION,
+    }
     db.commit()
     assert service._fresh_no_match_run(
         db, job_id=job.id, user_id=user.id, fingerprint=fingerprint
@@ -518,6 +534,9 @@ def test_apollo_adapter_version_refreshes_cached_schema_error(
         query_fingerprint=broken_fingerprint,
         failure_code="provider_schema_error",
         safe_failure_message="The people provider returned an unsupported response.",
+        company_context={
+            service.CONTRACT_VERSION_KEY: service.PEOPLE_SEARCH_CONTRACT_VERSION,
+        },
         completed_at=datetime.now(UTC),
     ))
     db.commit()
@@ -568,6 +587,9 @@ def test_v3_no_match_becomes_read_only_stale_then_current_no_match(
             company_context={
                 "provider_adapter_version": "apollo-enrichment-v3",
                 "discovery_strategy": "exact",
+                service.CONTRACT_VERSION_KEY: (
+                    service.PEOPLE_SEARCH_CONTRACT_VERSION
+                ),
             },
             completed_at=datetime.now(UTC),
         )
@@ -867,7 +889,7 @@ def test_apollo_search_uses_current_endpoint_and_partial_search_schema(
             )
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
-    providers._CIRCUITS.clear()
+    circuit.clear_local_circuits()
     provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
     rows = asyncio.run(provider.search_people(PeopleSearchQuery(
         category="potential_hiring_manager",
@@ -1026,7 +1048,7 @@ def test_apollo_422_is_reported_as_provider_schema_error(
             )
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
-    providers._CIRCUITS.clear()
+    circuit.clear_local_circuits()
     provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
     query = PeopleSearchQuery(
         category="likely_recruiter",
@@ -1040,10 +1062,10 @@ def test_apollo_422_is_reported_as_provider_schema_error(
             asyncio.run(provider.search_people(query))
         assert raised.value.reason == "provider_schema_error"
         assert raised.value.http_status == 422
-    assert providers._CIRCUITS.get("apollo", (0, None)) == (0, None)
+    assert _apollo_circuit(provider).transient == "closed"
 
 
-def test_transient_failures_open_circuit_after_three_attempts(
+def test_transient_failures_open_the_transient_circuit_at_the_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
@@ -1061,7 +1083,7 @@ def test_transient_failures_open_circuit_after_three_attempts(
             raise httpx.ReadTimeout("timed out", request=httpx.Request(method, url))
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: TimeoutClient())
-    providers._CIRCUITS.clear()
+    circuit.clear_local_circuits()
     provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
     query = PeopleSearchQuery(
         category="likely_recruiter",
@@ -1070,14 +1092,16 @@ def test_transient_failures_open_circuit_after_three_attempts(
         titles=["Technical Recruiter"],
         limit=1,
     )
-    for _ in range(3):
+    threshold = settings.people_circuit_failure_threshold
+    for _ in range(threshold):
         with pytest.raises(ProviderUnavailable) as raised:
             asyncio.run(provider.search_people(query))
         assert raised.value.reason == "provider_timeout"
-    with pytest.raises(ProviderUnavailable) as circuit:
+    with pytest.raises(ProviderUnavailable) as opened:
         asyncio.run(provider.search_people(query))
-    assert circuit.value.reason == "provider_circuit_open"
-    assert calls == 3
+    assert opened.value.reason == "provider_circuit_open"
+    assert opened.value.retry_after_seconds
+    assert calls == threshold
 
 
 def test_apollo_bulk_enrichment_and_specific_safe_failure_reasons(
@@ -1117,7 +1141,7 @@ def test_apollo_bulk_enrichment_and_specific_safe_failure_reasons(
             return responses.pop(0)
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
-    providers._CIRCUITS.clear()
+    circuit.clear_local_circuits()
     provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
     enriched = asyncio.run(provider.enrich_people([
         PersonEnrichmentRequest(
@@ -1272,7 +1296,7 @@ def test_apollo_bulk_enrichment_filters_deduplicates_and_chunks_ids(
             )
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
-    providers._CIRCUITS.clear()
+    circuit.clear_local_circuits()
     provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
     identifiers = [f"{index:024x}" for index in range(12)]
     requests = [
@@ -1382,7 +1406,7 @@ def test_apollo_bulk_422_uses_bounded_single_fallback_and_safe_metadata(
             )
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
-    providers._CIRCUITS.clear()
+    circuit.clear_local_circuits()
     provider = ApolloPeopleProvider("configured-without-reading-runtime-secret")
     with caplog.at_level(logging.INFO, logger="jobpilot.people.provider"):
         enriched = asyncio.run(provider.enrich_people([
@@ -1401,7 +1425,7 @@ def test_apollo_bulk_422_uses_bounded_single_fallback_and_safe_metadata(
     )
     assert provider.enrichment_safe_metrics["bulk_payload_validation_failed"] == 1
     assert provider.enrichment_safe_metrics["provider_schema_error"] == 1
-    assert providers._CIRCUITS.get("apollo", (0, None)) == (0, None)
+    assert _apollo_circuit(provider).transient == "closed"
     assert "body.details.*.id" in caplog.text
     assert "expected_types=['string']" in caplog.text
     assert "error_scope=record_level" in caplog.text
@@ -2295,6 +2319,9 @@ def test_provider_circuit_open_response_observes_retry_timing(
         safe_failure_message=(
             "People search is temporarily paused after repeated provider failures."
         ),
+        company_context={
+            service.CONTRACT_VERSION_KEY: service.PEOPLE_SEARCH_CONTRACT_VERSION,
+        },
         completed_at=datetime.now(UTC),
     ))
     db.commit()
@@ -2335,6 +2362,7 @@ def test_provider_schema_error_reopen_and_refresh_are_read_only(
             "provider_adapter_version": providers.APOLLO_ENRICHMENT_ADAPTER_VERSION,
             "provider_error_retry_policy": "adapter_version_change_required",
             "retry_eligible_at": None,
+            service.CONTRACT_VERSION_KEY: service.PEOPLE_SEARCH_CONTRACT_VERSION,
         },
         completed_at=datetime.now(UTC),
     ))
@@ -2428,6 +2456,7 @@ def test_transient_provider_error_requires_explicit_retry_after_timestamp(
         company_context={
             "provider_error_retry_policy": "bounded_explicit_retry",
             "retry_eligible_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            service.CONTRACT_VERSION_KEY: service.PEOPLE_SEARCH_CONTRACT_VERSION,
         },
         completed_at=datetime.now(UTC),
     )
@@ -3785,13 +3814,31 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
 
         async def request(self, method: str, url: str, **kwargs):
             provider_calls.append(url)
+            if url.endswith("/company/enrich"):
+                # Company resolution runs before any people search so the
+                # searches can be pinned to a stable PDL company id.
+                return httpx.Response(
+                    200,
+                    request=httpx.Request(method, url),
+                    json={
+                        "status": 200,
+                        "likelihood": 9,
+                        "id": "pdl-acme-ai",
+                        "name": "Acme AI",
+                        "website": "acme.example",
+                    },
+                )
             provider_sizes.append(kwargs["json"]["size"])
             sql = kwargs["json"]["sql"]
-            matched_titles = [
-                value
-                for value in private_ids
-                if f"'{value}'" in sql
-            ]
+            assert "job_company_id='pdl-acme-ai'" in sql
+            # The ladder searches by PDL canonical role/sub-role rather than by
+            # exact job-title strings.
+            if "'recruiting'" in sql or "'human_resources'" in sql:
+                matched_titles = ["Technical Recruiter"]
+            elif "'manager'" in sql:
+                matched_titles = ["Engineering Manager"]
+            else:
+                matched_titles = ["Software Engineer"]
             return httpx.Response(
                 200,
                 request=httpx.Request(method, url),
@@ -3952,12 +3999,16 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
     assert discovered.json()["categories"]["potential_hiring_managers"][0][
         "professional_profile_url"
     ] is None
-    assert len(provider_calls) == calls_after_discovery == 3
+    # One company-identity resolution plus one search per category.
+    assert len(provider_calls) == calls_after_discovery == 4
+    assert provider_calls[0] == (
+        "https://api.peopledatalabs.com/v5/company/enrich"
+    )
     assert provider_sizes == [4, 4, 8]
     assert sum(provider_sizes) == 16
     assert all(
         url == "https://api.peopledatalabs.com/v5/person/search"
-        for url in provider_calls
+        for url in provider_calls[1:]
     )
     assert reopened.json()["status"] == "complete"
     assert refreshed.json()["status"] == "complete"
@@ -3967,10 +4018,19 @@ def test_pdl_primary_discovery_persists_categories_without_apollo_or_hunter(
             PeopleProviderOperationUsage.provider == "pdl"
         )
     ).all()
-    assert len(usage_rows) == 3
-    assert all(row.credits_reported is None for row in usage_rows)
-    assert all(row.credits_estimated == 1 for row in usage_rows)
-    assert all(row.credit_status == "estimated" for row in usage_rows)
+    # One metered company-identity resolution plus one search per category.
+    assert len(usage_rows) == 4
+    search_rows = [
+        row for row in usage_rows if row.operation_type == "people_search"
+    ]
+    company_rows = [
+        row for row in usage_rows if row.operation_type == "company_enrichment"
+    ]
+    assert len(search_rows) == 3
+    assert len(company_rows) == 1
+    assert all(row.credits_reported is None for row in search_rows)
+    assert all(row.credits_estimated == 1 for row in search_rows)
+    assert all(row.credit_status == "estimated" for row in search_rows)
     latest_run = db.scalar(
         select(PeopleDiscoveryRun)
         .where(

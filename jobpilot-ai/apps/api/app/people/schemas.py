@@ -15,16 +15,28 @@ EmailStatus = Literal[
 
 class CompanyIdentity(BaseModel):
     canonical_name: str
+    # The company string exactly as the job carried it, preserved so a
+    # normalization bug is always debuggable against the original input.
+    raw_name: str = ""
+    # Punctuation/suffix/abbreviation-normalized form used for matching.
+    normalized_name: str = ""
     canonical_domain: str | None = None
     aliases: list[str] = Field(default_factory=list, max_length=20)
     parent_name: str | None = None
     parent_domain: str | None = None
     domain_confidence: float = Field(ge=0, le=1)
     evidence_source: str
+    # A domain that was found but rejected for being below the configured
+    # confidence threshold or for belonging to an ATS/aggregator. Kept for
+    # diagnostics; never sent to a provider.
+    rejected_domain: str | None = None
+    rejection_reason: str | None = None
 
 
 class JobPeopleSearchProfile(BaseModel):
     company_name: str
+    company_raw_name: str = ""
+    company_normalized_name: str = ""
     company_domain: str | None = None
     company_aliases: list[str] = Field(default_factory=list, max_length=20)
     parent_company_name: str | None = None
@@ -92,6 +104,14 @@ class ProviderPerson(BaseModel):
     previous_employers: list[str] = Field(default_factory=list)
     evidence: dict[str, object] = Field(default_factory=dict)
     field_provenance: dict[str, str] = Field(default_factory=dict)
+    # Which rung of the relaxation ladder produced this person. Recorded so a
+    # low-precision strategy that starts dominating results is visible.
+    discovery_strategy: str | None = None
+    # PDL canonical taxonomy for local classification and ranking.
+    job_title_role: str | None = None
+    job_title_sub_role: str | None = None
+    job_title_levels: list[str] = Field(default_factory=list)
+    provider_company_id: str | None = None
 
 
 class ProviderUsage(BaseModel):

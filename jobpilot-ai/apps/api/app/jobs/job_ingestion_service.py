@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -27,8 +29,10 @@ from app.jobs.job_search_criteria_service import SearchCriteria, build_search_cr
 from app.jobs.scoring_service import (
     build_profile_view,
     compute_job_content_hash,
-    job_view as _job_view,
     score_jobs_for_user,
+)
+from app.jobs.scoring_service import (
+    job_view as _job_view,
 )
 from app.jobs.source_packs import packs_for_profile, tags_for_packs
 from app.jobs.source_registry import build_adapters, is_configured
@@ -65,6 +69,11 @@ class DiscoveryResult:
     by_provider: dict[str, int] = field(default_factory=dict)
     packs: list[str] = field(default_factory=list)
     scoring_tasks_queued: int = 0
+    # Postings that could not be saved. Reported rather than silently dropped,
+    # so a recurring source defect is visible instead of looking like the
+    # source simply has fewer jobs.
+    skipped: int = 0
+    skipped_records: list[str] = field(default_factory=list)
 
 
 # Simple in-process cache of a source's fetched jobs, to avoid hammering ATS
@@ -145,13 +154,34 @@ async def discover_jobs(
 
     changed_job_ids: list[int] = []
     for job in fresh_jobs:
-        outcome = _persist_job(db, job)
+        # Each posting is written inside its own SAVEPOINT. One malformed
+        # record — an over-long field, a bad encoding — then fails alone
+        # instead of rolling back every job ingested in this run.
+        try:
+            with db.begin_nested():
+                outcome = _persist_job(db, job)
+        except SQLAlchemyError:
+            result.skipped += 1
+            identifier = f"{job.source or 'unknown'}:{job.external_id}"
+            result.skipped_records.append(identifier)
+            logging.getLogger("jobpilot.discovery").warning(
+                "job_ingestion_skipped source=%s external_id=%s",
+                job.source or "unknown",
+                job.external_id,
+                exc_info=True,
+            )
+            continue
         if outcome is None:
             continue
         record, is_new, content_changed = outcome
         result.persisted += 1
         if is_new or content_changed:
             changed_job_ids.append(record.id)
+    if result.skipped:
+        result.source_warnings.append(
+            f"{result.skipped} job(s) could not be saved and were skipped; "
+            "the rest of the run was unaffected."
+        )
     # Commit BEFORE any scoring so we never score an uncommitted job, and a
     # scoring failure can never roll back a successfully ingested job.
     db.commit()
@@ -304,6 +334,31 @@ async def _fetch_all(
     return jobs, warnings, stats
 
 
+def compact_location(value: str | None, *, limit: int = 120) -> str | None:
+    """A short, readable label for a multi-city location.
+
+    The full normalized location is always persisted; this is only what a card
+    shows when the source lists twelve offices. "A; B; C; D" becomes
+    "A, B +2 more" rather than a mid-word truncation.
+    """
+
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    parts = [part.strip() for part in re.split(r"[;|]|(?<=\))\s*,\s*", text) if part.strip()]
+    if len(parts) < 2:
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) >= 2:
+        head = parts[0]
+        remaining = len(parts) - 1
+        candidate = f"{head} +{remaining} more"
+        if len(candidate) <= limit:
+            return candidate
+    return text[: limit - 1].rstrip() + "…"
+
+
 def _persist_job(db: Session, job: NormalizedJob) -> tuple[JobPosting, bool, bool] | None:
     """Insert or update a posting. Returns ``(record, is_new, content_changed)``
     so the caller can enqueue scoring only for jobs whose score-relevant content
@@ -338,6 +393,7 @@ def _persist_job(db: Session, job: NormalizedJob) -> tuple[JobPosting, bool, boo
         "company_domain": branding.domain,
         "company_logo_url": branding.logo_url,
         "location": job.location,
+        "location_display": compact_location(job.location),
         "remote_type": job.workplace_type,
         "employment_type": job.employment_type,
         "seniority_level": job.seniority_level,

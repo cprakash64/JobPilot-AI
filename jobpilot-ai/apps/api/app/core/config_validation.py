@@ -289,6 +289,182 @@ def _check_people_discovery_configuration(settings) -> list[Finding]:
                 "must cover the configured category result limits",
             )
         )
+    findings.extend(_check_people_resilience_configuration(settings))
+    return findings
+
+
+def _configured_int(settings, attribute: str) -> int:
+    """Read an int setting, falling back to the Settings model's own default.
+
+    Callers may pass a partial settings object (tests do). Treating an absent
+    attribute as 0 would report a violation for a value the deployment never
+    set and that has a safe default.
+    """
+
+    from app.core.config import Settings
+
+    field = Settings.model_fields.get(attribute)
+    default = field.default if field is not None else 0
+    value = getattr(settings, attribute, None)
+    if value is None:
+        value = default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default or 0)
+
+
+def _configured_float(settings, attribute: str) -> float:
+    from app.core.config import Settings
+
+    field = Settings.model_fields.get(attribute)
+    default = field.default if field is not None else 0.0
+    value = getattr(settings, attribute, None)
+    if value is None:
+        value = default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default or 0.0)
+
+
+def _check_people_resilience_configuration(settings) -> list[Finding]:
+    """Circuit, concurrency, and domain-confidence guardrails.
+
+    These protect two opposite failure modes: a breaker so loose it never trips
+    during a real outage, and one so tight that ordinary traffic pauses the
+    feature. Both are configuration errors, so they are caught at startup.
+    """
+
+    findings: list[Finding] = []
+    for setting, attribute, minimum in (
+        ("PEOPLE_CIRCUIT_FAILURE_THRESHOLD", "people_circuit_failure_threshold", 2),
+        (
+            "PEOPLE_CIRCUIT_FAILURE_WINDOW_SECONDS",
+            "people_circuit_failure_window_seconds",
+            5,
+        ),
+        ("PEOPLE_CIRCUIT_COOLDOWN_SECONDS", "people_circuit_cooldown_seconds", 5),
+        (
+            "PEOPLE_CIRCUIT_CONFIGURATION_THRESHOLD",
+            "people_circuit_configuration_threshold",
+            1,
+        ),
+        (
+            "PEOPLE_CIRCUIT_RATE_LIMIT_THRESHOLD",
+            "people_circuit_rate_limit_threshold",
+            1,
+        ),
+        (
+            "PEOPLE_PROVIDER_MAX_CONCURRENT_CALLS",
+            "people_provider_max_concurrent_calls",
+            1,
+        ),
+        ("PEOPLE_STALE_RESULT_WINDOW_DAYS", "people_stale_result_window_days", 0),
+    ):
+        if _configured_int(settings, attribute) < minimum:
+            findings.append(
+                Finding(setting, f"must be at least {minimum}")
+            )
+    cooldown = _configured_int(settings, "people_circuit_cooldown_seconds")
+    max_cooldown = _configured_int(settings, "people_circuit_max_cooldown_seconds")
+    if max_cooldown < cooldown:
+        findings.append(
+            Finding(
+                "PEOPLE_CIRCUIT_MAX_COOLDOWN_SECONDS",
+                "must not be below PEOPLE_CIRCUIT_COOLDOWN_SECONDS",
+            )
+        )
+    for setting, attribute, minimum, maximum in (
+        (
+            "PEOPLE_PDL_COMPANY_MIN_LIKELIHOOD",
+            "people_pdl_company_min_likelihood",
+            1,
+            10,
+        ),
+        (
+            "PEOPLE_PDL_MAX_QUERY_STRATEGIES",
+            "people_pdl_max_query_strategies",
+            1,
+            6,
+        ),
+        (
+            "PEOPLE_PDL_SEARCH_RESULT_LIMIT",
+            "people_pdl_search_result_limit",
+            1,
+            100,
+        ),
+        (
+            "PEOPLE_PDL_MAX_PROVIDER_CALLS_PER_DISCOVERY",
+            "people_pdl_max_provider_calls_per_discovery",
+            1,
+            50,
+        ),
+    ):
+        value = _configured_int(settings, attribute)
+        if not minimum <= value <= maximum:
+            findings.append(
+                Finding(setting, f"must be between {minimum} and {maximum}")
+            )
+    if _configured_int(settings, "people_pdl_negative_cache_ttl_seconds") < 0:
+        findings.append(
+            Finding("PEOPLE_PDL_NEGATIVE_CACHE_TTL_SECONDS", "must not be negative")
+        )
+    # User quota. Counted in actions, so these must never be conflated with the
+    # provider credit budgets above.
+    standard = _configured_int(settings, "people_user_daily_discovery_limit")
+    internal = _configured_int(settings, "people_internal_user_daily_discovery_limit")
+    hourly = _configured_int(settings, "people_discovery_rate_limit_per_hour")
+    if standard <= 0:
+        findings.append(
+            Finding("PEOPLE_USER_DAILY_DISCOVERY_LIMIT", "must be positive")
+        )
+    if internal <= 0:
+        findings.append(
+            Finding("PEOPLE_INTERNAL_USER_DAILY_DISCOVERY_LIMIT", "must be positive")
+        )
+    elif internal < standard:
+        findings.append(
+            Finding(
+                "PEOPLE_INTERNAL_USER_DAILY_DISCOVERY_LIMIT",
+                "must not be below PEOPLE_USER_DAILY_DISCOVERY_LIMIT",
+            )
+        )
+    if hourly <= 0:
+        findings.append(
+            Finding("PEOPLE_DISCOVERY_RATE_LIMIT_PER_HOUR", "must be positive")
+        )
+    timezone_name = str(
+        getattr(settings, "people_quota_reset_timezone", None) or "UTC"
+    ).strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(timezone_name)
+    except Exception:
+        findings.append(
+            Finding("PEOPLE_QUOTA_RESET_TIMEZONE", "is not a valid IANA timezone")
+        )
+    # One discovery must be able to complete within the provider budget.
+    per_discovery = _configured_int(
+        settings, "people_pdl_max_provider_calls_per_discovery"
+    )
+    provider_budget = _configured_int(settings, "people_pdl_daily_credit_budget")
+    if provider_budget and per_discovery > provider_budget:
+        findings.append(
+            Finding(
+                "PEOPLE_PDL_MAX_PROVIDER_CALLS_PER_DISCOVERY",
+                "must fit within PEOPLE_PDL_DAILY_CREDIT_BUDGET",
+            )
+        )
+    confidence = _configured_float(settings, "people_domain_min_confidence")
+    if not 0.0 < confidence <= 1.0:
+        findings.append(
+            Finding(
+                "PEOPLE_DOMAIN_MIN_CONFIDENCE",
+                "must be greater than 0 and at most 1",
+            )
+        )
     return findings
 
 

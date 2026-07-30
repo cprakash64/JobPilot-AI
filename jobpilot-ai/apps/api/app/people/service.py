@@ -35,15 +35,23 @@ from app.models.entities import (
     UserJobPeopleRecommendation,
     UserProfile,
 )
+from app.people.circuit import CircuitSnapshot, circuit_state
+from app.people.coalescing import (
+    provider_search_coalescer,
+    search_identity,
+)
 from app.people.employment_validation import (
     EMPLOYMENT_EVIDENCE_VERSION,
     EMPLOYMENT_VALIDATION_VERSION,
     EmploymentValidationResult,
     validate_current_employment,
 )
+from app.people.errors import PeopleErrorCode, code_for_reason
 from app.people.feature_flags import is_beta
 from app.people.intelligence import extract_job_people_profile
 from app.people.observability import metric
+from app.people.pdl_company import PDL_COMPANY_RESOLUTION_VERSION
+from app.people.pdl_query import PDL_QUERY_LADDER_VERSION
 from app.people.provider_usage import (
     ProviderUsageContext,
     ProviderUsagePersistenceError,
@@ -56,8 +64,16 @@ from app.people.providers import (
     get_email_provider,
     get_people_provider,
 )
+from app.people.providers import (
+    account_fingerprint as provider_account_fingerprint,
+)
+from app.people.quota import (
+    quota_snapshot,
+    reserve_user_discovery,
+)
 from app.people.schemas import (
     FeedbackRequest,
+    JobPeopleSearchProfile,
     OutreachDraftRequest,
     PeopleCategory,
     PeopleSearchQuery,
@@ -92,6 +108,60 @@ logger = logging.getLogger("jobpilot.people")
 
 DiscoveryStrategy = Literal["exact", "broadened"]
 DISCOVERY_STRATEGY_VERSION = "people-discovery-v3"
+
+# One identifier for "results produced under these semantics are comparable".
+#
+# Two Toshiba jobs displayed contradictory states because a run recorded before
+# PDL's 404 was understood as "no profiles matched" kept being treated as
+# current: the fingerprint did not change when the *meaning* of a stored result
+# did. Composing the version from every input that can reinterpret a stored
+# result makes that impossible — changing any component below retires every run
+# recorded under the old one.
+#
+# Components: provider response contract, query strategy, company resolution,
+# ranking/scoring, and the stored result schema.
+PEOPLE_RESULT_SCHEMA_VERSION = "people-result-v2"
+# Bump when the deterministic outreach templates change, so a client caching a
+# draft knows to regenerate.
+OUTREACH_TEMPLATE_VERSION = "people-outreach-template-v2"
+PEOPLE_SEARCH_CONTRACT_VERSION = ":".join(
+    (
+        # PDL 404 now means "no profiles matched" rather than a rejected
+        # request; every run recorded before that reads its own failure_code
+        # with the opposite meaning.
+        "pdl-person-search-v3",
+        PDL_DISCOVERY_STRATEGY_VERSION,
+        PDL_QUERY_LADDER_VERSION,
+        PDL_COMPANY_RESOLUTION_VERSION,
+        SCORING_VERSION,
+        PEOPLE_RESULT_SCHEMA_VERSION,
+    )
+)
+# Key under which each run records the contract it was produced under. Runs
+# without it predate versioning and are legacy by definition.
+CONTRACT_VERSION_KEY = "search_contract_version"
+
+
+def run_contract_version(run: PeopleDiscoveryRun | None) -> str | None:
+    """The contract a stored run was produced under, or ``None`` when legacy."""
+
+    if run is None:
+        return None
+    value = (run.company_context or {}).get(CONTRACT_VERSION_KEY)
+    return value if isinstance(value, str) and value else None
+
+
+def run_is_compatible(run: PeopleDiscoveryRun | None) -> bool:
+    """May this stored run be reused as a current result?
+
+    A legacy run — one with no recorded contract, or one recorded under a
+    different contract — must not be served: its status and failure_code were
+    written under semantics that no longer hold.
+    """
+
+    return run_contract_version(run) == PEOPLE_SEARCH_CONTRACT_VERSION
+
+
 DISPLAYABLE_EMPLOYMENT_STATUSES = frozenset(
     {
         "confirmed_exact_company_verified",
@@ -99,18 +169,73 @@ DISPLAYABLE_EMPLOYMENT_STATUSES = frozenset(
     }
 )
 
+# Every message here is user-facing. Each one must name the *actual* problem:
+# the generic "paused after repeated provider failures" line is reserved for a
+# genuinely open provider circuit and must never appear for an empty result, an
+# unresolved domain, a per-user budget, or a request-specific rejection.
 _SAFE_PROVIDER_MESSAGES = {
-    "provider_unauthorized": "The people data provider credentials could not be verified.",
-    "provider_forbidden": "The configured provider account does not have access to people search.",
+    "provider_unauthorized": (
+        "People search is temporarily unavailable because the provider "
+        "connection needs attention."
+    ),
+    "provider_forbidden": (
+        "People search is temporarily unavailable because the provider "
+        "connection needs attention."
+    ),
+    "provider_not_configured": (
+        "People search is temporarily unavailable because the provider "
+        "connection needs attention."
+    ),
+    "provider_configuration_circuit_open": (
+        "People search is temporarily unavailable because the provider "
+        "connection needs attention."
+    ),
     "provider_master_key_required_or_forbidden": (
         "Apollo complete-profile access is unavailable for the configured account."
     ),
-    "provider_rate_limited": "The people data provider rate limit has been reached.",
-    "provider_timeout": "The people search provider took too long to respond.",
-    "provider_circuit_open": "People search is temporarily paused after repeated provider failures.",
+    "provider_rate_limited": (
+        "The people provider is temporarily rate-limited. Try again after the "
+        "displayed retry time."
+    ),
+    "provider_timeout": (
+        "The people provider is temporarily unavailable. Cached results are "
+        "shown when available."
+    ),
+    "provider_network_error": (
+        "The people provider is temporarily unavailable. Cached results are "
+        "shown when available."
+    ),
+    "provider_unavailable": (
+        "The people provider is temporarily unavailable. Cached results are "
+        "shown when available."
+    ),
+    "provider_circuit_open": (
+        "The people provider is temporarily unavailable. Cached results are "
+        "shown when available."
+    ),
+    "provider_budget_exceeded": (
+        "People search is paused for today because the provider account's "
+        "daily search budget is used up."
+    ),
+    "provider_user_limit_exceeded": "You have reached today's people-search limit.",
+    "company_domain_unresolved": (
+        "We could not confidently identify this company in the people provider."
+    ),
+    "provider_route_invalid": (
+        "We could not complete this search because the provider request was "
+        "invalid."
+    ),
+    "no_results": (
+        "No strong recruiter, manager, or referral matches were found for this "
+        "company yet."
+    ),
     "provider_schema_error": "The people provider returned an unsupported response.",
-    "provider_request_invalid": "The people provider could not accept the profile request.",
+    "provider_request_invalid": (
+        "We could not complete this search because the provider request was "
+        "invalid."
+    ),
     "provider_response_invalid": "The people provider returned an unsupported response.",
+    "provider_request_cancelled": "The people search was cancelled before it completed.",
 }
 
 
@@ -120,14 +245,128 @@ def _safe_provider_message(reason: str) -> str:
     )
 
 
+# Which run status a typed failure produces. Keeping these distinct is what
+# lets the UI say "we could not identify the domain" instead of implying the
+# provider is down.
+_STATUS_FOR_CODE: dict[PeopleErrorCode, str] = {
+    PeopleErrorCode.COMPANY_DOMAIN_UNRESOLVED: "domain_unresolved",
+    # A genuinely malformed request. Reachable now only by a real request
+    # defect: a provider that answered a valid query with zero records is
+    # handled as an empty result, not as a rejection.
+    PeopleErrorCode.INVALID_INPUT: "invalid_request",
+    PeopleErrorCode.USER_BUDGET_EXHAUSTED: "user_budget_exhausted",
+    PeopleErrorCode.PROVIDER_BUDGET_EXHAUSTED: "provider_budget_exhausted",
+    PeopleErrorCode.AUTHENTICATION_FAILED: "provider_configuration_error",
+    PeopleErrorCode.AUTHORIZATION_FAILED: "provider_configuration_error",
+}
+
+# Every terminal state that is a failure rather than a result. Used wherever the
+# code previously hard-coded {"provider_unavailable", "persistence_error"}.
+PROVIDER_ERROR_STATUSES = frozenset(
+    {
+        "provider_unavailable",
+        "persistence_error",
+        "domain_unresolved",
+        "invalid_request",
+        "user_budget_exhausted",
+        "provider_budget_exhausted",
+        "provider_configuration_error",
+    }
+)
+
+# When several categories fail differently, report the most actionable one.
+# Configuration beats budget beats rate limiting beats transient beats
+# request-scoped, because that is the order in which an operator or user can
+# actually do something about it.
+_FAILURE_PRIORITY: tuple[PeopleErrorCode, ...] = (
+    PeopleErrorCode.AUTHENTICATION_FAILED,
+    PeopleErrorCode.AUTHORIZATION_FAILED,
+    PeopleErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+    PeopleErrorCode.USER_BUDGET_EXHAUSTED,
+    PeopleErrorCode.RATE_LIMITED,
+    PeopleErrorCode.PROVIDER_SERVER_ERROR,
+    PeopleErrorCode.PROVIDER_TIMEOUT,
+    PeopleErrorCode.NETWORK_ERROR,
+    PeopleErrorCode.COMPANY_DOMAIN_UNRESOLVED,
+    PeopleErrorCode.INVALID_INPUT,
+    PeopleErrorCode.REQUEST_CANCELLED,
+    PeopleErrorCode.UNKNOWN_PROVIDER_ERROR,
+)
+
+
+# Failures that mean the user's unit bought nothing. Configuration and
+# authentication problems are JobPilot's to fix; an unresolved company is our
+# own missing data; a cancelled request never ran. A provider that answered
+# — including a truthful no-match — is a completed search and stays charged.
+_REFUNDABLE_CODES: frozenset[PeopleErrorCode] = frozenset(
+    {
+        PeopleErrorCode.COMPANY_DOMAIN_UNRESOLVED,
+        PeopleErrorCode.AUTHENTICATION_FAILED,
+        PeopleErrorCode.AUTHORIZATION_FAILED,
+        PeopleErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+        PeopleErrorCode.REQUEST_CANCELLED,
+        PeopleErrorCode.INVALID_INPUT,
+    }
+)
+
+
+def _provider_work_started(provider: object) -> bool:
+    """Did any external search actually leave the building?
+
+    Company resolution alone does not count: it is JobPilot deciding whether it
+    can search at all, not the search the user asked for.
+    """
+
+    return bool(
+        [
+            call
+            for call in getattr(provider, "strategy_calls", [])
+            if isinstance(call, dict)
+        ]
+    )
+
+
+def _refundable_failure(code: PeopleErrorCode, provider: object) -> bool:
+    if code in _REFUNDABLE_CODES:
+        return True
+    # An open circuit that blocked the request before any search ran means no
+    # provider work happened, so the unit is returned.
+    return not _provider_work_started(provider)
+
+
+def _dominant_failure(reasons: list[str]) -> str | None:
+    """Pick the reason a human most needs to see out of a mixed failure list."""
+
+    if not reasons:
+        return None
+    by_code: dict[PeopleErrorCode, str] = {}
+    for reason in reasons:
+        by_code.setdefault(code_for_reason(reason), reason)
+    for code in _FAILURE_PRIORITY:
+        if code in by_code:
+            return by_code[code]
+    return reasons[0]
+
+
 def _log_provider_failure(exc: ProviderUnavailable, discovery_run_id: int) -> None:
     logger.warning(
-        "people_provider_failure reason=%s provider=%s http_status=%s duration_ms=%s discovery_run_id=%s",
+        "people_provider_failure reason=%s error_code=%s provider=%s "
+        "request_scoped=%s http_status=%s retry_after=%s duration_ms=%s "
+        "discovery_run_id=%s",
         exc.reason,
+        exc.code,
         exc.provider,
+        exc.request_scoped,
         exc.http_status if exc.http_status is not None else "none",
+        exc.retry_after_seconds if exc.retry_after_seconds is not None else "none",
         round(exc.duration_ms, 2) if exc.duration_ms is not None else "none",
         discovery_run_id,
+    )
+    metric(
+        "people_provider_requests_total",
+        provider=exc.provider,
+        status="error",
+        error_code=str(exc.code),
     )
 _RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 _RATE_LOCK = Lock()
@@ -159,6 +398,7 @@ def query_fingerprint(
     payload["discovery_strategy"] = strategy
     payload["employment_validation_version"] = EMPLOYMENT_VALIDATION_VERSION
     payload["employment_evidence_version"] = EMPLOYMENT_EVIDENCE_VERSION
+    payload["search_contract_version"] = PEOPLE_SEARCH_CONTRACT_VERSION
     if settings.people_primary_provider == "apollo":
         payload["provider_adapter_version"] = APOLLO_ENRICHMENT_ADAPTER_VERSION
     elif settings.people_primary_provider == "pdl":
@@ -228,6 +468,10 @@ def _fresh_no_match_run(
         .order_by(PeopleDiscoveryRun.completed_at.desc())
     )
     for run in runs:
+        if not run_is_compatible(run):
+            # Recorded under semantics that no longer hold: its "no match" may
+            # have meant something else entirely.
+            continue
         if (
             settings.people_employment_secondary_verification_enabled
             and not bool(
@@ -275,6 +519,9 @@ _RETRYABLE_PROVIDER_ERRORS = frozenset(
         "provider_unavailable",
         "discovery_failed",
         "recommendation_commit_failed",
+        # An unresolved domain is worth retrying once the company record is
+        # enriched, and retrying costs no provider credit.
+        "company_domain_unresolved",
     }
 )
 _NON_RETRYABLE_PROVIDER_ERRORS = frozenset(
@@ -282,11 +529,13 @@ _NON_RETRYABLE_PROVIDER_ERRORS = frozenset(
         "provider_not_configured",
         "provider_unauthorized",
         "provider_forbidden",
+        "provider_configuration_circuit_open",
         "provider_master_key_required_or_forbidden",
         "provider_request_invalid",
         "provider_response_invalid",
         "provider_budget_exceeded",
         "provider_user_limit_exceeded",
+        "provider_request_cancelled",
     }
 )
 
@@ -304,12 +553,12 @@ def _current_provider_error_run(
         user_id=user_id,
         fingerprints=[fingerprint],
     )
-    return (
-        latest
-        if latest
-        and latest.status in {"provider_unavailable", "persistence_error"}
-        else None
-    )
+    if latest is None or not run_is_compatible(latest):
+        # A legacy failure must never pin a job to a status produced under
+        # different provider semantics — that is what left one Toshiba job
+        # permanently showing "the provider request was invalid".
+        return None
+    return latest if latest.status in PROVIDER_ERROR_STATUSES else None
 
 
 def _provider_error_retry_state(
@@ -1064,23 +1313,42 @@ def _budget_check(db: Session, user_id: int) -> None:
     ) or 0
     global_used = int(legacy_global_used) + int(durable_global_used)
     user_used = int(legacy_user_used) + int(durable_user_used)
+    # Both limits below are measured in provider *credit units*, not user
+    # actions, so neither may be presented as the user's search limit. The
+    # user's allowance lives in app.people.quota and is counted in actions.
     if global_budget and global_used >= global_budget:
+        metric(
+            "people_budget_rejections_total",
+            provider=provider,
+            status="provider_account_budget",
+        )
         raise HTTPException(
             status_code=429,
             detail={
-                "code": "PEOPLE_GLOBAL_BUDGET_EXCEEDED",
-                "message": "People discovery is temporarily unavailable because today's usage limit was reached.",
+                "code": "PEOPLE_PROVIDER_BUDGET_EXCEEDED",
+                "message": (
+                    "People search is temporarily unavailable because the "
+                    "provider budget has been reached."
+                ),
                 "availability_reason": "provider_budget_exceeded",
                 "retryable": False,
             },
         )
     if per_user_budget and user_used >= per_user_budget:
+        metric(
+            "people_budget_rejections_total",
+            provider=provider,
+            status="provider_per_user_budget",
+        )
         raise HTTPException(
             status_code=429,
             detail={
-                "code": "PEOPLE_USER_BUDGET_EXCEEDED",
-                "message": "People discovery is temporarily unavailable because your daily usage limit was reached.",
-                "availability_reason": "provider_user_limit_exceeded",
+                "code": "PEOPLE_PROVIDER_BUDGET_EXCEEDED",
+                "message": (
+                    "People search is temporarily unavailable because the "
+                    "provider budget has been reached."
+                ),
+                "availability_reason": "provider_budget_exceeded",
                 "retryable": False,
             },
         )
@@ -1165,6 +1433,27 @@ _PEOPLE_CATEGORIES: tuple[PeopleCategory, ...] = (
     "potential_hiring_manager",
     "potential_referrer",
 )
+
+
+def _primary_provider_fingerprint() -> str:
+    """Account fingerprint for whichever provider is configured as primary."""
+
+    key = (
+        settings.pdl_api_key
+        if settings.people_primary_provider.lower() == "pdl"
+        else settings.apollo_api_key
+    )
+    return provider_account_fingerprint(key)
+
+
+def people_circuit_snapshot(operation: str = "people_search") -> CircuitSnapshot:
+    """Current circuit health for the configured primary people provider."""
+
+    return circuit_state(
+        provider=settings.people_primary_provider.lower(),
+        account_fingerprint=_primary_provider_fingerprint(),
+        operation=operation,
+    )
 
 
 def _people_result_ttl_days() -> int:
@@ -1443,6 +1732,162 @@ def allocate_enrichment_targets(
     return selected
 
 
+def _safe_user_reference(user_id: int) -> str:
+    """Stable, non-reversible user reference for logs."""
+
+    return hashlib.sha256(f"people-log-user:{user_id}".encode()).hexdigest()[:12]
+
+
+def _log_search_orchestration(
+    *,
+    run: PeopleDiscoveryRun,
+    job_id: int,
+    user_id: int,
+    profile: JobPeopleSearchProfile,
+    strategy: DiscoveryStrategy,
+    failures: list[str],
+    displayed: int,
+    started: float,
+    cache: str,
+) -> None:
+    """One structured line per orchestration request.
+
+    Deliberately excludes API keys, authorization headers, raw provider
+    payloads, and any personal contact record. The company name is business
+    data the job already carries; the user is referenced by a hashed id.
+    """
+
+    dominant = _dominant_failure(failures)
+    snapshot = people_circuit_snapshot()
+    logger.info(
+        "people_search_orchestration run_id=%s job_id=%s user_ref=%s "
+        "raw_company=%r normalized_company=%r canonical_domain=%s "
+        "domain_source=%s domain_confidence=%.2f role_family=%s provider=%s "
+        "strategy=%s cache=%s coalesced=%s circuit=%s error_code=%s "
+        "retry_after=%s latency_ms=%.1f results=%s status=%s",
+        run.id,
+        job_id,
+        _safe_user_reference(user_id),
+        profile.company_raw_name or profile.company_name,
+        profile.company_normalized_name,
+        profile.company_domain or "unresolved",
+        profile.company_evidence_source,
+        profile.domain_confidence,
+        profile.role_family or "none",
+        run.provider,
+        strategy,
+        cache,
+        provider_search_coalescer.inflight_count > 0,
+        snapshot.as_label(),
+        str(code_for_reason(dominant)) if dominant else "none",
+        snapshot.retry_after_seconds if snapshot.retry_after_seconds else "none",
+        (time.monotonic() - started) * 1000,
+        displayed,
+        run.status,
+    )
+    metric(
+        "people_search_requests_total",
+        provider=run.provider,
+        status=run.status,
+        error_code=str(code_for_reason(dominant)) if dominant else "none",
+    )
+    metric(
+        "people_domain_resolution_total",
+        result="resolved" if profile.company_domain else "unresolved",
+        source=profile.company_evidence_source,
+    )
+
+
+def _searched_the_provider(provider: object, queries: list[PeopleSearchQuery]) -> bool:
+    """Did a provider call actually happen for this category?
+
+    An empty result only means "nobody matched" when the provider was asked.
+    A category that produced no query at all was never asked.
+    """
+
+    if getattr(provider, "search_calls", 0):
+        return True
+    return bool(queries)
+
+
+async def _coalesced_search(
+    provider: object,
+    *,
+    profile: JobPeopleSearchProfile,
+    category: PeopleCategory,
+    queries: list[PeopleSearchQuery],
+    limit: int,
+    adapter_version: str,
+    company: object = None,
+) -> list[ProviderPerson]:
+    """One provider call per canonical search, under a bounded concurrency cap.
+
+    Ten job cards for the same company and role family expanded at once now
+    share a single provider request instead of producing ten. The provider is
+    only ever reached through this path so the concurrency limit cannot be
+    bypassed.
+
+    When the employer resolved to a PDL company identity, the progressive
+    ladder is used; otherwise the caller's prepared queries are.
+    """
+
+    provider_name = getattr(provider, "provider_name", "unknown")
+    use_ladder = bool(
+        company is not None
+        and getattr(company, "searchable", False)
+        and hasattr(provider, "search_current_company_people")
+    )
+    key = search_identity(
+        provider=provider_name,
+        adapter_version=(
+            f"{adapter_version}:{PDL_QUERY_LADDER_VERSION}"
+            if use_ladder
+            else adapter_version
+        ),
+        company_domain=(
+            getattr(company, "pdl_company_id", None) or profile.company_domain
+            if use_ladder
+            else profile.company_domain
+        ),
+        company_name=profile.company_normalized_name or profile.company_name,
+        role_family=profile.role_family,
+        category=category,
+        location=profile.location,
+        # Location is a soft signal in every current query builder, so it must
+        # not fragment the coalescing key.
+        location_material=False,
+    )
+
+    def _call():
+        if use_ladder:
+            return provider.search_current_company_people(
+                company=company,
+                category=category,
+                role_family=profile.role_family,
+                job_location=profile.location,
+                limit=limit,
+            )
+        return provider.search_people_category(queries, limit=limit)
+
+    started = time.monotonic()
+    try:
+        rows = await provider_search_coalescer.run(key, provider_name, _call)
+    finally:
+        metric(
+            "people_provider_latency",
+            round((time.monotonic() - started) * 1000, 2),
+            provider=provider_name,
+            category=category,
+        )
+    metric(
+        "people_provider_requests_total",
+        provider=provider_name,
+        status="ok",
+        category=category,
+    )
+    return rows
+
+
 @contextmanager
 def _redis_lock(
     job_id: int, fingerprint: str, *, namespace: str = "discover"
@@ -1559,10 +2004,17 @@ async def discover(
                 },
             )
 
+    # Burst first: a rejected burst must not consume a daily unit.
     rate_limit(f"discover:{user.id}", settings.people_discovery_rate_limit_per_hour)
+    # Provider cost control. Its exhaustion is an operational stop, not the
+    # user's entitlement running out, so it is checked before the reservation
+    # and reported with its own code.
     _budget_check(db, user.id)
     with _redis_lock(job_id, fingerprint) as acquired:
         if not acquired:
+            # A coalesced waiter pays nothing: the leader's single unit covers
+            # the work both callers are waiting on.
+            metric("people_discovery_coalesced_waiter_total", provider=settings.people_primary_provider)
             return {
                 "status": "in_progress",
                 "availability_reason": "available",
@@ -1601,6 +2053,12 @@ async def discover(
             and _provider_error_blocks_discovery(cached_provider_error)
         ):
             return recommendations_payload(db, user, job_id)
+        # Past every cache and coalescing opportunity: this is a genuine new
+        # search, so exactly one user unit is reserved here — never inside the
+        # category loop, the strategy ladder, or a provider adapter.
+        reservation = reserve_user_discovery(db, user)
+        db.commit()
+        metric("people_user_discoveries_total", provider=settings.people_primary_provider)
         profile = extract_job_people_profile(job, db)
         provider = get_people_provider()
         company_context = {
@@ -1626,6 +2084,7 @@ async def discover(
             ),
             "discovery_strategy_version": DISCOVERY_STRATEGY_VERSION,
             "discovery_strategy": strategy,
+            CONTRACT_VERSION_KEY: PEOPLE_SEARCH_CONTRACT_VERSION,
         }
         run = PeopleDiscoveryRun(
             job_id=job_id, user_id=user.id, status="running",
@@ -1687,10 +2146,15 @@ async def discover(
             for category in _PEOPLE_CATEGORIES
         }
         failures: list[str] = []
+        # Categories the provider answered successfully with zero people. These
+        # are results, not failures, and are what separates a truthful
+        # "no strong matches" from "the provider rejected the request".
+        no_match_categories: set[str] = set()
         searched = 0
         enriched: list[ProviderPerson] = []
         displayed: dict[str, int] = defaultdict(int)
         employment_outcomes: dict[str, int] = defaultdict(int)
+        pdl_company_identity = None
         pipeline_stage = "search"
         try:
             exact_queries = {
@@ -1706,6 +2170,41 @@ async def discover(
                 and settings.people_primary_provider == "pdl"
                 and hasattr(provider, "search_people_category")
             )
+            # Resolve the employer to a stable PDL company id before searching
+            # anyone. Searching by display name alone depends on the job feed
+            # and the provider spelling the company identically, which is what
+            # left Toshiba Global Commerce and Vanderbilt Health with nothing.
+            if category_pdl_search and hasattr(provider, "resolve_company"):
+                try:
+                    pdl_company_identity = await provider.resolve_company(
+                        raw_name=profile.company_raw_name or profile.company_name,
+                        normalized_name=profile.company_normalized_name,
+                        aliases=tuple(profile.company_aliases),
+                        verified_domain=profile.company_domain,
+                    )
+                except ProviderUnavailable as exc:
+                    failures.append(exc.reason)
+                    _log_provider_failure(exc, run.id)
+                    pdl_company_identity = None
+                if pdl_company_identity is not None:
+                    company_context.update(pdl_company_identity.safe_summary())
+                # No verified company evidence at all — no PDL company id and no
+                # verified domain. Searching anyway would return strangers who
+                # merely work somewhere similarly named, so nothing is searched
+                # and no credit is spent. This is distinct from "we searched and
+                # nobody matched".
+                company_unresolved = not (
+                    (pdl_company_identity is not None and pdl_company_identity.searchable)
+                    or profile.company_domain
+                )
+                if company_unresolved:
+                    failures.append("company_domain_unresolved")
+                    metric(
+                        "people_domain_resolution_total",
+                        result="unresolved",
+                        source=profile.company_evidence_source,
+                    )
+                    category_pdl_search = False
             total_pdl_remaining = (
                 settings.people_pdl_max_results_per_discovery
             )
@@ -1745,12 +2244,30 @@ async def discover(
                         diagnostics[category]["query_executed"] = True
                         diagnostics[category]["provider_call_count"] = 1
                         try:
-                            category_rows = (
-                                await provider.search_people_category(
-                                    queries,
-                                    limit=call_limit,
-                                )
+                            category_rows = await _coalesced_search(
+                                provider,
+                                profile=profile,
+                                category=category,
+                                queries=queries,
+                                limit=call_limit,
+                                adapter_version=str(
+                                    company_context["provider_adapter_version"]
+                                ),
+                                company=pdl_company_identity,
                             )
+                            if not category_rows and _searched_the_provider(
+                                provider, queries
+                            ):
+                                # The provider answered; nobody matched. That is
+                                # a result, and must never be reported as a
+                                # rejected request. An empty *query set* is not
+                                # an answer and must not land here.
+                                no_match_categories.add(category)
+                                metric(
+                                    "people_no_match_total",
+                                    provider=settings.people_primary_provider,
+                                    category=category,
+                                )
                         except ProviderUnavailable as exc:
                             failures.append(exc.reason)
                             _log_provider_failure(exc, run.id)
@@ -1777,7 +2294,16 @@ async def discover(
                         searched += normalized_count
                         total_pdl_remaining -= raw_count
                     elif call_limit:
+                        # A spent provider budget is its own operational state,
+                        # not a provider failure, and it must never move the
+                        # circuit.
                         failures.append("provider_budget_exceeded")
+                        metric(
+                            "people_budget_rejections_total",
+                            provider=settings.people_primary_provider,
+                            status="provider_budget",
+                            category=category,
+                        )
                         diagnostics[category]["rejection_reason_counts"][
                             "provider_budget_insufficient"
                         ] = 1
@@ -2309,11 +2835,37 @@ async def discover(
                 pipeline_stage = "employment_validation"
             usage = await provider.get_usage()
             run = db.get(PeopleDiscoveryRun, run.id)
-            run.status = "partial" if failures and any(displayed.values()) else "complete"
-            if failures and not any(displayed.values()):
-                run.status = "provider_unavailable"
-                run.failure_code = failures[0][:60]
-                run.safe_failure_message = _safe_provider_message(failures[0])
+            any_displayed = any(displayed.values())
+            # A category the provider answered with zero people is a result, not
+            # a failure. Only real failures can downgrade the run.
+            run.status = "partial" if failures and any_displayed else "complete"
+            if any_displayed and no_match_categories:
+                # Some categories matched and some were answered with nobody:
+                # the honest answer is partial coverage, not a provider problem.
+                run.status = "partial"
+            if failures and not any_displayed:
+                # The failure a human can act on wins, and its typed code — not
+                # the fact that *something* failed — decides the status. An
+                # unresolved domain or an exhausted user budget must never be
+                # reported as a provider outage.
+                dominant = _dominant_failure(failures) or "provider_unavailable"
+                dominant_code = code_for_reason(dominant)
+                run.status = _STATUS_FOR_CODE.get(
+                    dominant_code, "provider_unavailable"
+                )
+                run.failure_code = dominant[:60]
+                run.safe_failure_message = _safe_provider_message(dominant)
+                if _refundable_failure(dominant_code, provider):
+                    # Nothing useful was bought with the user's unit: either
+                    # JobPilot's own data was insufficient, or the provider was
+                    # never meaningfully reached. Give it back.
+                    reservation.refund(db, reason=str(dominant_code))
+            elif not any_displayed and no_match_categories:
+                # Every category the provider answered came back empty. The run
+                # completed successfully; there is simply nobody to show.
+                run.status = "complete"
+                run.failure_code = None
+                run.safe_failure_message = None
             run.records_searched = searched
             run.records_enriched = len(enriched)
             # Secondary employment verification has its own ledger and budget.
@@ -2332,7 +2884,7 @@ async def discover(
                     run.failure_code or "provider_unavailable",
                     now=completed_at,
                 )
-                if run.status == "provider_unavailable"
+                if run.status in PROVIDER_ERROR_STATUSES
                 else {}
             )
             durable_usage = _durable_usage_summary(db, run.id)
@@ -2377,6 +2929,17 @@ async def discover(
                 "people_discovery status=%s job_id=%s searched=%s displayed=%s credits=%s scoring_version=%s",
                 run.status, job_id, searched, sum(displayed.values()),
                 run.provider_credits_used, SCORING_VERSION,
+            )
+            _log_search_orchestration(
+                run=run,
+                job_id=job_id,
+                user_id=user.id,
+                profile=profile,
+                strategy=strategy,
+                failures=failures,
+                displayed=sum(displayed.values()),
+                started=started,
+                cache="miss",
             )
         except Exception as exc:
             db.rollback()
@@ -2455,6 +3018,10 @@ async def discover(
                 failed_run.records_searched = searched
                 failed_run.records_enriched = len(enriched)
                 failed_run.completed_at = completed_at
+                if not _provider_work_started(provider):
+                    # An internal failure before any provider call is not a
+                    # search the user should pay for.
+                    reservation.refund(db, reason="internal_error_before_provider_work")
                 db.commit()
             metric(
                 "people_discovery_provider_errors_total",
@@ -2507,6 +3074,13 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
     now = _now()
     stale = False
     expires_at: datetime | None = None
+    # Stale-while-error: when the provider is unavailable, previously verified
+    # results are far more useful than an error page. They are only served
+    # inside an explicitly configured window, and the response says so.
+    circuit_snapshot = people_circuit_snapshot()
+    serve_stale = bool(circuit_snapshot.open_kinds)
+    stale_cutoff = now - timedelta(days=max(0, settings.people_stale_result_window_days))
+    served_stale = False
     for recommendation, candidate, person in rows:
         expires = candidate.expires_at
         if expires.tzinfo is None:
@@ -2514,7 +3088,14 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         stale = stale or expires <= now
         expires_at = expires if expires_at is None else min(expires_at, expires)
         if expires <= now:
-            continue
+            if not (serve_stale and expires > stale_cutoff):
+                continue
+            served_stale = True
+            metric(
+                "people_cache_stale_served_total",
+                provider=settings.people_primary_provider,
+                circuit=circuit_snapshot.as_label(),
+            )
         email_lookup_allowed = (
             candidate.employment_validation_status
             in {
@@ -2586,27 +3167,40 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         user_id=user.id,
         fingerprints=current_fingerprints,
     )
+    if latest_current_run is not None and not run_is_compatible(latest_current_run):
+        # A run recorded without the current contract is legacy even when its
+        # fingerprint still matches: rows written before versioning existed
+        # carry statuses that were interpreted differently. Treating it as
+        # absent routes the job to the "refresh to check again" state.
+        latest_current_run = None
     latest_any_run = _latest_run(db, job_id=job_id, user_id=user.id)
     latest_run = latest_current_run or latest_any_run
     has_results = any(categories.values())
     stale_version = latest_any_run is not None and latest_current_run is None
     stale_strategy_without_results = stale_version and not has_results
     response_status = "complete" if has_results else "not_started"
+    if (
+        has_results
+        and latest_current_run is not None
+        and latest_current_run.status == "partial"
+    ):
+        # People were found, but at least one category was answered with
+        # nobody. Saying "complete" would overstate the coverage.
+        response_status = "partial"
     warnings: list[str] = []
     if stale_strategy_without_results:
         response_status = "stale"
         warnings.append(
             "Contact discovery has been upgraded. Refresh to check again."
         )
+        if latest_any_run is not None and not run_is_compatible(latest_any_run):
+            metric(
+                "people_legacy_cache_invalidations_total",
+                provider=latest_any_run.provider or "unknown",
+                status=latest_any_run.status,
+            )
     elif not has_results and latest_run and latest_run.status in {"running"}:
         response_status = "in_progress"
-    elif (
-        not has_results
-        and latest_run
-        and latest_run.status == "provider_unavailable"
-    ):
-        response_status = "provider_unavailable"
-        warnings.append(latest_run.safe_failure_message or "Professional data provider unavailable.")
     elif (
         not has_results
         and latest_run
@@ -2620,6 +3214,18 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
                 "results. No additional search will run unless you retry."
             )
         )
+    elif (
+        not has_results
+        and latest_run
+        and latest_run.status in PROVIDER_ERROR_STATUSES
+    ):
+        # Each failure keeps its own status so the UI can explain the real
+        # cause instead of the old catch-all "temporarily paused" line.
+        response_status = latest_run.status
+        warnings.append(
+            latest_run.safe_failure_message
+            or _safe_provider_message(latest_run.failure_code or "")
+        )
     elif not has_results and latest_run and latest_run.status == "partial":
         response_status = "partial"
         warnings.append("Some professional data sources were unavailable; showing reliable partial results.")
@@ -2630,13 +3236,18 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         warnings.append("Previous results are stale. Refresh is available.")
     availability_reason = (
         latest_run.failure_code
+        # A legacy run's failure_code was written under provider semantics that
+        # no longer hold, so it must not be surfaced as the current reason.
+        # Doing so is what left one Toshiba job permanently reporting
+        # "the provider request was invalid" while an identical job did not.
         if latest_run
+        and run_is_compatible(latest_run)
         and (
-            response_status in {"provider_unavailable", "persistence_error"}
+            response_status in PROVIDER_ERROR_STATUSES
             or (
                 response_status == "stale"
                 and latest_run.status
-                in {"provider_unavailable", "persistence_error"}
+                in PROVIDER_ERROR_STATUSES
             )
         )
         else "available"
@@ -2653,10 +3264,7 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
         # A provider-schema failure becomes retryable only when its adapter
         # fingerprint is obsolete. The POST remains an explicit user action.
         retry_eligible = True
-    elif latest_run and latest_run.status in {
-        "provider_unavailable",
-        "persistence_error",
-    }:
+    elif latest_run and latest_run.status in PROVIDER_ERROR_STATUSES:
         (
             retry_eligible,
             retry_after_seconds,
@@ -2692,12 +3300,25 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             if isinstance(value, dict)
         )
     )
+    if has_results:
+        metric(
+            "people_results_total",
+            sum(len(items) for items in categories.values()),
+            provider=settings.people_primary_provider,
+            status="stale" if served_stale else "fresh",
+        )
     return {
         "status": response_status,
         "availability_reason": availability_reason,
         "retry_eligible": retry_eligible,
         "retry_after_seconds": retry_after_seconds,
         "retry_eligible_at": retry_eligible_at,
+        # Tells the client these results predate the provider outage, so it can
+        # label them as cached instead of presenting them as a fresh search.
+        "result_freshness": (
+            "stale" if served_stale else "fresh" if has_results else "none"
+        ),
+        "provider_circuit": circuit_snapshot.as_label(),
         "beta": is_beta(user),
         "generated_at": latest_run.completed_at if latest_run else None,
         "expires_at": expires_at,
@@ -2714,7 +3335,7 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             "refresh_eligible": response_status == "stale"
             or (
                 response_status
-                in {"provider_unavailable", "persistence_error"}
+                in PROVIDER_ERROR_STATUSES
                 and retry_eligible
             ),
             "exact_company_search_completed": exact_no_match is not None
@@ -2724,6 +3345,9 @@ def recommendations_payload(db: Session, user: User, job_id: int) -> dict:
             "broaden_attempted": broaden_attempted,
         },
         "warnings": warnings,
+        # The user's remaining allowance, counted in deliberate actions. Reading
+        # this payload never consumes any of it.
+        "quota": quota_snapshot(db, user).as_payload(),
         "controls": {
             "email_discovery": settings.people_email_discovery_enabled,
             "outreach_drafting": settings.people_outreach_drafting_enabled,
@@ -2947,15 +3571,32 @@ def outreach_draft(
 ) -> dict:
     if not settings.people_outreach_drafting_enabled:
         raise HTTPException(status_code=404, detail="Outreach drafting is disabled")
+    started = time.monotonic()
     recommendation, candidate, person = owned_recommendation(db, user, job_id, recommendation_id)
+    metric(
+        "people_outreach_draft_requests_total",
+        channel=request.message_type,
+        category=candidate.candidate_category,
+    )
+    # The gate must match what the UI is allowed to *show*. It previously
+    # accepted only ``confirmed_exact_company_verified`` while the card and the
+    # work-email action both accept the full displayable set, so every person
+    # discovered through PDL — which never carries an independent freshness
+    # verification — rendered a draft button that always answered 409.
     if (
         recommendation.suppressed_at is not None
         or candidate.employment_validation_version
         != EMPLOYMENT_VALIDATION_VERSION
         or candidate.employment_validation_status
-        != "confirmed_exact_company_verified"
+        not in DISPLAYABLE_EMPLOYMENT_STATUSES
         or person.employment_revalidation_required
     ):
+        metric(
+            "people_outreach_draft_failures_total",
+            channel=request.message_type,
+            stage="employment_validation",
+            error_code="PEOPLE_EMPLOYMENT_REVALIDATION_REQUIRED",
+        )
         raise HTTPException(
             status_code=409,
             detail={
@@ -3121,6 +3762,16 @@ def outreach_draft(
         }[candidate.candidate_category]
         body = f"{core}\n\n{direct_context}\n\n{close}\n{name}"
         subject = None
+    # Channel handoff evidence. The client opens LinkedIn or an email composer
+    # only from these values — it never derives a profile URL from a name or a
+    # company domain, because a guessed URL points at a real stranger.
+    linkedin_url = safe_profile_url(person.linkedin_url)
+    verified_email = (
+        decrypt_email(person.professional_email_ciphertext)
+        if person.email_verification_status == "verified"
+        else None
+    )
+    generation_path = "deterministic_template"
     response = {
         "message_type": request.message_type,
         "subject": subject,
@@ -3133,7 +3784,40 @@ def outreach_draft(
         "requires_manual_review": True,
         "requires_user_review": True,
         "sent": False,
+        # Every draft is built from verified fields by a deterministic template,
+        # so there is no model call to fail and nothing to fall back from.
+        "generation_path": generation_path,
+        "template_version": OUTREACH_TEMPLATE_VERSION,
+        "recipient_name": _display_name(person.canonical_full_name),
+        "recipient_category": candidate.candidate_category,
+        "linkedin_url": linkedin_url,
+        "linkedin_available": linkedin_url is not None,
+        "professional_email": verified_email,
+        "email_available": verified_email is not None,
     }
+    metric(
+        "people_outreach_draft_success_total",
+        channel=request.message_type,
+        generation_path=generation_path,
+        category=candidate.candidate_category,
+    )
+    logger.info(
+        "people_outreach_draft job_id=%s recommendation_id=%s user_ref=%s "
+        "channel=%s category=%s generation_path=%s template=%s cache=miss "
+        "grounding=passed linkedin_available=%s email_available=%s "
+        "character_count=%s duration_ms=%.1f",
+        job_id,
+        recommendation.id,
+        _safe_user_reference(user.id),
+        request.message_type,
+        candidate.candidate_category,
+        generation_path,
+        OUTREACH_TEMPLATE_VERSION,
+        linkedin_url is not None,
+        verified_email is not None,
+        len(body),
+        (time.monotonic() - started) * 1000,
+    )
     record_audit(db, user.id, "people_outreach_draft_generated", {
         "job_id": job_id, "recommendation_id": recommendation.id,
         "draft_type": request.draft_type, "message_type": request.message_type,

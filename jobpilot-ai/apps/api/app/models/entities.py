@@ -351,11 +351,19 @@ class JobPosting(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int | None] = mapped_column(ForeignKey("job_sources.id", ondelete="SET NULL"))
     external_id: Mapped[str] = mapped_column(String(255), index=True)
-    title: Mapped[str] = mapped_column(String(255), index=True)
-    company: Mapped[str] = mapped_column(String(255), index=True)
+    # Externally supplied prose and URLs are unbounded in practice. A Flexport
+    # posting whose location listed every office city was 255+ characters and
+    # aborted the whole discovery batch with StringDataRightTruncation, so
+    # these columns hold the complete source value rather than a guess at a
+    # maximum. True identifiers and controlled enums below stay bounded.
+    title: Mapped[str] = mapped_column(Text, index=True)
+    company: Mapped[str] = mapped_column(Text, index=True)
     company_domain: Mapped[str | None] = mapped_column(String(255))
-    company_logo_url: Mapped[str | None] = mapped_column(String(1000))
-    location: Mapped[str | None] = mapped_column(String(255), index=True)
+    company_logo_url: Mapped[str | None] = mapped_column(Text)
+    location: Mapped[str | None] = mapped_column(Text, index=True)
+    # Short, derived label for cards and lists. Never a substitute for
+    # ``location``, which keeps the full normalized value.
+    location_display: Mapped[str | None] = mapped_column(String(120))
     remote_type: Mapped[str | None] = mapped_column(String(80))
     employment_type: Mapped[str | None] = mapped_column(String(80))
     seniority_level: Mapped[str | None] = mapped_column(String(80))
@@ -370,15 +378,15 @@ class JobPosting(Base):
     # to expire jobs that disappear from the official board (see Part 9).
     last_seen_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", index=True)
-    application_url: Mapped[str] = mapped_column(String(1000))
-    source_url: Mapped[str] = mapped_column(String(1000))
+    application_url: Mapped[str] = mapped_column(Text)
+    source_url: Mapped[str] = mapped_column(Text)
     description_raw: Mapped[str] = mapped_column(Text, default="")
     description_clean: Mapped[str] = mapped_column(Text, default="")
     required_skills: Mapped[list] = mapped_column(JsonType, default=list)
     preferred_skills: Mapped[list] = mapped_column(JsonType, default=list)
     responsibilities: Mapped[list] = mapped_column(JsonType, default=list)
     years_experience_min: Mapped[float | None] = mapped_column(Float)
-    degree_requirement: Mapped[str | None] = mapped_column(String(200))
+    degree_requirement: Mapped[str | None] = mapped_column(Text)
     work_authorization_notes: Mapped[str | None] = mapped_column(Text)
     parse_confidence: Mapped[float | None] = mapped_column(Float)
     raw_json: Mapped[dict] = mapped_column(JsonType, default=dict)
@@ -618,6 +626,33 @@ class PeopleDiscoveryRun(Base):
     safe_failure_message: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[DateTimeValue] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[DateTimeValue | None] = mapped_column(DateTime(timezone=True))
+
+
+class PeopleUserDiscoveryQuota(Base):
+    """One row per user per quota day, counting deliberate user actions.
+
+    Deliberately separate from ``PeopleProviderOperationUsage``: that table
+    counts provider *credit units*, where one PDL search costs one unit per
+    record returned. Charging a user's search limit against it meant a single
+    "Find people" could cost dozens of units, so 14 actions exhausted a limit
+    of 100. This table counts actions, and only actions.
+    """
+
+    __tablename__ = "people_user_discovery_quota"
+    __table_args__ = (
+        UniqueConstraint("user_id", "quota_date", name="uq_people_user_quota_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # Day boundary in the configured reset timezone, stored as a plain date.
+    quota_date: Mapped[str] = mapped_column(String(10), index=True)
+    discoveries_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    updated_at: Mapped[DateTimeValue] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class PeopleProviderOperationUsage(Base):

@@ -57,3 +57,17 @@ def _reset_people_bulk_capability() -> None:
 
     clear_local_bulk_capabilities()
     clear_local_complete_person_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_people_circuits() -> None:
+    """People circuit state is shared per provider account.
+
+    Leaving an open circuit behind would make an unrelated later test look like
+    a provider outage, which is exactly the production failure mode this suite
+    exists to prevent."""
+    from app.people.circuit import clear_local_circuits
+    from app.people.coalescing import provider_search_coalescer
+
+    clear_local_circuits()
+    provider_search_coalescer.clear()

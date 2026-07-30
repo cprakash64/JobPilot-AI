@@ -27,6 +27,7 @@ from app.jobs.job_eligibility_service import evaluate_eligibility
 from app.jobs.job_ingestion_service import (
     _job_view,  # noqa: PLC2701 - internal shared mapper
     build_profile_view,
+    compact_location,
     discover_jobs,
     rematch_user,
 )
@@ -399,6 +400,11 @@ def _serialize_card(
         "company_logo_proxy_path": f"/jobs/companies/{normalize_company_key(job.company or '')}/logo" if company_logo_url else None,
         "source": source.type if source else None,
         "location": job.location,
+        # Short label for cards; the full multi-city value stays in `location`.
+        "location_display": (
+            job.location_display
+            or compact_location(job.location)
+        ),
         "workplace_type": job.remote_type,
         "employment_type": job.employment_type,
         "seniority_level": job.seniority_level,

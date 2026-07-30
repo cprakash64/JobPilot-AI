@@ -162,6 +162,47 @@ class Settings(BaseSettings):
     people_referrer_enrichment_reserve: int = 2
     people_discovery_rate_limit_per_hour: int = 10
     people_email_rate_limit_per_hour: int = 10
+    # --- User discovery quota ------------------------------------------------
+    # Counted in deliberate user actions. Distinct from the PDL/Apollo credit
+    # budgets below, which are measured in provider credit units (one per
+    # record a search returns) and exist to control operational cost.
+    people_user_daily_discovery_limit: int = 20
+    people_internal_user_daily_discovery_limit: int = 100
+    # IANA name whose midnight resets the daily allowance.
+    people_quota_reset_timezone: str = "UTC"
+    # Circuit breakers. Separate cooldowns per circuit kind: a transient blip
+    # should clear quickly, a bad credential should not be retried in a loop,
+    # and an exhausted provider budget should wait for its window to roll.
+    people_circuit_failure_threshold: int = 5
+    people_circuit_failure_window_seconds: int = 120
+    people_circuit_cooldown_seconds: int = 60
+    people_circuit_max_cooldown_seconds: int = 600
+    people_circuit_configuration_threshold: int = 2
+    people_circuit_configuration_cooldown_seconds: int = 300
+    people_circuit_budget_cooldown_seconds: int = 900
+    people_circuit_rate_limit_threshold: int = 8
+    # Bounded fan-out for paid people-provider calls per API instance.
+    people_provider_max_concurrent_calls: int = 2
+    people_provider_coalesce_wait_seconds: float = 20.0
+    # Serve previously stored results while the provider is unavailable.
+    people_stale_result_window_days: int = 14
+    # Reject an inferred hiring-company domain below this confidence.
+    people_domain_min_confidence: float = 0.6
+    # --- PDL company identity and progressive search -------------------------
+    # PDL Company Enrichment returns a 1-10 likelihood; below this we treat the
+    # company as unresolved rather than guessing at a similarly-named one.
+    people_pdl_company_min_likelihood: int = 6
+    people_pdl_company_resolution_enabled: bool = True
+    people_pdl_company_cache_ttl_seconds: int = 2_592_000
+    # Bounded title-relaxation ladder. The company constraint never relaxes.
+    people_pdl_progressive_search_enabled: bool = True
+    people_pdl_max_query_strategies: int = 3
+    people_pdl_location_required: bool = False
+    people_pdl_search_result_limit: int = 25
+    people_pdl_negative_cache_ttl_seconds: int = 21_600
+    # Hard ceiling on provider calls for one discovery, across all categories
+    # and strategies, so relaxation can never multiply spend without bound.
+    people_pdl_max_provider_calls_per_discovery: int = 8
 
     @field_validator(
         "cors_origins",
